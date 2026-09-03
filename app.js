@@ -11,7 +11,7 @@ const cats={Casa:'#ab858f',Cumpleaños:'#a0acb9',Familia:'#9ebdb8',Médico:'#b3a
 const habitColors=['#7F9A7D','#9CABC8','#A0ACB9','#9EBDB8','#B3AD8C','#CBAFAB','#9998B1','#8F9E92'];
 const foodTypes=['Comidas','Cenas','Dulces','Pan','Preparaciones'];
 const fmt=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR'}).format(n||0);
-const todayKey=()=>{const d=new Date();return new Date(d.getFullYear(),d.getMonth(),d.getDate()).toISOString().slice(0,10)};
+const todayKey=()=>{const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};
 const today=new Date();
 function save(){Object.keys(state).filter(k=>Array.isArray(state[k])).forEach(k=>localStorage.setItem(KEY+k,JSON.stringify(state[k])))}
 function go(v){state.view=v;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));render()}
@@ -25,7 +25,7 @@ function home(c){
  const spent=state.expenses.filter(x=>x.type==='gasto'&&sameMonth(x.date)).reduce((a,x)=>a+x.amount,0);
  c.innerHTML=`<div class="grid">
  <div class="card span-8"><div class="muted">Hoy</div><div class="metric">${cap(d)}</div><div class="calendar-mini"></div></div>
- <div class="card span-4"><div class="row"><h3>Ahora</h3><span class="badge">${pending}</span></div><div class="list compact"><div class="item"><b>${pending}</b> tareas pendientes</div><div class="item">${todayHabitsSummary()}</div></div><button class="primary" onclick="go('tasks')">Ver tareas</button></div>
+ <div class="card span-4"><div class="row"><h3>Ahora</h3><span class="badge">${pending}</span></div><div class="list compact"><div class="item"><b>${pending}</b> tareas pendientes</div>${homePendingTasks()}<div class="item">${todayHabitsSummary()}</div></div><button class="primary" onclick="go('tasks')">Ver tareas</button></div>
  <div class="card span-4"><h3>Tareas</h3><div class="metric">${pending}</div><span class="muted">pendientes</span></div>
  <div class="card span-4"><h3>Gastos este mes</h3><div class="metric">${fmt(spent)}</div><span class="muted">de momento</span></div>
  <div class="card span-4"><h3>Comidas</h3><div class="item">Comida pendiente de planificar</div><div class="item">Cena pendiente de planificar</div></div>
@@ -34,6 +34,7 @@ function home(c){
  </div>`;
  renderMiniCalendar(c.querySelector('.calendar-mini'));
 }
+function homePendingTasks(){const list=state.tasks.filter(x=>!x.done).sort(taskSort).slice(0,3);if(!list.length)return '<div class="item muted">No hay tareas pendientes.</div>';return list.map(t=>`<button class="home-task" onclick="go('tasks')"><span>${esc(t.title)}</span>${isOverdue(t)?'<span class="overdue-label">Atrasada</span>':''}</button>`).join('')}
 function todayHabitsSummary(){const n=state.habits.length;if(!n)return 'Aún no tienes hábitos';const done=state.habits.filter(h=>isHabitDone(h,todayKey())).length;return `${done} de ${n} hábitos completados`}
 function habitButtons(){if(!state.habits.length)return `<div class="empty-state"><span>No hay hábitos todavía.</span><button class="secondary" onclick="openModal('Nuevo hábito',habitForm())">+ Añadir hábito</button></div>`;return state.habits.map(h=>habitButton(h,true)).join('')}
 function habitButton(h,home=false){const done=isHabitDone(h,todayKey());return `<button class="habit-button ${done?'done':''}" style="--habit-color:${h.color||habitColors[0]}" onclick="toggleHabit('${h.id}')" aria-label="${esc(h.name)} ${done?'completado':'pendiente'}"><span class="habit-check">${done?'✓':''}</span><span class="habit-name">${esc(h.name)}</span>${h.reminder?`<span class="habit-reminder">${h.reminderTime||''}</span>`:''}<span class="habit-frequency">${frequencyLabel(h)}</span></button>`}
@@ -107,6 +108,7 @@ function tasks(c){
         <button class="filter" onclick="filterTasks('nodate',this)">Sin fecha</button>
       </div>
       <div id="taskList" class="list task-list">${pending.length?pending.map(taskCard).join(""):'<div class="empty-state"><span>No tienes tareas pendientes.</span><button class="secondary" onclick="newTaskFromEmpty()">+ Añadir tarea</button></div>'}</div>
+      <details class="completed-tasks"><summary>Tareas completadas (${all.filter(t=>t.done).length})</summary><div class="list">${all.filter(t=>t.done).sort((a,b)=>(b.completedAt||"").localeCompare(a.completedAt||"")).slice(0,20).map(t=>`<div class="completed-task-row"><span class="completed-mark">✓</span><span>${esc(t.title)}</span><button class="secondary small" onclick="restoreTask('${t.id}')">Reabrir</button></div>`).join("")||'<div class="muted">Todavía no hay tareas completadas.</div>'}</div></details>
     </div>
     <div class="card span-12">
       <div class="row"><div><h3>Categorías</h3><span class="muted">Una tarea puede pertenecer a varias.</span></div></div>
@@ -117,13 +119,15 @@ function tasks(c){
 function taskCard(t){
   const date=t.date?new Date(t.date+"T12:00").toLocaleDateString("es-ES",{day:"numeric",month:"short"}):"Sin fecha";
   const meta=[date,t.time||"",t.priority||"Normal"].filter(Boolean).join(" · ");
+  const subs=(t.subtasks||[]).filter(s=>s.title);
   return `<div class="item task-card ${isOverdue(t)?"overdue":""}">
     <div class="task-main">
-      <label class="task-check"><input type="checkbox" onchange="completeTask('${t.id}')"><span></span></label>
+      <label class="task-check" title="Marcar como completada"><input type="checkbox" onchange="completeTask('${t.id}')"><span></span></label>
       <div class="task-body">
         <button class="task-title" onclick="editTask('${t.id}')">${esc(t.title)}</button>
         <div class="task-meta">${taskCategoryPills(t)}<span>${esc(meta)}</span>${t.reminder?`<span class="reminder-tag">Recordatorio${t.reminderTime?" · "+t.reminderTime:""}</span>`:""}${t.repeat?`<span class="repeat-tag">↻ ${esc(t.repeat.label||"Repite")}</span>`:""}</div>
         ${t.notes?`<div class="muted task-notes">${esc(t.notes)}</div>`:""}
+        ${subs.length?`<div class="subtask-list">${subs.map(s=>`<label class="subtask-row"><input type="checkbox" ${s.done?'checked':''} onchange="toggleSubtask('${t.id}','${s.id}')"><span class="subtask-box"></span><span class="subtask-title ${s.done?'completed':''}">${esc(s.title)}</span></label>`).join("")}</div>`:""}
         ${taskProgress(t)}
         ${t.attachments?.length?`<div class="attachment-count">📎 ${t.attachments.length} ${t.attachments.length===1?"archivo":"archivos"}</div>`:""}
       </div>
@@ -192,7 +196,7 @@ async function saveTask(id){
   t.date=document.querySelector("#fTaskDate").value;
   t.time=document.querySelector("#fTaskTime").value;
   t.priority=document.querySelector("#fTaskPriority").value;
-  t.categories=[...document.querySelectorAll(".task-category:checked")].map(x=>x.value);
+  t.categories=[...document.querySelectorAll(".task-category:checked")].map(x=>x.value);t.category=t.categories[0]||'';
   t.notes=document.querySelector("#fTaskNotes").value.trim();
   t.reminder=document.querySelector("#fTaskReminder").value;
   const rt=document.querySelector("#fTaskRepeat").value;
@@ -214,7 +218,14 @@ function fileToData(file){
 }
 function editTask(id){const t=state.tasks.find(x=>x.id===id);if(t)openModal("Editar tarea",taskForm(t));}
 function removeTaskAttachment(id,index){const t=state.tasks.find(x=>x.id===id);if(!t)return;t.attachments.splice(index,1);save();openModal("Editar tarea",taskForm(t));}
+function toggleSubtask(taskId,subtaskId){
+  const t=state.tasks.find(x=>x.id===taskId);if(!t)return;
+  const sub=(t.subtasks||[]).find(x=>x.id===subtaskId);if(!sub)return;
+  sub.done=!sub.done;
+  save();render();
+}
 function deleteTask(id){state.tasks=state.tasks.filter(x=>x.id!==id);save();closeModal();render();}
+function restoreTask(id){const t=state.tasks.find(x=>x.id===id);if(!t)return;t.done=false;t.status='pending';t.completedAt=null;save();render()}
 function nextTaskDate(date,type,days){
   const d=new Date(date+"T12:00");
   if(type==="daily")d.setDate(d.getDate()+1);

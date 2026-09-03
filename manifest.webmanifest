@@ -1,1 +1,10 @@
-{"name":"Get Shit Together","short_name":"GST","start_url":"./","display":"standalone","background_color":"#F1EFEA","theme_color":"#F1EFEA","lang":"es","icons":[]}
+{
+  "name":"Mis cosas",
+  "short_name":"Mis cosas",
+  "start_url":"./",
+  "display":"standalone",
+  "background_color":"#F1EFEA",
+  "theme_color":"#F1EFEA",
+  "lang":"es",
+  "description":"Tu organizador personal"
+}

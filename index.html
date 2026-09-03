@@ -1,6 +1,47 @@
-<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#F1EFEA"><link rel="manifest" href="manifest.webmanifest"><title>Get Shit Together</title><link rel="stylesheet" href="styles.css"></head><body>
-<div class="app"><aside class="sidebar"><div class="brand">Get Shit Together</div><nav id="nav"><button data-view="home" class="active">Inicio</button><button data-view="tasks">Tareas</button><button data-view="expenses">Gastos</button><button data-view="food">Comidas</button><button data-view="calendar">Calendario</button><div class="sep"></div><button data-view="settings">Ajustes</button></nav></aside>
-<main><header><button id="menuBtn" class="icon mobile">☰</button><div><h1 id="pageTitle">Inicio</h1><p id="pageSubtitle"></p></div><button id="quickAdd" class="add">+</button></header><section id="content"></section></main>
-<nav class="bottom-nav"><button data-view="home" class="active">Inicio</button><button data-view="tasks">Tareas</button><button data-view="expenses">Gastos</button><button data-view="food">Comidas</button></nav></div>
-<div id="modal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h2 id="modalTitle"></h2><button id="closeModal">×</button></div><div id="modalBody"></div></div></div>
-<script src="app.js"></script><script>if("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js")</script></body></html>
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#F1EFEA">
+<meta name="description" content="Mis cosas — tu organizador personal">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Mis cosas</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+<aside class="sidebar">
+  <div class="brand">Mis cosas</div>
+  <nav id="nav">
+    <button data-view="home" class="active">Inicio</button>
+    <button data-view="tasks">Tareas</button>
+    <button data-view="expenses">Gastos</button>
+    <button data-view="food">Comidas</button>
+    <div class="sep"></div>
+    <button data-view="calendar">Calendario</button>
+    <button data-view="habits">Hábitos</button>
+    <div class="sep"></div>
+    <button data-view="settings">Ajustes</button>
+  </nav>
+</aside>
+<main>
+<header>
+  <button id="menuBtn" class="icon mobile" aria-label="Menú">☰</button>
+  <div><h1 id="pageTitle">Inicio</h1><p id="pageSubtitle"></p></div>
+  <button id="quickAdd" class="add" aria-label="Añadir">+</button>
+</header>
+<section id="content"></section>
+</main>
+<nav class="bottom-nav">
+  <button data-view="home" class="active">Inicio</button>
+  <button data-view="tasks">Tareas</button>
+  <button data-view="expenses">Gastos</button>
+  <button data-view="food">Comidas</button>
+</nav>
+</div>
+<div id="modal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h2 id="modalTitle"></h2><button id="closeModal" aria-label="Cerrar">×</button></div><div id="modalBody"></div></div></div>
+<script src="app.js"></script>
+<script>if('serviceWorker' in navigator) navigator.serviceWorker.register('service-worker.js');</script>
+</body>
+</html>

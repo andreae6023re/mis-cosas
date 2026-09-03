@@ -51,7 +51,189 @@ function saveHabit(id){const name=document.querySelector('#fHabitName').value.tr
 function editHabit(id){const h=state.habits.find(x=>x.id===id);if(h)openModal('Editar hábito',habitForm(h))}
 function deleteHabit(id){state.habits=state.habits.filter(x=>x.id!==id);save();closeModal();render()}
 function renderMiniCalendar(el){let y=today.getFullYear(),m=today.getMonth(),first=(new Date(y,m,1).getDay()+6)%7,days=new Date(y,m+1,0).getDate();let s='<div class="calendar">'+['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('');for(let i=0;i<first;i++)s+='<div></div>';for(let d=1;d<=days;d++){let ev=d%5===0?`<span class="dot" style="background:${cats.Social}"></span>`:'';s+=`<div class="day ${d===today.getDate()?'today':''}"><b>${d}</b><div>${ev}</div></div>`}el.innerHTML=s+'</div>'}
-function tasks(c){const pending=state.tasks.filter(x=>!x.done).sort((a,b)=>((a.date||'9999')+(a.time||'')).localeCompare((b.date||'9999')+(b.time||'')));c.innerHTML=`<div class="card"><div class="row"><h3>Pendientes</h3><span class="muted">${pending.length}</span></div><div class="list">${pending.length?pending.map(x=>`<div class="item task ${x.date&&new Date(x.date)<new Date(new Date().toDateString())?'overdue':''}"><input type="checkbox" onchange="completeTask('${x.id}')"><div><b>${esc(x.title)}</b><div class="muted">${x.date?new Date(x.date).toLocaleDateString('es-ES'):'Sin fecha'} · ${x.priority||'Normal'}</div></div></div>`).join(''):'<div class="muted">No tienes tareas pendientes.</div>'}</div></div><div class="card" style="margin-top:18px"><h3>Categorías</h3><div class="actions"><span class="pill">Casas</span><span class="pill">Coches</span><span class="pill">Personal</span></div></div>`}
+const taskCategories={
+  Casas:["Mi casa","Casa mamá","Casa Suances","Casa pueblo","Casa Ara"],
+  Coches:["Mercedes","Peugeot"],
+  Personal:["Personal"]
+};
+const taskCategoryLabels=["Casas","Coches","Personal"];
+
+function normalizeTask(t){
+  if(!Array.isArray(t.categories)){
+    t.categories=t.category?[t.category]:[];
+  }
+  t.subtasks=Array.isArray(t.subtasks)?t.subtasks:[];
+  t.attachments=Array.isArray(t.attachments)?t.attachments:[];
+  t.priority=t.priority||"Normal";
+  t.status=t.done?"done":"pending";
+  return t;
+}
+state.tasks=state.tasks.map(normalizeTask);
+
+function isOverdue(t){
+  if(t.done || !t.date)return false;
+  const end=new Date(t.date+"T"+(t.time||"23:59"));
+  return end < new Date();
+}
+function taskSort(a,b){
+  const rank=t=>t.done?4:(isOverdue(t)?0:(t.date===todayKey()?1:(t.date?2:3)));
+  return rank(a)-rank(b) || ((a.date||"9999")+(a.time||"")).localeCompare((b.date||"9999")+(b.time||""));
+}
+function taskCategoryPills(t){
+  return (t.categories||[]).map(x=>`<span class="pill task-cat">${esc(x)}</span>`).join("");
+}
+function taskProgress(t){
+  const total=t.subtasks?.length||0;
+  if(!total)return "";
+  const done=t.subtasks.filter(s=>s.done).length;
+  return `<div class="subprogress"><span>${done}/${total} subtareas</span><div><i style="width:${done/total*100}%"></i></div></div>`;
+}
+function tasks(c){
+  const all=state.tasks.map(normalizeTask);
+  const pending=all.filter(t=>!t.done).sort(taskSort);
+  const overdue=pending.filter(isOverdue).length;
+  const todayCount=pending.filter(t=>t.date===todayKey()&&!isOverdue(t)).length;
+  c.innerHTML=`<div class="grid">
+    <div class="card span-12">
+      <div class="row task-toolbar">
+        <div><h3>Mis tareas</h3><span class="muted">${pending.length} pendientes${overdue?` · ${overdue} atrasadas`:''}</span></div>
+        <button class="primary" onclick="openModal('Nueva tarea',taskForm())">+ Nueva tarea</button>
+      </div>
+      <div class="task-filters">
+        <button class="filter active" onclick="filterTasks('all',this)">Todas <span>${pending.length}</span></button>
+        <button class="filter" onclick="filterTasks('today',this)">Hoy <span>${todayCount}</span></button>
+        <button class="filter" onclick="filterTasks('upcoming',this)">Próximas</button>
+        <button class="filter" onclick="filterTasks('overdue',this)">Atrasadas <span>${overdue}</span></button>
+        <button class="filter" onclick="filterTasks('nodate',this)">Sin fecha</button>
+      </div>
+      <div id="taskList" class="list task-list">${pending.length?pending.map(taskCard).join(""):'<div class="empty-state"><span>No tienes tareas pendientes.</span><button class="secondary" onclick="openModal(\\'Nueva tarea\\',taskForm())">+ Añadir tarea</button></div>'}</div>
+    </div>
+    <div class="card span-12">
+      <div class="row"><div><h3>Categorías</h3><span class="muted">Una tarea puede pertenecer a varias.</span></div></div>
+      <div class="task-category-groups">${taskCategoryLabels.map(g=>`<div><b>${g}</b><div class="actions">${taskCategories[g].map(x=>`<span class="pill">${x}</span>`).join("")}</div></div>`).join("")}</div>
+    </div>
+  </div>`;
+}
+function taskCard(t){
+  const date=t.date?new Date(t.date+"T12:00").toLocaleDateString("es-ES",{day:"numeric",month:"short"}):"Sin fecha";
+  const meta=[date,t.time||"",t.priority||"Normal"].filter(Boolean).join(" · ");
+  return `<div class="item task-card ${isOverdue(t)?"overdue":""}">
+    <div class="task-main">
+      <label class="task-check"><input type="checkbox" onchange="completeTask('${t.id}')"><span></span></label>
+      <div class="task-body">
+        <button class="task-title" onclick="editTask('${t.id}')">${esc(t.title)}</button>
+        <div class="task-meta">${taskCategoryPills(t)}<span>${esc(meta)}</span>${t.reminder?`<span class="reminder-tag">Recordatorio${t.reminderTime?" · "+t.reminderTime:""}</span>`:""}${t.repeat?`<span class="repeat-tag">↻ ${esc(t.repeat.label||"Repite")}</span>`:""}</div>
+        ${t.notes?`<div class="muted task-notes">${esc(t.notes)}</div>`:""}
+        ${taskProgress(t)}
+        ${t.attachments?.length?`<div class="attachment-count">📎 ${t.attachments.length} ${t.attachments.length===1?"archivo":"archivos"}</div>`:""}
+      </div>
+      <button class="icon-button" onclick="editTask('${t.id}')" aria-label="Editar">⋯</button>
+    </div>
+  </div>`;
+}
+function filterTasks(kind,btn){
+  document.querySelectorAll(".task-filters .filter").forEach(x=>x.classList.remove("active"));
+  if(btn)btn.classList.add("active");
+  let list=state.tasks.map(normalizeTask).filter(t=>!t.done);
+  if(kind==="today")list=list.filter(t=>t.date===todayKey()&&!isOverdue(t));
+  if(kind==="upcoming")list=list.filter(t=>t.date&&t.date>todayKey());
+  if(kind==="overdue")list=list.filter(isOverdue);
+  if(kind==="nodate")list=list.filter(t=>!t.date);
+  list.sort(taskSort);
+  document.querySelector("#taskList").innerHTML=list.length?list.map(taskCard).join(""):'<div class="empty-state"><span>No hay tareas en este filtro.</span></div>';
+}
+function taskCategoryOptions(selected=[]){
+  return taskCategoryLabels.map(g=>`<div class="category-group"><div class="muted category-group-title">${g}</div>${taskCategories[g].map(x=>`<label class="checkline category-option"><input type="checkbox" class="task-category" value="${esc(x)}" ${selected.includes(x)?"checked":""}> ${esc(x)}</label>`).join("")}</div>`).join("");
+}
+function taskSubtasksHtml(items=[]){
+  return `<div id="subtaskEditor" class="subtask-editor">${items.map((s,i)=>`<div class="subtask-input"><input data-subtask-index="${i}" value="${esc(s.title||"")}"><button type="button" onclick="this.parentElement.remove()">×</button></div>`).join("")}</div>
+  <button type="button" class="secondary small" onclick="addSubtaskInput()">+ Añadir subtarea</button>`;
+}
+function addSubtaskInput(){
+  const box=document.querySelector("#subtaskEditor");
+  const i=box.children.length;
+  const row=document.createElement("div");
+  row.className="subtask-input";
+  row.innerHTML=`<input data-subtask-index="${i}" placeholder="Nueva subtarea"><button type="button" onclick="this.parentElement.remove()">×</button>`;
+  box.appendChild(row);
+}
+function taskForm(t=null){
+  const selected=t?.categories||[];
+  const repeat=t?.repeat?.type||"none";
+  return `<div class="form task-form">
+    <label>Título<input id="fTaskTitle" required value="${esc(t?.title||"")}" placeholder="Ej. Llevar el coche al taller"></label>
+    <div class="form-two">
+      <label>Fecha<input id="fTaskDate" type="date" value="${t?.date||""}"></label>
+      <label>Hora<input id="fTaskTime" type="time" value="${t?.time||""}"></label>
+    </div>
+    <label>Prioridad<select id="fTaskPriority">${["Normal","Importante","Urgente"].map(x=>`<option ${t?.priority===x?"selected":""}>${x}</option>`).join("")}</select></label>
+    <div><div class="field-title">Categorías</div><div class="category-picker">${taskCategoryOptions(selected)}</div></div>
+    <div><div class="field-title">Subtareas</div>${taskSubtasksHtml(t?.subtasks||[])}</div>
+    <label>Recordatorio<select id="fTaskReminder"><option value="">Sin recordatorio</option><option value="at_time" ${t?.reminder==="at_time"?"selected":""}>A la hora de la tarea</option><option value="1h" ${t?.reminder==="1h"?"selected":""}>1 hora antes</option><option value="1d" ${t?.reminder==="1d"?"selected":""}>1 día antes</option></select></label>
+    <div class="form-two">
+      <label>Repetir<select id="fTaskRepeat">${[
+        ["none","No repetir"],["daily","Cada día"],["weekly","Cada semana"],["monthly","Cada mes"],["yearly","Cada año"],["custom","Cada X días"]
+      ].map(x=>`<option value="${x[0]}" ${repeat===x[0]?"selected":""}>${x[1]}</option>`).join("")}</select></label>
+      <label id="customRepeatLabel" class="${repeat==="custom"?"":"hidden"}">Cada cuántos días<input id="fTaskRepeatDays" type="number" min="1" value="${t?.repeat?.days||2}"></label>
+    </div>
+    <label>Notas<textarea id="fTaskNotes" placeholder="Detalles, instrucciones...">${esc(t?.notes||"")}</textarea></label>
+    <label>Fotos / archivos<input id="fTaskFiles" type="file" accept="image/*" multiple></label>
+    ${t?.attachments?.length?`<div class="attachment-preview">${t.attachments.map((a,i)=>`<div>📎 ${esc(a.name||"Foto")} <button type="button" onclick="removeTaskAttachment('${t.id}',${i})">×</button></div>`).join("")}</div>`:""}
+    <button class="primary" onclick="saveTask('${t?.id||""}')">Guardar tarea</button>
+    ${t?`<button class="danger-button" onclick="deleteTask('${t.id}')">Eliminar tarea</button>`:""}
+  </div>`;
+}
+async function saveTask(id){
+  const title=document.querySelector("#fTaskTitle").value.trim();
+  if(!title)return;
+  const existing=id&&state.tasks.find(x=>x.id===id);
+  const t=existing||{id:crypto.randomUUID(),done:false,created:new Date().toISOString(),subtasks:[],attachments:[]};
+  t.title=title;
+  t.date=document.querySelector("#fTaskDate").value;
+  t.time=document.querySelector("#fTaskTime").value;
+  t.priority=document.querySelector("#fTaskPriority").value;
+  t.categories=[...document.querySelectorAll(".task-category:checked")].map(x=>x.value);
+  t.notes=document.querySelector("#fTaskNotes").value.trim();
+  t.reminder=document.querySelector("#fTaskReminder").value;
+  const rt=document.querySelector("#fTaskRepeat").value;
+  t.repeat=rt==="none"?null:{type:rt,label:rt==="custom"?`Cada ${document.querySelector("#fTaskRepeatDays").value} días`:({daily:"Cada día",weekly:"Cada semana",monthly:"Cada mes",yearly:"Cada año"}[rt]||"Repite"),days:rt==="custom"?Number(document.querySelector("#fTaskRepeatDays").value):null};
+  const subInputs=[...document.querySelectorAll("#subtaskEditor input")];
+  const old=t.subtasks||[];
+  t.subtasks=subInputs.map((el,i)=>({id:old[i]?.id||crypto.randomUUID(),title:el.value.trim(),done:old[i]?.done||false})).filter(x=>x.title);
+  const files=[...document.querySelector("#fTaskFiles").files];
+  if(files.length){
+    const added=await Promise.all(files.map(fileToData));
+    t.attachments=[...(t.attachments||[]),...added];
+  }
+  t.status=t.done?"done":"pending";
+  if(!existing)state.tasks.push(t);
+  save();closeModal();render();
+}
+function fileToData(file){
+  return new Promise(resolve=>{const r=new FileReader();r.onload=()=>resolve({name:file.name,type:file.type,data:r.result});r.readAsDataURL(file);});
+}
+function editTask(id){const t=state.tasks.find(x=>x.id===id);if(t)openModal("Editar tarea",taskForm(t));}
+function removeTaskAttachment(id,index){const t=state.tasks.find(x=>x.id===id);if(!t)return;t.attachments.splice(index,1);save();openModal("Editar tarea",taskForm(t));}
+function deleteTask(id){state.tasks=state.tasks.filter(x=>x.id!==id);save();closeModal();render();}
+function nextTaskDate(date,type,days){
+  const d=new Date(date+"T12:00");
+  if(type==="daily")d.setDate(d.getDate()+1);
+  if(type==="weekly")d.setDate(d.getDate()+7);
+  if(type==="monthly")d.setMonth(d.getMonth()+1);
+  if(type==="yearly")d.setFullYear(d.getFullYear()+1);
+  if(type==="custom")d.setDate(d.getDate()+days);
+  return d.toISOString().slice(0,10);
+}
+function completeTask(id){
+  const t=state.tasks.find(x=>x.id===id);if(!t)return;
+  t.done=true;t.status="done";t.completedAt=new Date().toISOString();
+  if(t.repeat&&t.date){
+    const next={...t,id:crypto.randomUUID(),date:nextTaskDate(t.date,t.repeat.type,t.repeat.days),done:false,status:"pending",completedAt:null,created:new Date().toISOString(),subtasks:(t.subtasks||[]).map(s=>({...s,id:crypto.randomUUID(),done:false})),attachments:[]};
+    state.tasks.push(next);
+  }
+  save();render();
+}
+
 function expenses(c){const spent=state.expenses.filter(x=>x.type==='gasto').reduce((a,x)=>a+x.amount,0);c.innerHTML=`<div class="grid"><div class="card span-4"><h3>Este mes</h3><div class="metric">${fmt(spent)}</div><div class="progress"><i style="width:${Math.min(100,spent/1050*100)}%"></i></div><div class="muted" style="margin-top:8px">Presupuesto de ejemplo: ${fmt(1050)}</div></div><div class="card span-8"><h3>Últimos movimientos</h3><div class="list">${state.expenses.slice(-6).reverse().map(x=>`<div class="item row"><span>${esc(x.concept||x.category)}</span><b>${x.type==='gasto'?'-':'+'}${fmt(x.amount)}</b></div>`).join('')||'<div class="muted">Todavía no hay movimientos.</div>'}</div></div><div class="card span-12"><h3>Cuentas</h3><div class="actions"><span class="pill">Cuenta de gastos</span><span class="pill">Cuenta nómina</span><span class="pill">Cuenta ahorro</span><span class="pill">Revolut</span></div></div></div>`}
 function food(c){c.innerHTML=`<div class="grid"><div class="card span-8"><h3>Menú semanal</h3><div class="list"><div class="item"><b>Lunes</b><br><span class="muted">Generar propuesta de comida y cena</span></div><div class="item"><b>Martes</b><br><span class="pill">Tupper</span></div><div class="item"><b>Viernes</b><br><span class="pill">Comida divertida</span></div></div><button class="primary" onclick="alert('El generador de menú conectado al inventario llegará en la siguiente iteración.')">Generar menú</button></div><div class="card span-4"><h3>Inventario</h3><div class="item">Congelador</div><div class="item">Despensa</div><div class="item">Frescos</div><button class="secondary" onclick="alert('Inventario: siguiente iteración')">Gestionar inventario</button></div><div class="card span-12"><div class="row"><div><h3>Recetas</h3><span class="muted">Tus recetas con ingredientes estructurados.</span></div><button class="primary" onclick="openModal('Añadir receta',recipeForm())">+ Añadir receta</button></div><div class="actions">${foodTypes.map(x=>`<span class="pill">${x}</span>`).join('')}</div><div class="list">${state.recipes.map(r=>`<div class="item row"><div><b>${esc(r.name)}</b><div class="muted">${r.type} · ${r.servings} raciones · ${r.time||'—'}</div></div>${r.favorite?'<span class="pill">Favorita</span>':''}</div>`).join('')||'<div class="muted">Todavía no hay recetas. Añade la primera.</div>'}</div></div><div class="card span-12"><h3>Lista de la compra</h3><div class="muted">Se calculará automáticamente al aceptar un menú.</div></div></div>`}
 function recipeForm(){return `<div class="form"><label>Nombre de la receta<input id="fRecipeName" placeholder="Ej. Pollo al horno"></label><label>Tipo<select id="fRecipeType">${foodTypes.map(x=>`<option>${x}</option>`).join('')}</select></label><div class="form-two"><label>Raciones<input id="fRecipeServings" type="number" min="1" value="2"></label><label>Tiempo<input id="fRecipeTime" placeholder="30 min"></label></div><label>Ingredientes<textarea id="fRecipeIngredients" placeholder="1 tomate — 150 g\nArroz — 80 g\nAceite de oliva — 10 ml"></textarea></label><label>Preparación<textarea id="fRecipeSteps" placeholder="Pasos de elaboración"></textarea></label><label>Descripción<textarea id="fRecipeDesc" placeholder="Cómo es y cuándo te gusta prepararla"></textarea></label><label>Combina con<input id="fRecipePairs" placeholder="Ej. ensalada verde"></label><label class="checkline"><input id="fRecipeFav" type="checkbox"> Marcar como favorita</label><label class="checkline"><input id="fRecipeFreezable" type="checkbox"> Se puede congelar</label><button class="primary" onclick="saveRecipe()">Guardar receta</button></div>`}
@@ -61,7 +243,12 @@ function settings(c){c.innerHTML=`<div class="card"><h3>Preferencias</h3><div cl
 function eventForm(){return `<div class="form"><label>Título<input id="fTitle" required></label><label>Fecha<input id="fDate" type="date" value="${todayKey()}"></label><label>Categoría<select id="fCat">${Object.keys(cats).map(x=>`<option>${x}</option>`).join('')}</select></label><label>Notas<textarea id="fNotes"></textarea></label><button class="primary" onclick="saveEvent()">Guardar</button></div>`}
 function taskForm(){return `<div class="form"><label>Título<input id="fTitle" required></label><label>Fecha<input id="fDate" type="date"></label><label>Prioridad<select id="fPriority"><option>Normal</option><option>Importante</option><option>Urgente</option></select></label><label>Notas<textarea id="fNotes"></textarea></label><button class="primary" onclick="saveTask()">Guardar tarea</button></div>`}
 function expenseForm(){return `<div class="form"><label>Importe<input id="fAmount" type="number" step="0.01" min="0"></label><label>Categoría<select id="fCat"><option>Comida</option><option>Alquiler</option><option>Seguro</option><option>Agua</option><option>Luz</option><option>Aerotermia</option><option>Móvil</option><option>Internet</option><option>Spotify</option><option>Podimo</option><option>ACNUR</option><option>Paga</option><option>Transporte</option><option>Otros gastos</option></select></label><label>Concepto<input id="fConcept"></label><label>Cuenta<select id="fAccount"><option>Cuenta de gastos</option><option>Cuenta nómina</option><option>Cuenta ahorro</option><option>Revolut</option></select></label><button class="primary" onclick="saveExpense()">Guardar gasto</button></div>`}
-function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden')}
+function bindTaskFormEvents(){
+  const repeat=document.querySelector("#fTaskRepeat");
+  const label=document.querySelector("#customRepeatLabel");
+  if(repeat&&label)repeat.addEventListener("change",()=>label.classList.toggle("hidden",repeat.value!=="custom"));
+}
+function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden');bindTaskFormEvents()}
 function closeModal(){document.querySelector('#modal').classList.add('hidden')}
 function saveTask(){const title=document.querySelector('#fTitle').value.trim();if(!title)return;state.tasks.push({id:crypto.randomUUID(),title,date:document.querySelector('#fDate').value,priority:document.querySelector('#fPriority').value,done:false});save();closeModal();render()}
 function saveExpense(){const amount=Number(document.querySelector('#fAmount').value);if(!amount)return;state.expenses.push({id:crypto.randomUUID(),amount,type:'gasto',category:document.querySelector('#fCat').value,concept:document.querySelector('#fConcept').value,account:document.querySelector('#fAccount').value,date:new Date().toISOString()});save();closeModal();render()}

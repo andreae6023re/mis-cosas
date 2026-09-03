@@ -350,3 +350,25 @@ function settings(c){
  <section class="card"><div class="setting-head"><div><h3>Datos</h3><span class="muted">Todo se guarda localmente en este dispositivo.</span></div></div><p class="muted">En el siguiente bloque añadiremos exportación/importación, copias de seguridad y restauración.</p></section></div></div>`;
 }
 render();
+
+// Utilidades y controles globales (restaurados y centralizados)
+function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'-01T12:00');d.setMonth(d.getMonth()+n);state.expenseMonth=monthKey(d);render()}
+function eventForm(){return `<div class="form"><label>Título<input id="fTitle" required></label><label>Fecha<input id="fDate" type="date" value="${todayKey()}"></label><label>Categoría<select id="fCat">${Object.keys(cats).map(x=>`<option>${esc(x)}</option>`).join('')}</select></label><label>Notas<textarea id="fNotes"></textarea></label><button class="primary" onclick="saveEvent()">Guardar</button></div>`}
+function bindTaskFormEvents(){const repeat=document.querySelector('#fTaskRepeat');const label=document.querySelector('#customRepeatLabel');if(repeat&&label)repeat.addEventListener('change',()=>label.classList.toggle('hidden',repeat.value!=='custom'))}
+function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden');bindTaskFormEvents()}
+function closeModal(){document.querySelector('#modal').classList.add('hidden')}
+function saveEvent(){const title=document.querySelector('#fTitle').value.trim();if(!title)return;state.events.push({id:crypto.randomUUID(),title,date:document.querySelector('#fDate').value,category:document.querySelector('#fCat').value,notes:document.querySelector('#fNotes').value});save();closeModal();render()}
+function sameMonth(s){if(!s)return false;const d=new Date(String(s).length<=10?s+'T12:00:00':s);return d.getMonth()===today.getMonth()&&d.getFullYear()===today.getFullYear()}
+function cap(s=''){return s?s[0].toUpperCase()+s.slice(1):s}
+function esc(s=''){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.view)));
+document.querySelector('#closeModal').addEventListener('click',closeModal);
+document.querySelector('#quickAdd').addEventListener('click',()=>{
+ if(state.view==='tasks')openModal('Nueva tarea',taskForm());
+ else if(state.view==='expenses')openModal('Nuevo gasto',expenseForm());
+ else if(state.view==='calendar')openModal('Nuevo evento',eventForm());
+ else if(state.view==='habits')openModal('Nuevo hábito',habitForm());
+ else if(state.view==='food')openModal('Añadir a Comidas',`<div class="actions"><button class="primary" onclick="closeModal();openModal('Añadir receta',recipeForm())">+ Añadir receta</button><button class="secondary" onclick="closeModal();alert('Inventario: siguiente iteración')">+ Añadir producto</button><button class="secondary" onclick="closeModal();alert('Preparaciones: siguiente iteración')">+ Añadir preparación</button></div>`);
+ else openModal('Añadir',`<div class="actions"><button class="primary" onclick="closeModal();openModal('Nueva tarea',taskForm())">Nueva tarea</button><button class="secondary" onclick="closeModal();openModal('Nuevo gasto',expenseForm())">Nuevo gasto</button><button class="secondary" onclick="closeModal();openModal('Nuevo evento',eventForm())">Nuevo evento</button><button class="secondary" onclick="closeModal();openModal('Nuevo hábito',habitForm())">Nuevo hábito</button></div>`)
+});

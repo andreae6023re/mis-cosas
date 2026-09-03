@@ -3,6 +3,9 @@ const state={
  view:'home',
  tasks:JSON.parse(localStorage.getItem(KEY+'tasks')||'[]'),
  expenses:JSON.parse(localStorage.getItem(KEY+'expenses')||'[]'),
+ transactions:JSON.parse(localStorage.getItem(KEY+'transactions')||'[]'),
+ accounts:JSON.parse(localStorage.getItem(KEY+'accounts')||'null')||null,
+ budgets:JSON.parse(localStorage.getItem(KEY+'budgets')||'[]'),
  events:JSON.parse(localStorage.getItem(KEY+'events')||'[]'),
  habits:JSON.parse(localStorage.getItem(KEY+'habits')||'[]'),
  recipes:JSON.parse(localStorage.getItem(KEY+'recipes')||'[]')
@@ -22,7 +25,7 @@ function render(){
 }
 function home(c){
  const d=today.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'}),pending=state.tasks.filter(x=>!x.done).length;
- const spent=state.expenses.filter(x=>x.type==='gasto'&&sameMonth(x.date)).reduce((a,x)=>a+x.amount,0);
+ const spent=state.transactions.filter(x=>x.type==='expense'&&sameMonth(x.date)).reduce((a,x)=>a+Number(x.amount||0),0);
  c.innerHTML=`<div class="grid">
  <div class="card span-8"><div class="muted">Hoy</div><div class="metric">${cap(d)}</div><div class="calendar-mini"></div></div>
  <div class="card span-4"><div class="row"><h3>Ahora</h3><span class="badge">${pending}</span></div><div class="list compact"><div class="item"><b>${pending}</b> tareas pendientes</div>${homePendingTasks()}<div class="item">${todayHabitsSummary()}</div></div><button class="primary" onclick="go('tasks')">Ver tareas</button></div>
@@ -251,13 +254,47 @@ const defaultAccounts=["Cuenta de gastos","Cuenta nómina","Cuenta ahorro","Revo
 if(!Array.isArray(state.accounts))state.accounts=defaultAccounts.map(name=>({id:crypto.randomUUID(),name,startingBalance:0,active:true}));
 if(!Array.isArray(state.transactions))state.transactions=[];
 if(!Array.isArray(state.budgets))state.budgets=[];
+
+// Migración de gastos de versiones anteriores: conserva los datos y los integra en Movimientos.
+(function migrateLegacyExpenses(){
+ if(!Array.isArray(state.expenses)||!state.expenses.length)return;
+ const accountByName=Object.fromEntries(state.accounts.map(a=>[a.name,a.id]));
+ let changed=false;
+ state.expenses.forEach(old=>{
+   const exists=state.transactions.some(t=>t.legacyId===old.id);
+   if(exists)return;
+   state.transactions.push({id:crypto.randomUUID(),legacyId:old.id,type:'expense',amount:Number(old.amount)||0,category:old.category||'Otros gastos',concept:old.concept||'',date:(old.date||todayKey()).slice(0,10),account:accountByName[old.account]||state.accounts[0].id,notes:old.notes||'',ticket:old.ticket||''});
+   changed=true;
+ });
+ if(changed)save();
+})();
+
+function ensureRecurringTransactions(){
+ const key=state.expenseMonth||monthKey();
+ let changed=false;
+ const templates=state.transactions.filter(t=>t.recurring && !t.recurringFrom);
+ templates.forEach(t=>{
+   if(!t.recurringMonths||!Array.isArray(t.recurringMonths))t.recurringMonths=[];
+   const templateMonth=monthKey(new Date((t.date||todayKey())+'T12:00'));
+   if(templateMonth===key){if(!t.recurringMonths.includes(key))t.recurringMonths.push(key);return;}
+   if(t.recurringMonths.includes(key))return;
+   const day=Math.min(Number(t.recurringDay||String(t.date||todayKey()).slice(8,10))||1,new Date(Number(key.slice(0,4)),Number(key.slice(5,7)),0).getDate());
+   const copy={...t,id:crypto.randomUUID(),date:`${key}-${String(day).padStart(2,'0')}`,recurring:false,recurringFrom:t.id,recurringMonths:undefined};
+   delete copy.recurringMonths;
+   state.transactions.push(copy);
+   t.recurringMonths.push(key);
+   changed=true;
+ });
+ if(changed)save();
+}
 function monthKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
 function money(n){return new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR'}).format(Number(n)||0)}
 function accountOptions(sel){return state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}</option>`).join('')}
 function categoryOptions(){return Object.entries(expenseCategories).map(([g,arr])=>`<optgroup label="${g}">${arr.map(x=>`<option>${esc(x)}</option>`).join('')}</optgroup>`).join('')}
 function accountBalance(a){return Number(a.startingBalance||0)+state.transactions.reduce((s,t)=>{if(t.type==='transfer'){if(t.from===a.id)s-=+t.amount;if(t.to===a.id)s+=+t.amount}else if(t.account===a.id)s+=(t.type==='income'?1:-1)*(+t.amount);return s},0)}
 function expenses(c){
- const key=state.expenseMonth||monthKey(), tx=state.transactions.filter(t=>t.type!=='transfer'&&(t.date||'').startsWith(key));
+ ensureRecurringTransactions();
+ const key=state.expenseMonth||monthKey(), tx=state.transactions.filter(t=>(t.date||'').startsWith(key));
  const income=tx.filter(t=>t.type==='income').reduce((s,t)=>s+ +t.amount,0), spent=tx.filter(t=>t.type==='expense').reduce((s,t)=>s+ +t.amount,0);
  const budgets=state.budgets.filter(b=>b.month===key), totalBudget=budgets.reduce((s,b)=>s+ +b.amount,0);
  const byCat={};tx.filter(t=>t.type==='expense').forEach(t=>byCat[t.category]=(byCat[t.category]||0)+ +t.amount);
@@ -270,11 +307,14 @@ function expenses(c){
  <div class="card span-7"><div class="row"><div><h3>Presupuestos</h3><span class="muted">Límite mensual por categoría.</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100);return `<div><div class="row"><b>${esc(b.category)}</b><span>${money(s)} / ${money(b.amount)}</span></div><div class="budget-bar"><i style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No hay presupuestos.</div>'}</div></div>
  <div class="card span-5"><h3>Por categoría</h3><div class="category-totals">${Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div><span>${esc(k)}</span><b>${money(v)}</b></div>`).join('')||'<span class="muted">Sin gastos.</span>'}</div></div></div>`;
 }
-function expenseRow(t){return `<div class="item row"><div><b>${esc(t.concept||t.category)}</b><span class="muted">${esc(t.category)} · ${esc(state.accounts.find(a=>a.id===t.account)?.name||'')} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}</span>${t.ticket?'<span class="receipt-tag">📷 Ticket</span>':''}</div><strong class="${t.type==='income'?'income-amount':''}">${t.type==='income'?'+':'-'}${money(t.amount)}</strong></div>`}
-function expenseForm(t=null){return `<div class="form"><label>Tipo<select id="fExpenseType"><option value="expense">Gasto</option><option value="income" ${t?.type==='income'?'selected':''}>Ingreso</option></select></label><label>Importe<input id="fExpenseAmount" type="number" step="0.01" value="${t?.amount||''}"></label><label>Categoría<select id="fExpenseCategory">${categoryOptions()}</select></label><label>Concepto<input id="fExpenseConcept" value="${esc(t?.concept||'')}" placeholder="Ej. Compra semanal"></label><div class="form-two"><label>Fecha<input id="fExpenseDate" type="date" value="${t?.date||todayKey()}"></label><label>Cuenta<select id="fExpenseAccount">${accountOptions(t?.account)}</select></label></div><label>Notas<textarea id="fExpenseNotes">${esc(t?.notes||'')}</textarea></label><label>Foto del ticket<input id="fExpenseTicket" type="file" accept="image/*"></label><button class="primary" onclick="saveExpense('${t?.id||''}')">Guardar</button></div>`}
-async function saveExpense(id){let amount=+document.querySelector('#fExpenseAmount').value;if(!amount)return;let t=id?state.transactions.find(x=>x.id===id):{id:crypto.randomUUID()};t.type=document.querySelector('#fExpenseType').value;t.amount=amount;t.category=document.querySelector('#fExpenseCategory').value;t.concept=document.querySelector('#fExpenseConcept').value.trim();t.date=document.querySelector('#fExpenseDate').value;t.account=document.querySelector('#fExpenseAccount').value;t.notes=document.querySelector('#fExpenseNotes').value.trim();let f=document.querySelector('#fExpenseTicket').files[0];if(f)t.ticket=await fileToData(f);if(!id)state.transactions.push(t);save();closeModal();render()}
-function transferForm(){return `<div class="form"><label>De<select id="fTransferFrom">${accountOptions()}</select></label><label>A<select id="fTransferTo">${accountOptions()}</select></label><label>Importe<input id="fTransferAmount" type="number" step="0.01"></label><label>Fecha<input id="fTransferDate" type="date" value="${todayKey()}"></label><label>Concepto<input id="fTransferConcept"></label><button class="primary" onclick="saveTransfer()">Guardar transferencia</button></div>`}
-function saveTransfer(){let from=document.querySelector('#fTransferFrom').value,to=document.querySelector('#fTransferTo').value,amount=+document.querySelector('#fTransferAmount').value;if(!amount||from===to)return;state.transactions.push({id:crypto.randomUUID(),type:'transfer',amount,from,to,date:document.querySelector('#fTransferDate').value,concept:document.querySelector('#fTransferConcept').value.trim()});save();closeModal();render()}
+function expenseRow(t){if(t.type==='transfer')return `<div class="item expense-row"><div class="expense-row-main"><b>${esc(t.concept||'Transferencia')}</b><span class="muted">${esc(state.accounts.find(a=>a.id===t.from)?.name||'')} → ${esc(state.accounts.find(a=>a.id===t.to)?.name||'')} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente mensual':''}</span></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="editTransfer('${t.id}')">Editar</button></div>`;return `<div class="item expense-row"><div class="expense-row-main"><b>${esc(t.concept||t.category)}</b><span class="muted">${esc(t.category)} · ${esc(state.accounts.find(a=>a.id===t.account)?.name||'')} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente mensual':''}</span>${t.ticket?'<span class="receipt-tag">Ticket</span>':''}</div><strong class="${t.type==='income'?'income-amount':''}">${t.type==='income'?'+':'-'}${money(t.amount)}</strong><button class="secondary small" onclick="editExpense('${t.id}')">Editar</button></div>`}
+function expenseForm(t=null){const cat=t?.category||'Comida';return `<div class="form"><label>Tipo<select id="fExpenseType"><option value="expense" ${t?.type!=='income'?'selected':''}>Gasto</option><option value="income" ${t?.type==='income'?'selected':''}>Ingreso</option></select></label><label>Importe<input id="fExpenseAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Categoría<select id="fExpenseCategory">${categoryOptions().replace(`<option>${esc(cat)}</option>`,`<option selected>${esc(cat)}</option>`)}</select></label><label>Concepto<input id="fExpenseConcept" value="${esc(t?.concept||'')}" placeholder="Ej. Compra semanal"></label><div class="form-two"><label>Fecha<input id="fExpenseDate" type="date" value="${t?.date||todayKey()}"></label><label>Cuenta<select id="fExpenseAccount">${accountOptions(t?.account)}</select></label></div><label>Notas<textarea id="fExpenseNotes">${esc(t?.notes||'')}</textarea></label><label>Foto del ticket<input id="fExpenseTicket" type="file" accept="image/*"></label><label class="checkline"><input id="fExpenseRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label id="expenseRecurringDayLabel">Día del mes<input id="fExpenseRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveExpense('${t?.id||''}')">${t?'Guardar cambios':'Guardar'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
+async function saveExpense(id){const amount=+document.querySelector('#fExpenseAmount').value;if(!amount)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type=document.querySelector('#fExpenseType').value;t.amount=amount;t.category=document.querySelector('#fExpenseCategory').value;t.concept=document.querySelector('#fExpenseConcept').value.trim();t.date=document.querySelector('#fExpenseDate').value;t.account=document.querySelector('#fExpenseAccount').value;t.notes=document.querySelector('#fExpenseNotes').value.trim();const f=document.querySelector('#fExpenseTicket').files[0];if(f)t.ticket=await fileToData(f);t.recurring=document.querySelector('#fExpenseRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fExpenseRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
+function editExpense(id){const t=state.transactions.find(x=>x.id===id);if(t)openModal(t.type==='income'?'Editar ingreso':'Editar gasto',expenseForm(t))}
+function deleteTransaction(id){state.transactions=state.transactions.filter(x=>x.id!==id);save();closeModal();render()}
+function transferForm(t=null){return `<div class="form"><label>De<select id="fTransferFrom">${accountOptions(t?.from)}</select></label><label>A<select id="fTransferTo">${accountOptions(t?.to)}</select></label><label>Importe<input id="fTransferAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Fecha<input id="fTransferDate" type="date" value="${t?.date||todayKey()}"></label><label>Concepto<input id="fTransferConcept" value="${esc(t?.concept||'')}"></label><label class="checkline"><input id="fTransferRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label id="transferRecurringDayLabel">Día del mes<input id="fTransferRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveTransfer('${t?.id||''}')">${t?'Guardar cambios':'Guardar transferencia'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
+function saveTransfer(id=''){const from=document.querySelector('#fTransferFrom').value,to=document.querySelector('#fTransferTo').value,amount=+document.querySelector('#fTransferAmount').value;if(!amount||from===to)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type='transfer';t.amount=amount;t.from=from;t.to=to;t.date=document.querySelector('#fTransferDate').value;t.concept=document.querySelector('#fTransferConcept').value.trim();t.recurring=document.querySelector('#fTransferRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fTransferRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
+function editTransfer(id){const t=state.transactions.find(x=>x.id===id);if(t)openModal('Editar transferencia',transferForm(t))}
 function budgetForm(){return `<div class="form"><label>Categoría<select id="fBudgetCategory">${Object.entries(expenseCategories).filter(([g])=>g!=='Ingresos').map(([g,a])=>`<optgroup label="${g}">${a.map(x=>`<option>${esc(x)}</option>`).join('')}</optgroup>`).join('')}</select></label><label>Importe mensual<input id="fBudgetAmount" type="number" step="0.01"></label><button class="primary" onclick="saveBudget()">Guardar presupuesto</button></div>`}
 function saveBudget(){let category=document.querySelector('#fBudgetCategory').value,amount=+document.querySelector('#fBudgetAmount').value,key=state.expenseMonth||monthKey();if(!amount)return;let b=state.budgets.find(x=>x.month===key&&x.category===category);if(b)b.amount=amount;else state.budgets.push({id:crypto.randomUUID(),month:key,category,amount});save();closeModal();render()}
 function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'-01T12:00');d.setMonth(d.getMonth()+n);state.expenseMonth=monthKey(d);render()}
@@ -285,7 +325,6 @@ function saveRecipe(){const name=document.querySelector('#fRecipeName').value.tr
 function calendar(c){const evcats=Object.entries(cats).map(([n,col])=>`<span class="pill" style="background:${col}22;color:${col}">${n}</span>`).join('');const events=state.events.filter(e=>e.date).map(e=>`<div class="item"><b>${esc(e.title)}</b><div class="muted">${new Date(e.date).toLocaleDateString('es-ES')} · ${esc(e.category||'Otros')}</div></div>`).join('');c.innerHTML=`<div class="card"><div class="row"><h3>Septiembre 2026</h3><button class="primary" onclick="openModal('Nuevo evento',eventForm())">+ Evento</button></div><div class="calendar">${['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('')}${Array.from({length:30},(_,i)=>`<div class="day ${i+1===today.getDate()?'today':''}"><b>${i+1}</b>${(i+1)%5===0?'<div><span class="dot" style="background:'+cats.Social+'"></span></div>':''}</div>`).join('')}</div><div class="actions">${evcats}</div><div class="list">${events||'<div class="muted">No hay eventos guardados todavía.</div>'}</div></div>`}
 function settings(c){c.innerHTML=`<div class="card"><h3>Preferencias</h3><div class="setting"><b>Apariencia</b><div class="muted">Pastel moderno, neutro y sin rosa como color principal.</div></div><div class="setting"><b>Calendario</b><div class="muted">Categorías y colores preparados para editar.</div></div><div class="setting"><b>Hábitos</b><div class="muted">Colores, frecuencia y recordatorios se guardan en este dispositivo.</div></div><div class="setting"><b>Datos</b><div class="muted">La V2 guarda los datos localmente. Después añadiremos copia/sincronización.</div></div><div class="setting"><b>PWA</b><div class="muted">La app está preparada para instalarse como aplicación en móvil.</div></div></div>`}
 function eventForm(){return `<div class="form"><label>Título<input id="fTitle" required></label><label>Fecha<input id="fDate" type="date" value="${todayKey()}"></label><label>Categoría<select id="fCat">${Object.keys(cats).map(x=>`<option>${x}</option>`).join('')}</select></label><label>Notas<textarea id="fNotes"></textarea></label><button class="primary" onclick="saveEvent()">Guardar</button></div>`}
-function expenseForm(){return `<div class="form"><label>Importe<input id="fAmount" type="number" step="0.01" min="0"></label><label>Categoría<select id="fCat"><option>Comida</option><option>Alquiler</option><option>Seguro</option><option>Agua</option><option>Luz</option><option>Aerotermia</option><option>Móvil</option><option>Internet</option><option>Spotify</option><option>Podimo</option><option>ACNUR</option><option>Paga</option><option>Transporte</option><option>Otros gastos</option></select></label><label>Concepto<input id="fConcept"></label><label>Cuenta<select id="fAccount"><option>Cuenta de gastos</option><option>Cuenta nómina</option><option>Cuenta ahorro</option><option>Revolut</option></select></label><button class="primary" onclick="saveExpense()">Guardar gasto</button></div>`}
 function bindTaskFormEvents(){
   const repeat=document.querySelector("#fTaskRepeat");
   const label=document.querySelector("#customRepeatLabel");
@@ -293,7 +332,6 @@ function bindTaskFormEvents(){
 }
 function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden');bindTaskFormEvents()}
 function closeModal(){document.querySelector('#modal').classList.add('hidden')}
-function saveExpense(){const amount=Number(document.querySelector('#fAmount').value);if(!amount)return;state.expenses.push({id:crypto.randomUUID(),amount,type:'gasto',category:document.querySelector('#fCat').value,concept:document.querySelector('#fConcept').value,account:document.querySelector('#fAccount').value,date:new Date().toISOString()});save();closeModal();render()}
 function saveEvent(){const title=document.querySelector('#fTitle').value.trim();if(!title)return;state.events.push({id:crypto.randomUUID(),title,date:document.querySelector('#fDate').value,category:document.querySelector('#fCat').value,notes:document.querySelector('#fNotes').value});save();closeModal();render()}
 function sameMonth(s){const d=new Date(s);return d.getMonth()===today.getMonth()&&d.getFullYear()===today.getFullYear()}
 function cap(s){return s[0].toUpperCase()+s.slice(1)}

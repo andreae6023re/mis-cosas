@@ -1,3 +1,97 @@
+
+// ============================================================
+// SUPABASE / AUTENTICACIÓN
+// ============================================================
+const SUPABASE_URL='https://pmrhnwvrmqznenfkkumc.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY='sb_publishable_DCKU0ae2X_tXHyEwb6o1HA_OpP50Rpt';
+const supabaseClient=window.supabase?.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY);
+let currentUser=null;
+let authMode='login';
+
+function showAuthMessage(message,type=''){
+ const el=document.querySelector('#authMessage');
+ if(el){el.textContent=message||'';el.className='auth-message '+type}
+}
+function showAuth(mode='login'){
+ authMode=mode;
+ document.querySelector('#authScreen')?.classList.remove('hidden');
+ document.querySelector('#appShell')?.classList.add('hidden');
+ const title=document.querySelector('#authTitle'),sub=document.querySelector('#authSubtitle'),submit=document.querySelector('#authSubmit'),toggle=document.querySelector('#authToggle');
+ if(!title)return;
+ if(mode==='signup'){
+  title.textContent='Crear cuenta';
+  sub.textContent='Crea tu cuenta para usar Mis cosas en todos tus dispositivos.';
+  submit.textContent='Crear cuenta';
+  toggle.textContent='¿Ya tienes cuenta? Iniciar sesión';
+ }else{
+  title.textContent='Iniciar sesión';
+  sub.textContent='Accede para tener tus datos sincronizados entre dispositivos.';
+  submit.textContent='Entrar';
+  toggle.textContent='¿No tienes cuenta? Crear una';
+ }
+ showAuthMessage('');
+}
+function showApp(){
+ document.querySelector('#authScreen')?.classList.add('hidden');
+ document.querySelector('#appShell')?.classList.remove('hidden');
+}
+async function ensureCloudRow(user){
+ if(!supabaseClient||!user)return;
+ const {data,error}=await supabaseClient.from('app_data').select('user_id').eq('user_id',user.id).maybeSingle();
+ if(error)throw error;
+ if(!data){
+  const {error:insertError}=await supabaseClient.from('app_data').insert({user_id:user.id,data:{}});
+  if(insertError)throw insertError;
+ }
+}
+async function handleAuthSubmit(e){
+ e.preventDefault();
+ if(!supabaseClient){showAuthMessage('No se ha podido cargar el servicio de autenticación.','error');return}
+ const email=document.querySelector('#authEmail')?.value.trim();
+ const password=document.querySelector('#authPassword')?.value||'';
+ if(!email||password.length<6){showAuthMessage('Introduce un email y una contraseña de al menos 6 caracteres.','error');return}
+ const submit=document.querySelector('#authSubmit');
+ submit.disabled=true;showAuthMessage('Conectando…');
+ try{
+  let result;
+  if(authMode==='signup') result=await supabaseClient.auth.signUp({email,password,options:{emailRedirectTo:window.location.origin}});
+  else result=await supabaseClient.auth.signInWithPassword({email,password});
+  if(result.error)throw result.error;
+  if(authMode==='signup'&&!result.data.session){
+   showAuthMessage('Cuenta creada. Revisa tu email para confirmar la cuenta y después inicia sesión.','success');
+   document.querySelector('#authPassword').value='';
+  }else if(result.data.user){
+   currentUser=result.data.user;
+   await ensureCloudRow(currentUser);
+   showApp();applyAppearance();render();checkNotifications();
+  }
+ }catch(err){showAuthMessage(authErrorText(err),'error')}
+ finally{submit.disabled=false}
+}
+function authErrorText(err){
+ const m=String(err?.message||err||'');
+ if(/invalid login credentials/i.test(m))return 'Email o contraseña incorrectos.';
+ if(/user already registered/i.test(m))return 'Este email ya tiene una cuenta. Inicia sesión.';
+ if(/password/i.test(m)&&/6|characters|length/i.test(m))return 'La contraseña debe tener al menos 6 caracteres.';
+ return m||'No se ha podido completar la operación.';
+}
+async function logout(){if(!supabaseClient)return;await supabaseClient.auth.signOut();currentUser=null;showAuth('login')}
+async function initAuth(){
+ if(!supabaseClient){showAuthMessage('No se ha podido cargar Supabase. Comprueba tu conexión.','error');showAuth('login');return}
+ document.querySelector('#authForm')?.addEventListener('submit',handleAuthSubmit);
+ document.querySelector('#authToggle')?.addEventListener('click',()=>showAuth(authMode==='login'?'signup':'login'));
+ const {data,error}=await supabaseClient.auth.getSession();
+ if(error){showAuthMessage(error.message,'error');showAuth('login');return}
+ if(data.session?.user){
+  currentUser=data.session.user;
+  try{await ensureCloudRow(currentUser);showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
+  catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
+ }else showAuth('login');
+ supabaseClient.auth.onAuthStateChange(async (_event,session)=>{
+  if(session?.user){currentUser=session.user;try{await ensureCloudRow(currentUser);showApp()}catch(e){showAuthMessage(authErrorText(e),'error');showAuth('login')}}
+  else{currentUser=null;showAuth('login')}
+ });
+}
 const KEY='mis_cosas_';
 const state={
  view:'home',
@@ -464,7 +558,7 @@ function settings(c){
  <section class="card settings-card"><div class="setting-head"><div><h3>Gastos</h3><span class="muted">Cuentas, categorías, presupuestos y recurrentes.</span></div><button class="secondary small" onclick="go('expenses')">Gestionar</button></div><div class="settings-list"><div class="setting-row"><div><b>${state.accounts.length}</b><span>Cuentas</span></div><span>${state.budgets.length} presupuestos</span></div><div class="setting-row"><div><b>${state.transactions.filter(t=>t.recurring&&!t.recurringFrom).length}</b><span>Movimientos recurrentes</span></div></div></div></section>
  <section class="card settings-card"><div class="setting-head"><div><h3>Datos</h3><span class="muted">Haz una copia antes de hacer cambios importantes.</span></div></div><div class="data-actions"><button class="secondary" onclick="exportData()">Exportar mis datos</button><button class="secondary" onclick="document.querySelector('#importDataInput').click()">Importar copia</button><input id="importDataInput" type="file" accept="application/json" hidden onchange="importData(this)"></div><p class="muted">La copia incluye también inventario, preparaciones, menú y configuración.</p></section>
  <section class="card settings-card"><div class="setting-head"><div><h3>Aplicación</h3><span class="muted">PWA y almacenamiento local.</span></div><span class="status-dot">● Local</span></div><p class="muted">Los datos se mantienen en este navegador. Puedes instalar la PWA desde el navegador cuando esté disponible.</p></section>
- </div></div>`;
+ </div><section class="card settings-card"><div class="setting-head"><div><h3>Cuenta y sincronización</h3><span class="muted">Sesión actual</span></div><button class="secondary small" onclick="logout()">Cerrar sesión</button></div><div class="settings-list"><div class="setting-row"><div><b>${esc(currentUser?.email||'Sin sesión')}</b><span>Cuenta de Mis cosas</span></div><span class="pill">☁️ Conectada</span></div></div></section></div>`;
 }
 function profileSettingsForm(){const s=state.settings;return `<div class="form"><label>Nombre<input id="fSetName" value="${esc(s.name||'')}" placeholder="Tu nombre"></label><label>Moneda<select id="fSetCurrency"><option value="EUR" selected>Euro (€)</option><option value="GBP" ${s.currency==='GBP'?'selected':''}>Libra (£)</option><option value="USD" ${s.currency==='USD'?'selected':''}>Dólar ($)</option></select></label><label>Formato de fecha<select id="fSetDate"><option ${s.dateFormat==='DD/MM/YYYY'?'selected':''}>DD/MM/YYYY</option><option ${s.dateFormat==='MM/DD/YYYY'?'selected':''}>MM/DD/YYYY</option></select></label><label class="checkline"><input id="fSetMonday" type="checkbox" ${s.weekStartsMonday!==false?'checked':''}> La semana empieza en lunes</label><button class="primary" onclick="saveProfileSettings()">Guardar</button></div>`}
 function saveProfileSettings(){state.settings.name=document.querySelector('#fSetName').value.trim();state.settings.currency=document.querySelector('#fSetCurrency').value;state.settings.dateFormat=document.querySelector('#fSetDate').value;state.settings.weekStartsMonday=document.querySelector('#fSetMonday').checked;save();closeModal();applyAppearance();render()}
@@ -489,16 +583,12 @@ function saveCategoriesSettings(){
 }
 function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories))}
 function exportData(){
- const data={version:15,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
+ const data={version:18,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
 }
 async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','recipes','inventory','preparations','shoppingChecks','prepDone'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Mis cosas.')}}
 
-applyAppearance();
-render();
-checkNotifications();
-setInterval(checkNotifications,60000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)});
+initAuth();
 
 // Utilidades y controles globales (restaurados y centralizados)
 function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'-01T12:00');d.setMonth(d.getMonth()+n);state.expenseMonth=monthKey(d);render()}

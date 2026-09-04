@@ -82,20 +82,24 @@ async function loadFoodFromCloud(){
 }
 
 async function saveFoodToCloud(){
- if(!supabaseClient||!currentUser)return;
- if(cloudFoodSaveInFlight){cloudFoodSaveQueued=true;return;}
+ if(!supabaseClient||!currentUser)return false;
+ if(cloudFoodSaveInFlight){cloudFoodSaveQueued=true;return false;}
  cloudFoodSaveInFlight=true;
  try{
   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
   if(error)throw error;
   const current=data?.data&&typeof data.data==='object'?data.data:{};
   const next={...current,food:foodCloudPayload()};
-  const {error:updateError}=await supabaseClient.from('app_data').update({data:next}).eq('user_id',currentUser.id);
-  if(updateError)throw updateError;
- }catch(err){console.warn('No se han podido sincronizar Comidas.',err)}
- finally{
+  const {error:upsertError}=await supabaseClient.from('app_data').upsert({user_id:currentUser.id,data:next},{onConflict:'user_id'});
+  if(upsertError)throw upsertError;
+  return true;
+ }catch(err){
+  console.error('No se han podido sincronizar Comidas.',err);
+  state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+  return false;
+ }finally{
   cloudFoodSaveInFlight=false;
-  if(cloudFoodSaveQueued){cloudFoodSaveQueued=false;saveFoodToCloud();}
+  if(cloudFoodSaveQueued){cloudFoodSaveQueued=false;setTimeout(()=>saveFoodToCloud(),0);}
  }
 }
 
@@ -570,7 +574,7 @@ function savePreparation(id=''){const name=document.querySelector('#fPrepName').
 function deletePreparation(id){state.preparations=state.preparations.filter(x=>x.id!==id);save();closeModal();render()}
 function recipeForm(r=null){return `<div class="form"><label>Nombre de la receta<input id="fRecipeName" value="${esc(r?.name||'')}" placeholder="Ej. Pollo al horno"></label><label>Tipo<select id="fRecipeType">${foodTypes.map(x=>`<option ${x===r?.type?'selected':''}>${x}</option>`).join('')}</select></label><div class="form-two"><label>Raciones<input id="fRecipeServings" type="number" min="1" value="${r?.servings||2}"></label><label>Tiempo<input id="fRecipeTime" value="${esc(r?.time||'')}" placeholder="30 min"></label></div><label>Ingredientes <small>uno por línea: ingrediente | cantidad | unidad</small><textarea id="fRecipeIngredients" placeholder="Tomate | 150 | g\nArroz | 80 | g\nAceite de oliva | 10 | ml">${esc(r?.ingredientsText||'')}</textarea><label>Preparación<textarea id="fRecipeSteps" placeholder="Pasos de elaboración">${esc(r?.steps||'')}</textarea></label><label>Descripción<textarea id="fRecipeDesc" placeholder="Cómo es y cuándo te gusta prepararla">${esc(r?.description||'')}</textarea></label><label>Combina con<input id="fRecipePairs" value="${esc(r?.pairs||'')}" placeholder="Ej. ensalada verde"></label><label class="checkline"><input id="fRecipeFav" type="checkbox" ${r?.favorite?'checked':''}> Marcar como favorita</label><label class="checkline"><input id="fRecipeFreezable" type="checkbox" ${r?.freezable?'checked':''}> Se puede congelar</label><button class="primary" onclick="saveRecipe('${r?.id||''}')">${r?'Guardar cambios':'Guardar receta'}</button>${r?`<button class="danger-button" onclick="deleteRecipe('${r.id}')">Eliminar receta</button>`:''}</div>`}
 function parseIngredients(text=''){return text.split(/\n+/).map(line=>line.trim()).filter(Boolean).map(line=>{const p=line.split('|').map(x=>x.trim());return {ingredient:p[0],quantity:p[1]||'',unit:p[2]||''}})}
-function saveRecipe(id=''){const name=document.querySelector('#fRecipeName').value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}r.name=name;r.type=document.querySelector('#fRecipeType').value;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.freezable=document.querySelector('#fRecipeFreezable').checked;save();closeModal();render()}
+function saveRecipe(id=''){const name=document.querySelector('#fRecipeName').value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}r.name=name;r.type=document.querySelector('#fRecipeType').value;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.freezable=document.querySelector('#fRecipeFreezable').checked;save();closeModal();render();if(currentUser&&supabaseClient)saveFoodToCloud()}
 function editRecipe(id){const r=state.recipes.find(x=>x.id===id);if(r)openModal('Editar receta',recipeForm(r))}
 function deleteRecipe(id){state.recipes=state.recipes.filter(x=>x.id!==id);save();closeModal();render()}
 function viewRecipe(id){const r=state.recipes.find(x=>x.id===id);if(!r)return;openModal(r.name,`<div class="recipe-detail"><p>${esc(r.description||'')}</p><h4>Ingredientes</h4><ul>${(r.ingredients||parseIngredients(r.ingredientsText||'')).map(x=>`<li>${esc(x.ingredient)} · ${esc(x.quantity)} ${esc(x.unit)}</li>`).join('')}</ul><h4>Preparación</h4><p class="recipe-steps">${esc(r.steps||'')}</p>${r.pairs?`<h4>Combina con</h4><p>${esc(r.pairs)}</p>`:''}</div>`)}

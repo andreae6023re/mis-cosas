@@ -110,3 +110,18 @@ html[data-theme="dark"] .bottom-nav{background:rgba(37,38,35,.96);border-color:v
   .bottom-nav button{cursor:pointer;touch-action:manipulation}
   body.menu-open{overflow:hidden}
 }
+
+
+/* V12 — Comidas: compra y preparación */
+.menu-hint{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--card);color:var(--secondary);font-size:13px}
+.food-alert{display:flex;flex-direction:column;gap:3px;margin:12px 0;padding:11px 12px;border-radius:12px;background:#f2eee2;color:var(--text);font-size:13px}
+.food-alert span{color:var(--secondary)}
+.prep-row{width:100%;border:0;background:transparent;text-align:left;display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;color:var(--text)}
+.prep-row:last-child{border-bottom:0}.prep-row.done{opacity:.55}.prep-row.done b{text-decoration:line-through}
+.check-mini{width:22px;height:22px;border:1px solid var(--border);border-radius:7px;display:grid;place-items:center;flex:none;background:var(--card);font-size:13px}
+.prep-row.done .check-mini{background:var(--sage);color:white;border-color:var(--sage)}
+.shopping-progress{display:flex;align-items:center;gap:10px;margin:4px 0 12px}.shopping-progress>div{height:7px;background:var(--border);border-radius:99px;overflow:hidden;flex:1}.shopping-progress>div span{display:block;height:100%;background:var(--sage);border-radius:99px}.shopping-progress small{color:var(--secondary);min-width:72px;text-align:right}
+.shopping-preview{display:flex;flex-wrap:wrap;gap:8px}.shopping-item{border:1px solid var(--border);background:var(--card);border-radius:10px;padding:8px 10px;color:var(--text);cursor:pointer;font:inherit}.shopping-item.done{opacity:.55;text-decoration:line-through}.shopping-item span{margin-right:5px;color:var(--sage);font-weight:700}
+.shopping-group{margin-bottom:18px}.shopping-group h4{margin:0 0 8px}.shopping-check{margin:4px 0;padding:8px 0}.shopping-check.done span{text-decoration:line-through;opacity:.55}
+.prep-full-list .prep-row{padding:12px 0}.preparation-list{display:flex;flex-direction:column;gap:8px}
+@media(max-width:650px){.food-hero .actions{width:100%}.food-hero .actions button{flex:1}.shopping-preview{display:grid;grid-template-columns:1fr}.shopping-item{width:100%;text-align:left}.shopping-progress small{min-width:58px;font-size:11px}.menu-hint{font-size:12px}}

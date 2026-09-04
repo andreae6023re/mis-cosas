@@ -45,69 +45,100 @@ async function ensureCloudRow(user){
  }
 }
 
-let cloudFoodSaveTimer=null;
-let cloudFoodSaveInFlight=false;
-let cloudFoodSaveQueued=false;
+let cloudSaveTimer=null;
+let cloudSaveInFlight=false;
+let cloudSaveQueued=false;
 
-function foodCloudPayload(){
+function cloudPayload(){
  return {
+  tasks:Array.isArray(state.tasks)?state.tasks:[],
+  expenses:Array.isArray(state.expenses)?state.expenses:[],
+  transactions:Array.isArray(state.transactions)?state.transactions:[],
+  accounts:Array.isArray(state.accounts)?state.accounts:[],
+  budgets:Array.isArray(state.budgets)?state.budgets:[],
+  events:Array.isArray(state.events)?state.events:[],
+  habits:Array.isArray(state.habits)?state.habits:[],
   recipes:Array.isArray(state.recipes)?state.recipes:[],
   inventory:Array.isArray(state.inventory)?state.inventory:[],
   preparations:Array.isArray(state.preparations)?state.preparations:[],
   shoppingChecks:state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{},
   prepDone:state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{},
-  menu:state.menu||null
+  menu:state.menu||null,
+  calendarMonth:state.calendarMonth||'',
+  settings:state.settings&&typeof state.settings==='object'?state.settings:{},
+  expenseCategories:typeof expenseCategories==='object'?expenseCategories:{}
  };
 }
 
-async function loadFoodFromCloud(){
+function localCacheFromState(){
+ Object.keys(state).forEach(k=>{
+  if(k==='view'||k==='cloudSyncError')return;
+  if(k==='calendarMonth'){localStorage.setItem(KEY+k,String(state[k]||''));return}
+  if(Array.isArray(state[k])||k==='settings'||k==='menu'||k==='shoppingChecks'||k==='prepDone')localStorage.setItem(KEY+k,JSON.stringify(state[k]));
+ });
+ if(typeof expenseCategories==='object')localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));
+}
+
+async function loadAllFromCloud(){
  if(!supabaseClient||!currentUser)return false;
  const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
  if(error)throw error;
- const cloud=data?.data?.food;
- if(!cloud||typeof cloud!=='object'){
-  await saveFoodToCloud();
+ const cloud=data?.data&&typeof data.data==='object'?data.data:null;
+ const hasCloudData=cloud && Object.keys(cloud).some(k=>k!=='food');
+ if(!hasCloudData && cloud?.food){
+  const f=cloud.food;
+  if(Array.isArray(f.recipes))state.recipes=f.recipes;
+  if(Array.isArray(f.inventory))state.inventory=f.inventory;
+  if(Array.isArray(f.preparations))state.preparations=f.preparations;
+  if(f.shoppingChecks&&typeof f.shoppingChecks==='object')state.shoppingChecks=f.shoppingChecks;
+  if(f.prepDone&&typeof f.prepDone==='object')state.prepDone=f.prepDone;
+  if(f.menu!==undefined)state.menu=f.menu;
+  await saveAllToCloud();
+ }else if(hasCloudData){
+  ['tasks','expenses','transactions','accounts','budgets','events','habits','recipes','inventory','preparations'].forEach(k=>{if(Array.isArray(cloud[k]))state[k]=cloud[k]});
+  if(cloud.shoppingChecks&&typeof cloud.shoppingChecks==='object')state.shoppingChecks=cloud.shoppingChecks;
+  if(cloud.prepDone&&typeof cloud.prepDone==='object')state.prepDone=cloud.prepDone;
+  if(cloud.menu!==undefined)state.menu=cloud.menu;
+  if(typeof cloud.calendarMonth==='string')state.calendarMonth=cloud.calendarMonth;
+  if(cloud.settings&&typeof cloud.settings==='object')state.settings=cloud.settings;
+  if(cloud.expenseCategories&&typeof cloud.expenseCategories==='object')expenseCategories=cloud.expenseCategories;
+ }else{
+  await saveAllToCloud();
   return false;
  }
- if(Array.isArray(cloud.recipes))state.recipes=cloud.recipes;
- if(Array.isArray(cloud.inventory))state.inventory=cloud.inventory;
- if(Array.isArray(cloud.preparations))state.preparations=cloud.preparations;
- if(cloud.shoppingChecks&&typeof cloud.shoppingChecks==='object')state.shoppingChecks=cloud.shoppingChecks;
- if(cloud.prepDone&&typeof cloud.prepDone==='object')state.prepDone=cloud.prepDone;
- if(cloud.menu!==undefined)state.menu=cloud.menu;
- // Keep local cache aligned with the cloud copy.
- ['recipes','inventory','preparations','shoppingChecks','prepDone'].forEach(k=>localStorage.setItem(KEY+k,JSON.stringify(state[k])));
- localStorage.setItem(KEY+'menu',JSON.stringify(state.menu));
+ localCacheFromState();
  return true;
 }
 
-async function saveFoodToCloud(){
+async function saveAllToCloud(){
  if(!supabaseClient||!currentUser)return false;
- if(cloudFoodSaveInFlight){cloudFoodSaveQueued=true;return false;}
- cloudFoodSaveInFlight=true;
+ if(cloudSaveInFlight){cloudSaveQueued=true;return false;}
+ cloudSaveInFlight=true;
  try{
   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
   if(error)throw error;
   const current=data?.data&&typeof data.data==='object'?data.data:{};
-  const next={...current,food:foodCloudPayload()};
+  const next={...current,...cloudPayload()};
   const {error:upsertError}=await supabaseClient.from('app_data').upsert({user_id:currentUser.id,data:next},{onConflict:'user_id'});
   if(upsertError)throw upsertError;
+  state.cloudSyncError='';
   return true;
  }catch(err){
-  console.error('No se han podido sincronizar Comidas.',err);
+  console.error('No se han podido sincronizar los datos.',err);
   state.cloudSyncError=String(err?.message||err||'Error de sincronización');
   return false;
  }finally{
-  cloudFoodSaveInFlight=false;
-  if(cloudFoodSaveQueued){cloudFoodSaveQueued=false;setTimeout(()=>saveFoodToCloud(),0);}
+  cloudSaveInFlight=false;
+  if(cloudSaveQueued){cloudSaveQueued=false;setTimeout(()=>saveAllToCloud(),0);}
  }
 }
 
-function queueFoodCloudSave(){
+function queueCloudSave(){
  if(!currentUser||!supabaseClient)return;
- clearTimeout(cloudFoodSaveTimer);
- cloudFoodSaveTimer=setTimeout(()=>saveFoodToCloud(),250);
+ clearTimeout(cloudSaveTimer);
+ cloudSaveTimer=setTimeout(()=>saveAllToCloud(),300);
 }
+
 async function handleAuthSubmit(e){
  e.preventDefault();
  if(!supabaseClient){showAuthMessage('No se ha podido cargar el servicio de autenticación.','error');return}
@@ -127,7 +158,7 @@ async function handleAuthSubmit(e){
   }else if(result.data.user){
    currentUser=result.data.user;
    await ensureCloudRow(currentUser);
-   await loadFoodFromCloud();
+   await loadAllFromCloud();
    showApp();applyAppearance();render();checkNotifications();
   }
  }catch(err){showAuthMessage(authErrorText(err),'error')}
@@ -149,7 +180,7 @@ async function initAuth(){
  if(error){showAuthMessage(error.message,'error');showAuth('login');return}
  if(data.session?.user){
   currentUser=data.session.user;
-  try{await ensureCloudRow(currentUser);await loadFoodFromCloud();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
+  try{await ensureCloudRow(currentUser);await loadAllFromCloud();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
   catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
  }else showAuth('login');
  supabaseClient.auth.onAuthStateChange((_event,session)=>{
@@ -181,7 +212,7 @@ const foodTypes=['Comidas','Cenas','Dulces','Pan','Preparaciones'];
 const fmt=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(n||0);
 const todayKey=()=>{const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};
 const today=new Date();
-function save(){Object.keys(state).forEach(k=>{if(k==='calendarMonth'){localStorage.setItem(KEY+k,String(state[k]||''));return}if(Array.isArray(state[k])||k==='settings'||k==='menu'||k==='shoppingChecks'||k==='prepDone')localStorage.setItem(KEY+k,JSON.stringify(state[k]))});queueFoodCloudSave()}
+function save(){localCacheFromState();queueCloudSave()}
 function go(v){state.view=v;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));render()}
 function render(){
  const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],settings:['Ajustes','Configura la aplicación']};
@@ -574,7 +605,7 @@ function savePreparation(id=''){const name=document.querySelector('#fPrepName').
 function deletePreparation(id){state.preparations=state.preparations.filter(x=>x.id!==id);save();closeModal();render()}
 function recipeForm(r=null){return `<div class="form"><label>Nombre de la receta<input id="fRecipeName" value="${esc(r?.name||'')}" placeholder="Ej. Pollo al horno"></label><label>Tipo<select id="fRecipeType">${foodTypes.map(x=>`<option ${x===r?.type?'selected':''}>${x}</option>`).join('')}</select></label><div class="form-two"><label>Raciones<input id="fRecipeServings" type="number" min="1" value="${r?.servings||2}"></label><label>Tiempo<input id="fRecipeTime" value="${esc(r?.time||'')}" placeholder="30 min"></label></div><label>Ingredientes <small>uno por línea: ingrediente | cantidad | unidad</small><textarea id="fRecipeIngredients" placeholder="Tomate | 150 | g\nArroz | 80 | g\nAceite de oliva | 10 | ml">${esc(r?.ingredientsText||'')}</textarea><label>Preparación<textarea id="fRecipeSteps" placeholder="Pasos de elaboración">${esc(r?.steps||'')}</textarea></label><label>Descripción<textarea id="fRecipeDesc" placeholder="Cómo es y cuándo te gusta prepararla">${esc(r?.description||'')}</textarea></label><label>Combina con<input id="fRecipePairs" value="${esc(r?.pairs||'')}" placeholder="Ej. ensalada verde"></label><label class="checkline"><input id="fRecipeFav" type="checkbox" ${r?.favorite?'checked':''}> Marcar como favorita</label><label class="checkline"><input id="fRecipeFreezable" type="checkbox" ${r?.freezable?'checked':''}> Se puede congelar</label><button class="primary" onclick="saveRecipe('${r?.id||''}')">${r?'Guardar cambios':'Guardar receta'}</button>${r?`<button class="danger-button" onclick="deleteRecipe('${r.id}')">Eliminar receta</button>`:''}</div>`}
 function parseIngredients(text=''){return text.split(/\n+/).map(line=>line.trim()).filter(Boolean).map(line=>{const p=line.split('|').map(x=>x.trim());return {ingredient:p[0],quantity:p[1]||'',unit:p[2]||''}})}
-function saveRecipe(id=''){const name=document.querySelector('#fRecipeName').value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}r.name=name;r.type=document.querySelector('#fRecipeType').value;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.freezable=document.querySelector('#fRecipeFreezable').checked;save();closeModal();render();if(currentUser&&supabaseClient)saveFoodToCloud()}
+function saveRecipe(id=''){const name=document.querySelector('#fRecipeName').value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}r.name=name;r.type=document.querySelector('#fRecipeType').value;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.freezable=document.querySelector('#fRecipeFreezable').checked;save();closeModal();render();if(currentUser&&supabaseClient)saveAllToCloud()}
 function editRecipe(id){const r=state.recipes.find(x=>x.id===id);if(r)openModal('Editar receta',recipeForm(r))}
 function deleteRecipe(id){state.recipes=state.recipes.filter(x=>x.id!==id);save();closeModal();render()}
 function viewRecipe(id){const r=state.recipes.find(x=>x.id===id);if(!r)return;openModal(r.name,`<div class="recipe-detail"><p>${esc(r.description||'')}</p><h4>Ingredientes</h4><ul>${(r.ingredients||parseIngredients(r.ingredientsText||'')).map(x=>`<li>${esc(x.ingredient)} · ${esc(x.quantity)} ${esc(x.unit)}</li>`).join('')}</ul><h4>Preparación</h4><p class="recipe-steps">${esc(r.steps||'')}</p>${r.pairs?`<h4>Combina con</h4><p>${esc(r.pairs)}</p>`:''}</div>`)}

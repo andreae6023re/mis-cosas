@@ -8,7 +8,10 @@ const state={
  budgets:JSON.parse(localStorage.getItem(KEY+'budgets')||'[]'),
  events:JSON.parse(localStorage.getItem(KEY+'events')||'[]'),
  habits:JSON.parse(localStorage.getItem(KEY+'habits')||'[]'),
- recipes:JSON.parse(localStorage.getItem(KEY+'recipes')||'[]')
+ recipes:JSON.parse(localStorage.getItem(KEY+'recipes')||'[]'),
+ inventory:JSON.parse(localStorage.getItem(KEY+'inventory')||'[]'),
+ preparations:JSON.parse(localStorage.getItem(KEY+'preparations')||'[]'),
+ menu:JSON.parse(localStorage.getItem(KEY+'menu')||'null')||null
 };
 const cats={Casa:'#ab858f',Cumpleaños:'#a0acb9',Familia:'#9ebdb8',Médico:'#b3ad8c','Médicos familia':'#67a48b',Otros:'#7f9a7d',Social:'#9998b1',Vacaciones:'#cbafab',Viajes:'#9cabc8'};
 const habitColors=['#7F9A7D','#9CABC8','#A0ACB9','#9EBDB8','#B3AD8C','#CBAFAB','#9998B1','#8F9E92'];
@@ -419,7 +422,7 @@ function saveCategoriesSettings(){
 }
 function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories))}
 function exportData(){
- const data={version:9,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,menu:state.menu,settings:state.settings,expenseCategories};
+ const data={version:11,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,menu:state.menu,settings:state.settings,expenseCategories};
  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
 }
 async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','recipes','inventory','preparations'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Mis cosas.')}}
@@ -438,7 +441,13 @@ function sameMonth(s){if(!s)return false;const d=new Date(String(s).length<=10?s
 function cap(s=''){return s?s[0].toUpperCase()+s.slice(1):s}
 function esc(s=''){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 
-document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.view)));
+function closeMobileMenu(){document.querySelector('.sidebar')?.classList.remove('open');document.querySelector('.menu-backdrop')?.classList.remove('show');document.body.classList.remove('menu-open')}
+function toggleMobileMenu(){const sidebar=document.querySelector('.sidebar');const backdrop=document.querySelector('.menu-backdrop');if(!sidebar)return;const open=!sidebar.classList.contains('open');sidebar.classList.toggle('open',open);backdrop?.classList.toggle('show',open);document.body.classList.toggle('menu-open',open)}
+const menuBtn=document.querySelector('#menuBtn');
+if(menuBtn)menuBtn.addEventListener('click',toggleMobileMenu);
+document.querySelector('.menu-backdrop')?.addEventListener('click',closeMobileMenu);
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{go(b.dataset.view);closeMobileMenu();}));
+
 document.querySelector('#closeModal').addEventListener('click',closeModal);
 document.querySelector('#quickAdd').addEventListener('click',()=>{
  if(state.view==='tasks')openModal('Nueva tarea',taskForm());

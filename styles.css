@@ -71,3 +71,42 @@ html[data-theme="dark"]{--bg:#20211f;--card:#292a27;--text:#f1efe9;--muted:#aaa7
 html[data-accent="blue"]{--sage:#7f90b5}html[data-accent="water"]{--sage:#6f9d96}
 @media(max-width:950px){.food-layout{grid-template-columns:1fr}.recipe-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.food-hero{align-items:flex-start;flex-direction:column}.food-hero .actions{width:100%}.food-hero .actions button{flex:1}}
 @media(max-width:650px){.food-stats{grid-template-columns:repeat(2,1fr);gap:8px}.food-stats>div{padding:12px}.weekly-menu{grid-template-columns:1fr}.recipe-grid{grid-template-columns:1fr}.food-panel{padding:14px}.food-preferences{flex-wrap:nowrap;overflow:auto;padding-bottom:3px}.pref-chip{white-space:nowrap}.menu-day{padding:11px}}
+
+/* V10 — navegación móvil */
+@media(max-width:700px){
+  body{padding-bottom:68px}
+  .app{display:block;min-height:100vh}
+  .sidebar{display:block;position:fixed;z-index:1000;top:0;left:0;bottom:0;width:min(82vw,300px);transform:translateX(-105%);transition:transform .22s ease;padding:24px 16px;box-shadow:8px 0 30px rgba(52,52,52,.10)}
+  .sidebar.open{transform:translateX(0)}
+  main{margin-left:0;width:100%;max-width:none;padding:18px 14px 28px}
+  header{position:relative;min-height:46px;margin-bottom:20px;gap:10px}
+  header>div{min-width:0;flex:1}
+  header h1{font-size:23px}
+  .mobile{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:var(--card);border:1px solid var(--border);font-size:22px;flex:none}
+  .bottom-nav{position:fixed;z-index:900;display:grid;grid-template-columns:repeat(4,1fr);left:0;right:0;bottom:0;height:64px;padding:7px 8px calc(7px + env(safe-area-inset-bottom));background:rgba(250,249,246,.96);border-top:1px solid var(--border);backdrop-filter:blur(10px);box-shadow:0 -4px 18px rgba(52,52,52,.06)}
+  .bottom-nav button{display:flex;align-items:center;justify-content:center;text-align:center;padding:8px 5px;border-radius:11px;font-size:12px;min-width:0}
+  .bottom-nav button.active{background:#ebe9e2;color:var(--text);font-weight:650}
+  .bottom-nav button:hover{background:transparent}
+  .brand{margin-bottom:25px}
+  .sep{margin:10px 8px}
+  .modal{padding:14px}
+  .modal-card{width:100%;max-height:88vh}
+}
+@media(max-width:420px){
+  main{padding-left:10px;padding-right:10px}
+  .bottom-nav{padding-left:4px;padding-right:4px}
+  .bottom-nav button{font-size:11px}
+}
+html[data-theme="dark"] .bottom-nav{background:rgba(37,38,35,.96);border-color:var(--border)}
+
+/* V11 — navegación móvil robusta */
+.menu-backdrop{display:none}
+@media(max-width:700px){
+  .menu-backdrop{display:block;position:fixed;inset:0;z-index:999;background:rgba(30,30,28,.28);opacity:0;pointer-events:none;transition:opacity .2s ease}
+  .menu-backdrop.show{opacity:1;pointer-events:auto}
+  .sidebar{z-index:1001!important}
+  #menuBtn{position:relative;z-index:1002;display:grid!important;cursor:pointer;touch-action:manipulation}
+  .bottom-nav{z-index:1000!important;pointer-events:auto}
+  .bottom-nav button{cursor:pointer;touch-action:manipulation}
+  body.menu-open{overflow:hidden}
+}

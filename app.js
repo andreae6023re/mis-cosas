@@ -348,6 +348,10 @@ function saveBudget(id=''){let category=document.querySelector('#fBudgetCategory
 function deleteBudget(id){state.budgets=state.budgets.filter(x=>x.id!==id);save();closeModal();render()}
 function accountsForm(){return `<div class="form accounts-form">${state.accounts.map(a=>`<div class="account-edit"><div><b>${esc(a.name)}</b><span>Saldo inicial</span></div><input id="acc-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></div>`).join('')}<button class="primary" onclick="saveAccounts()">Guardar saldos</button></div>`}
 function saveAccounts(){state.accounts.forEach(a=>{const el=document.querySelector('#acc-'+a.id);if(el)a.startingBalance=Number(el.value)||0});save();closeModal();render()}
+function expiringInventory(){
+ const limit=new Date(); limit.setHours(23,59,59,999); limit.setDate(limit.getDate()+7);
+ return state.inventory.filter(x=>x.expiry&&new Date(x.expiry+'T12:00:00')<=limit&&new Date(x.expiry+'T12:00:00')>=new Date(todayKey()+'T00:00:00')).sort((a,b)=>String(a.expiry).localeCompare(String(b.expiry)));
+}
 function food(c){
  const inv=state.inventory, prep=state.preparations, menu=state.menu;
  const counts={freezer:inv.filter(x=>x.storage==='freezer').length,pantry:inv.filter(x=>x.storage==='pantry').length,fresh:inv.filter(x=>x.storage==='fresh').length};
@@ -450,7 +454,7 @@ function saveCategoriesSettings(){
 }
 function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories))}
 function exportData(){
- const data={version:13,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
+ const data={version:14,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
 }
 async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','recipes','inventory','preparations','shoppingChecks','prepDone'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Mis cosas.')}}

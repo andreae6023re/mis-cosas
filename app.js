@@ -87,8 +87,8 @@ async function initAuth(){
   try{await ensureCloudRow(currentUser);showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
   catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
  }else showAuth('login');
- supabaseClient.auth.onAuthStateChange(async (_event,session)=>{
-  if(session?.user){currentUser=session.user;try{await ensureCloudRow(currentUser);showApp()}catch(e){showAuthMessage(authErrorText(e),'error');showAuth('login')}}
+ supabaseClient.auth.onAuthStateChange((_event,session)=>{
+  if(session?.user){currentUser=session.user;showApp()}
   else{currentUser=null;showAuth('login')}
  });
 }

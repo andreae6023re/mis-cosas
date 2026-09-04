@@ -44,6 +44,66 @@ async function ensureCloudRow(user){
   if(insertError)throw insertError;
  }
 }
+
+let cloudFoodSaveTimer=null;
+let cloudFoodSaveInFlight=false;
+let cloudFoodSaveQueued=false;
+
+function foodCloudPayload(){
+ return {
+  recipes:Array.isArray(state.recipes)?state.recipes:[],
+  inventory:Array.isArray(state.inventory)?state.inventory:[],
+  preparations:Array.isArray(state.preparations)?state.preparations:[],
+  shoppingChecks:state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{},
+  prepDone:state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{},
+  menu:state.menu||null
+ };
+}
+
+async function loadFoodFromCloud(){
+ if(!supabaseClient||!currentUser)return false;
+ const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
+ if(error)throw error;
+ const cloud=data?.data?.food;
+ if(!cloud||typeof cloud!=='object'){
+  await saveFoodToCloud();
+  return false;
+ }
+ if(Array.isArray(cloud.recipes))state.recipes=cloud.recipes;
+ if(Array.isArray(cloud.inventory))state.inventory=cloud.inventory;
+ if(Array.isArray(cloud.preparations))state.preparations=cloud.preparations;
+ if(cloud.shoppingChecks&&typeof cloud.shoppingChecks==='object')state.shoppingChecks=cloud.shoppingChecks;
+ if(cloud.prepDone&&typeof cloud.prepDone==='object')state.prepDone=cloud.prepDone;
+ if(cloud.menu!==undefined)state.menu=cloud.menu;
+ // Keep local cache aligned with the cloud copy.
+ ['recipes','inventory','preparations','shoppingChecks','prepDone'].forEach(k=>localStorage.setItem(KEY+k,JSON.stringify(state[k])));
+ localStorage.setItem(KEY+'menu',JSON.stringify(state.menu));
+ return true;
+}
+
+async function saveFoodToCloud(){
+ if(!supabaseClient||!currentUser)return;
+ if(cloudFoodSaveInFlight){cloudFoodSaveQueued=true;return;}
+ cloudFoodSaveInFlight=true;
+ try{
+  const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
+  if(error)throw error;
+  const current=data?.data&&typeof data.data==='object'?data.data:{};
+  const next={...current,food:foodCloudPayload()};
+  const {error:updateError}=await supabaseClient.from('app_data').update({data:next}).eq('user_id',currentUser.id);
+  if(updateError)throw updateError;
+ }catch(err){console.warn('No se han podido sincronizar Comidas.',err)}
+ finally{
+  cloudFoodSaveInFlight=false;
+  if(cloudFoodSaveQueued){cloudFoodSaveQueued=false;saveFoodToCloud();}
+ }
+}
+
+function queueFoodCloudSave(){
+ if(!currentUser||!supabaseClient)return;
+ clearTimeout(cloudFoodSaveTimer);
+ cloudFoodSaveTimer=setTimeout(()=>saveFoodToCloud(),250);
+}
 async function handleAuthSubmit(e){
  e.preventDefault();
  if(!supabaseClient){showAuthMessage('No se ha podido cargar el servicio de autenticación.','error');return}
@@ -63,6 +123,7 @@ async function handleAuthSubmit(e){
   }else if(result.data.user){
    currentUser=result.data.user;
    await ensureCloudRow(currentUser);
+   await loadFoodFromCloud();
    showApp();applyAppearance();render();checkNotifications();
   }
  }catch(err){showAuthMessage(authErrorText(err),'error')}
@@ -84,7 +145,7 @@ async function initAuth(){
  if(error){showAuthMessage(error.message,'error');showAuth('login');return}
  if(data.session?.user){
   currentUser=data.session.user;
-  try{await ensureCloudRow(currentUser);showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
+  try{await ensureCloudRow(currentUser);await loadFoodFromCloud();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
   catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
  }else showAuth('login');
  supabaseClient.auth.onAuthStateChange((_event,session)=>{
@@ -116,7 +177,7 @@ const foodTypes=['Comidas','Cenas','Dulces','Pan','Preparaciones'];
 const fmt=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(n||0);
 const todayKey=()=>{const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};
 const today=new Date();
-function save(){Object.keys(state).forEach(k=>{if(k==='calendarMonth'){localStorage.setItem(KEY+k,String(state[k]||''));return}if(Array.isArray(state[k])||k==='settings'||k==='menu'||k==='shoppingChecks'||k==='prepDone')localStorage.setItem(KEY+k,JSON.stringify(state[k]))})}
+function save(){Object.keys(state).forEach(k=>{if(k==='calendarMonth'){localStorage.setItem(KEY+k,String(state[k]||''));return}if(Array.isArray(state[k])||k==='settings'||k==='menu'||k==='shoppingChecks'||k==='prepDone')localStorage.setItem(KEY+k,JSON.stringify(state[k]))});queueFoodCloudSave()}
 function go(v){state.view=v;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));render()}
 function render(){
  const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],settings:['Ajustes','Configura la aplicación']};

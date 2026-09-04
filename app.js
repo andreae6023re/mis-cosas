@@ -37,11 +37,28 @@ function home(c){
  <div class="card span-4"><div class="row"><h3>Ahora</h3><span class="badge">${pending}</span></div><div class="list compact"><div class="item"><b>${pending}</b> tareas pendientes</div>${homePendingTasks()}<div class="item">${todayHabitsSummary()}</div></div><button class="primary" onclick="go('tasks')">Ver tareas</button></div>
  <div class="card span-4"><h3>Tareas</h3><div class="metric">${pending}</div><span class="muted">pendientes</span></div>
  <div class="card span-4"><h3>Gastos este mes</h3><div class="metric">${fmt(spent)}</div><span class="muted">de momento</span></div>
- <div class="card span-4"><h3>Comidas</h3><div class="item">Comida pendiente de planificar</div><div class="item">Cena pendiente de planificar</div></div>
+ <div class="card span-8 home-food-card"><div class="row"><div><h3>Comidas</h3><span class="muted">Tu menú y tus recetas, a mano.</span></div><button class="secondary small" onclick="go('food')">Ver Comidas</button></div><div class="home-food-content">${homeTodayMeal()}${homeRecipes()}</div></div>
+ <div class="card span-4 home-prep-card"><div class="row"><div><h3>Preparar esta semana</h3><span class="muted">${state.preparations.length?`${state.preparations.filter(x=>!state.prepDone[x.id]).length} pendientes`:'Sin preparaciones'}</span></div><button class="secondary small" onclick="go('food')">Comidas</button></div>${homePreparations()}</div>
  <div class="card span-12"><div class="row"><div><h3>Hábitos de hoy</h3><span class="muted">Toca el botón para marcar cada hábito.</span></div><button class="secondary" onclick="go('habits')">Gestionar hábitos</button></div><div class="habit-home-grid">${habitButtons()}</div></div>
- <div class="card span-12"><div class="row"><div><h3>Preparar esta semana</h3><span class="muted">Aquí conectaremos menú, preparaciones e inventario.</span></div><button class="secondary" onclick="go('food')">Ir a Comidas</button></div></div>
  </div>`;
  renderMiniCalendar(c.querySelector('.calendar-mini'));
+}
+function homeTodayMeal(){
+ const menu=state.menu?.days;
+ if(!menu)return '<div class="home-food-empty">Todavía no tienes un menú semanal. <button class="text-button" onclick="go(\'food\')">Ir a Comidas →</button></div>';
+ const i=(today.getDay()+6)%7, day=menu[i];
+ if(!day)return '<div class="home-food-empty">Todavía no hay menú para hoy.</div>';
+ return `<div class="home-today-meal"><div class="eyebrow">Hoy</div><div><span>Comida</span><strong>${esc(day.lunch||'Sin planificar')}</strong></div><div><span>Cena</span><strong>${esc(day.dinner||'Sin planificar')}</strong></div>${day.tupper?'<span class="pill home-tupper">Tupper</span>':''}</div>`;
+}
+function homeRecipes(){
+ const recipes=[...state.recipes].sort((a,b)=>(b.favorite?1:0)-(a.favorite?1:0)).slice(0,4);
+ if(!recipes.length)return '<div class="home-recipes-empty"><span>Aún no tienes recetas guardadas.</span><button class="text-button" onclick="go(\'food\')">Añadir una →</button></div>';
+ return `<div class="home-recipes"><div class="home-section-title"><b>Mis recetas</b><button class="text-button" onclick="go(\'food\')">Ver todas →</button></div>${recipes.map(r=>`<button class="home-recipe-row" onclick="viewRecipe(\'${r.id}\')"><span class="home-recipe-type">${esc(r.type||'Receta')}</span><span class="home-recipe-name">${esc(r.name)}</span>${r.favorite?'<span class="favorite-mark">★</span>':''}</button>`).join('')}</div>`;
+}
+function homePreparations(){
+ const pending=state.preparations.filter(x=>!state.prepDone[x.id]).slice(0,3);
+ if(!pending.length)return '<div class="home-prep-empty">Todo preparado. 🎉</div>';
+ return `<div class="home-prep-list">${pending.map(x=>`<button class="home-prep-row" onclick="togglePrep(\'${x.id}\')"><span class="check-mini"></span><span>${esc(x.name)}</span></button>`).join('')}</div>${state.preparations.length>3?'<button class="text-button" onclick="go(\'food\')">Ver todas →</button>':''}`;
 }
 function homePendingTasks(){const list=state.tasks.filter(x=>!x.done).sort(taskSort).slice(0,3);if(!list.length)return '<div class="item muted">No hay tareas pendientes.</div>';return list.map(t=>`<button class="home-task" onclick="go('tasks')"><span>${esc(t.title)}</span>${isOverdue(t)?'<span class="overdue-label">Atrasada</span>':''}</button>`).join('')}
 function todayHabitsSummary(){const n=state.habits.length;if(!n)return 'Aún no tienes hábitos';const done=state.habits.filter(h=>isHabitDone(h,todayKey())).length;return `${done} de ${n} hábitos completados`}

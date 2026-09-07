@@ -150,3 +150,4 @@ html[data-theme="dark"] .calendar-day.has-events{background:#30312e}
 .auth-message.error{color:#a34e4e}.auth-message.success{color:#547957}
 .auth-toggle{display:block;margin:18px auto 0}
 @media(max-width:700px){.auth-screen{padding:16px}.auth-card{padding:26px 20px;border-radius:20px}.auth-card h1{font-size:26px}}
+.recipe-check-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}.recipe-check-grid .checkline{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:9px 10px;margin:0}.field-title{font-weight:700;margin-bottom:4px}@media(max-width:650px){.recipe-check-grid{grid-template-columns:1fr}}

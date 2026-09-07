@@ -62,5 +62,27 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="app.js"></script>
 <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('service-worker.js');</script>
+
+<script>
+(function(){
+  let deferredInstallPrompt = null;
+  window.addEventListener('beforeinstallprompt', function(event){
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    document.querySelectorAll('[data-install-app]').forEach(function(btn){ btn.hidden = false; });
+  });
+  window.addEventListener('appinstalled', function(){
+    deferredInstallPrompt = null;
+    document.querySelectorAll('[data-install-app]').forEach(function(btn){ btn.hidden = true; });
+  });
+  document.addEventListener('click', function(event){
+    const btn = event.target.closest && event.target.closest('[data-install-app]');
+    if(!btn || !deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    deferredInstallPrompt.userChoice.finally(function(){ deferredInstallPrompt = null; });
+  });
+  window.misCosasCanInstall = function(){ return !!deferredInstallPrompt; };
+})();
+</script>
 </body>
 </html>

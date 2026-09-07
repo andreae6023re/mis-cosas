@@ -664,7 +664,7 @@ function expiringInventory(){
 function menuRecipeTitle(name,extraClass=''){
  const recipe=state.recipes.find(r=>r.name===name);
  if(!recipe)return `<strong class="${extraClass}">${esc(name||'Sin planificar')}</strong>`;
- if(extraClass.includes('home-menu-recipe-title')) return `<span class="${extraClass} home-menu-recipe-click" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</span>`;
+ if(extraClass.includes('home-menu-recipe-title')) return `<strong class="${extraClass} home-menu-recipe-click" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</strong>`;
  return `<button class="menu-recipe-link ${extraClass}" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</button>`;
 }
 function food(c){

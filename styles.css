@@ -209,3 +209,8 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
 }
 .meal-line .menu-recipe-link:hover{text-decoration:underline;text-underline-offset:3px}
 .meal-line .menu-recipe-link:focus-visible{outline:2px solid var(--sage,#7F9A7D);outline-offset:3px;border-radius:3px}
+
+/* V46: Home idéntica al diseño original; solo se añade interacción al nombre */
+.home-today-meal .home-menu-recipe-click{cursor:pointer}
+.home-today-meal .home-menu-recipe-click:hover{text-decoration:underline;text-underline-offset:3px}
+.home-today-meal .home-menu-recipe-click:focus-visible{outline:2px solid var(--sage,#7F9A7D);outline-offset:2px;border-radius:3px}

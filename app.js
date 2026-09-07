@@ -292,7 +292,7 @@ function home(c){
  const d=today.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'}),pending=state.tasks.filter(x=>!x.done).length;
  const spent=state.transactions.filter(x=>x.type==='expense'&&sameMonth(x.date)).reduce((a,x)=>a+Number(x.amount||0),0);
  c.innerHTML=`<div class="grid">
- <div class="card span-8"><div class="muted">Hoy</div><div class="metric">${cap(d)}</div><div class="calendar-mini"></div></div>
+ <div class="card span-12 home-calendar-card"><div class="home-calendar-wrap"></div></div>
  <div class="card span-4"><div class="row"><h3>Ahora</h3><span class="badge">${pending}</span></div><div class="list compact"><div class="item"><b>${pending}</b> tareas pendientes</div>${homePendingTasks()}<div class="item">${todayHabitsSummary()}</div></div><button class="primary" onclick="go('tasks')">Ver tareas</button></div>
  <div class="card span-4"><h3>Tareas</h3><div class="metric">${pending}</div><span class="muted">pendientes</span></div>
  <div class="card span-4"><h3>Gastos este mes</h3><div class="metric">${fmt(spent)}</div><span class="muted">de momento</span></div>
@@ -300,7 +300,7 @@ function home(c){
  <div class="card span-4 home-prep-card"><div class="row"><div><h3>Preparar esta semana</h3><span class="muted">${state.preparations.length?`${state.preparations.filter(x=>!state.prepDone[x.id]).length} pendientes`:'Sin preparaciones'}</span></div><button class="secondary small" onclick="go('food')">Comidas</button></div>${homePreparations()}</div>
  <div class="card span-12"><div class="row"><div><h3>Hábitos de hoy</h3><span class="muted">Toca el botón para marcar cada hábito.</span></div><button class="secondary" onclick="go('habits')">Gestionar hábitos</button></div><div class="habit-home-grid">${habitButtons()}</div></div>
  </div>`;
- renderMiniCalendar(c.querySelector('.calendar-mini'));
+ renderHomeCalendar(c.querySelector('.home-calendar-wrap'));
 }
 function homeTodayMeal(){
  const menu=state.menu?.days;
@@ -353,7 +353,22 @@ function selectHabitColor(col){document.querySelector('#fHabitColor').value=col;
 function saveHabit(id){const name=document.querySelector('#fHabitName').value.trim();if(!name)return;const existing=id&&state.habits.find(x=>x.id===id);const h=existing||{id:crypto.randomUUID(),completed:[]};h.name=name;h.frequency=document.querySelector('#fHabitFreq').value;h.daysPerWeek=h.frequency==='daily'?7:Number(document.querySelector('#fHabitDays').value);h.reminder=document.querySelector('#fHabitReminder').checked;h.reminderTime=h.reminder?document.querySelector('#fHabitTime').value:'';h.color=document.querySelector('#fHabitColor').value; if(!existing)state.habits.push(h);save();closeModal();render()}
 function editHabit(id){const h=state.habits.find(x=>x.id===id);if(h)openModal('Editar hábito',habitForm(h))}
 function deleteHabit(id){state.habits=state.habits.filter(x=>x.id!==id);save();closeModal();render()}
-function renderMiniCalendar(el){let y=today.getFullYear(),m=today.getMonth(),first=(new Date(y,m,1).getDay()+6)%7,days=new Date(y,m+1,0).getDate();let s='<div class="calendar">'+['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('');for(let i=0;i<first;i++)s+='<div></div>';for(let d=1;d<=days;d++){const date=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;const evs=eventsForDate(date);const ev=evs.length?`<span class="dot" style="background:${cats[evs[0].category]||cats.Otros}" title="${esc(evs[0].title)}"></span>`:'';s+=`<div class="day ${d===today.getDate()?'today':''}"><b>${d}</b><div>${ev}</div></div>`}el.innerHTML=s+'</div>'}
+function renderHomeCalendar(el){
+ const base=calendarMonthDate();const y=base.getFullYear(),m=base.getMonth();
+ const monthLabel=base.toLocaleDateString('es-ES',{month:'long',year:'numeric'});
+ const first=(new Date(y,m,1).getDay()+6)%7,days=new Date(y,m+1,0).getDate();
+ const monthEvents=monthEventsFor(y,m);
+ let grid=['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('');
+ for(let i=0;i<first;i++)grid+='<div class="day empty-day"></div>';
+ for(let d=1;d<=days;d++){
+   const date=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+   const evs=eventsForDate(date);
+   const bars=evs.slice(0,4).map(e=>calendarBar(e,date,monthEvents)).join('');
+   grid+=`<button class="day calendar-day ${date===todayKey()?'today':''} ${evs.length?'has-events':''}" onclick="openNewEventForDate('${date}')"><b>${d}</b><div class="calendar-event-lanes">${bars}</div></button>`;
+ }
+ el.innerHTML=`<div class="home-calendar-header"><div><h2>${cap(monthLabel)}</h2><span class="muted">Planifica eventos, cumpleaños y recordatorios.</span></div><div class="calendar-actions"><button class="secondary month-arrow" onclick="changeCalendarMonth(-1)" aria-label="Mes anterior">‹</button><button class="secondary" onclick="goCalendarToday()">Hoy</button><button class="secondary month-arrow" onclick="changeCalendarMonth(1)" aria-label="Mes siguiente">›</button><button class="primary" onclick="openModal('Nuevo evento',eventForm())">+ Evento</button></div></div><section class="calendar-card home-calendar-inner"><div class="calendar-grid">${grid}</div></section>`;
+}
+
 const taskCategories={
   Casas:["Mi casa","Casa mamá","Casa Suances","Casa pueblo","Casa Ara"],
   Coches:["Mercedes","Peugeot"],

@@ -307,7 +307,7 @@ function homeTodayMeal(){
  if(!menu)return '<div class="home-food-empty">Todavía no tienes un menú semanal. <button class="text-button" onclick="go(\'food\')">Ir a Comidas →</button></div>';
  const i=(today.getDay()+6)%7, day=menu[i];
  if(!day)return '<div class="home-food-empty">Todavía no hay menú para hoy.</div>';
- return `<div class="home-today-meal"><div class="eyebrow">Hoy</div><div><span>Comida</span><strong>${esc(day.lunch||'Sin planificar')}</strong></div><div><span>Cena</span><strong>${esc(day.dinner||'Sin planificar')}</strong></div>${day.tupper?'<span class="pill home-tupper">Tupper</span>':''}</div>`;
+ return `<div class="home-today-meal"><div class="eyebrow">Hoy</div><div><span>Comida</span>${menuRecipeTitle(day.lunch,'home-menu-recipe-title')}</div><div><span>Cena</span>${menuRecipeTitle(day.dinner,'home-menu-recipe-title')}</div>${day.tupper?'<span class="pill home-tupper">Tupper</span>':''}</div>`;
 }
 function homeRecipes(){
  const recipes=[...state.recipes].sort((a,b)=>(b.favorite?1:0)-(a.favorite?1:0)).slice(0,4);

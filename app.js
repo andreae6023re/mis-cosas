@@ -66,7 +66,8 @@ function cloudPayload(){
   menu:state.menu||null,
   calendarMonth:state.calendarMonth||'',
   settings:state.settings&&typeof state.settings==='object'?state.settings:{},
-  expenseCategories:typeof expenseCategories==='object'?expenseCategories:{}
+  expenseCategories:typeof expenseCategories==='object'?expenseCategories:{},
+  schemaVersion:2
  };
 }
 
@@ -81,35 +82,41 @@ function localCacheFromState(){
 
 async function loadAllFromCloud(){
  if(!supabaseClient||!currentUser)return false;
+ const local={
+  tasks:Array.isArray(state.tasks)?state.tasks:[],expenses:Array.isArray(state.expenses)?state.expenses:[],transactions:Array.isArray(state.transactions)?state.transactions:[],accounts:Array.isArray(state.accounts)?state.accounts:[],budgets:Array.isArray(state.budgets)?state.budgets:[],events:Array.isArray(state.events)?state.events:[],habits:Array.isArray(state.habits)?state.habits:[],recipes:Array.isArray(state.recipes)?state.recipes:[],inventory:Array.isArray(state.inventory)?state.inventory:[],preparations:Array.isArray(state.preparations)?state.preparations:[],shoppingChecks:state.shoppingChecks||{},prepDone:state.prepDone||{},menu:state.menu||null,calendarMonth:state.calendarMonth||'',settings:state.settings||{},expenseCategories:typeof expenseCategories==='object'?expenseCategories:{}
+ };
  const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
  if(error)throw error;
- const cloud=data?.data&&typeof data.data==='object'?data.data:null;
- const hasCloudData=cloud && Object.keys(cloud).some(k=>k!=='food');
- if(!hasCloudData && cloud?.food){
-  const f=cloud.food;
-  if(Array.isArray(f.recipes))state.recipes=f.recipes;
-  if(Array.isArray(f.inventory))state.inventory=f.inventory;
-  if(Array.isArray(f.preparations))state.preparations=f.preparations;
-  if(f.shoppingChecks&&typeof f.shoppingChecks==='object')state.shoppingChecks=f.shoppingChecks;
-  if(f.prepDone&&typeof f.prepDone==='object')state.prepDone=f.prepDone;
-  if(f.menu!==undefined)state.menu=f.menu;
-  await saveAllToCloud();
- }else if(hasCloudData){
-  ['tasks','expenses','transactions','accounts','budgets','events','habits','recipes','inventory','preparations'].forEach(k=>{if(Array.isArray(cloud[k]))state[k]=cloud[k]});
-  if(cloud.shoppingChecks&&typeof cloud.shoppingChecks==='object')state.shoppingChecks=cloud.shoppingChecks;
-  if(cloud.prepDone&&typeof cloud.prepDone==='object')state.prepDone=cloud.prepDone;
-  if(cloud.menu!==undefined)state.menu=cloud.menu;
-  if(typeof cloud.calendarMonth==='string')state.calendarMonth=cloud.calendarMonth;
-  if(cloud.settings&&typeof cloud.settings==='object')state.settings=cloud.settings;
-  if(cloud.expenseCategories&&typeof cloud.expenseCategories==='object')expenseCategories=cloud.expenseCategories;
- }else{
-  await saveAllToCloud();
-  return false;
- }
+ const cloud=data?.data&&typeof data.data==='object'?data.data:{};
+ const legacy=cloud.food&&typeof cloud.food==='object'?cloud.food:null;
+ const isNewSchema=cloud.schemaVersion>=2;
+ // V22 could have written empty top-level arrays over the legacy Comidas payload.
+ // During this one-time migration, prefer non-empty legacy/local data when the cloud field is empty.
+ const chooseArray=(key,legacyKey=key)=>{
+  if(Array.isArray(cloud[key]) && (cloud[key].length>0 || isNewSchema))return cloud[key];
+  if(legacy && Array.isArray(legacy[legacyKey]) && legacy[legacyKey].length>0)return legacy[legacyKey];
+  if(Array.isArray(local[key]) && local[key].length>0)return local[key];
+  return Array.isArray(cloud[key])?cloud[key]:local[key];
+ };
+ state.tasks=chooseArray('tasks');state.expenses=chooseArray('expenses');state.transactions=chooseArray('transactions');state.accounts=chooseArray('accounts');state.budgets=chooseArray('budgets');state.events=chooseArray('events');state.habits=chooseArray('habits');
+ state.recipes=chooseArray('recipes');state.inventory=chooseArray('inventory');state.preparations=chooseArray('preparations');
+ const chooseObject=(key)=>{
+  if(cloud[key]&&typeof cloud[key]==='object' && (Object.keys(cloud[key]).length>0 || isNewSchema))return cloud[key];
+  if(legacy&&legacy[key]&&typeof legacy[key]==='object'&&Object.keys(legacy[key]).length)return legacy[key];
+  if(local[key]&&typeof local[key]==='object'&&Object.keys(local[key]).length)return local[key];
+  return cloud[key]&&typeof cloud[key]==='object'?cloud[key]:local[key];
+ };
+ state.shoppingChecks=chooseObject('shoppingChecks');state.prepDone=chooseObject('prepDone');
+ if(cloud.menu!==undefined && (cloud.menu!==null || isNewSchema))state.menu=cloud.menu;else if(legacy&&legacy.menu!==undefined)state.menu=legacy.menu;else state.menu=local.menu;
+ if(typeof cloud.calendarMonth==='string' && (cloud.calendarMonth || isNewSchema))state.calendarMonth=cloud.calendarMonth;else state.calendarMonth=local.calendarMonth;
+ if(cloud.settings&&typeof cloud.settings==='object' && (Object.keys(cloud.settings).length || isNewSchema))state.settings=cloud.settings;else state.settings=local.settings;
+ if(cloud.expenseCategories&&typeof cloud.expenseCategories==='object' && (Object.keys(cloud.expenseCategories).length || isNewSchema))expenseCategories=cloud.expenseCategories;
+ else if(Object.keys(local.expenseCategories).length)expenseCategories=local.expenseCategories;
  localCacheFromState();
+ // Mark the cloud copy with the stable schema only after loading/merging, then persist it once.
+ await saveAllToCloud();
  return true;
 }
-
 async function saveAllToCloud(){
  if(!supabaseClient||!currentUser)return false;
  if(cloudSaveInFlight){cloudSaveQueued=true;return false;}

@@ -151,3 +151,33 @@ html[data-theme="dark"] .calendar-day.has-events{background:#30312e}
 .auth-toggle{display:block;margin:18px auto 0}
 @media(max-width:700px){.auth-screen{padding:16px}.auth-card{padding:26px 20px;border-radius:20px}.auth-card h1{font-size:26px}}
 .recipe-check-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}.recipe-check-grid .checkline{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:9px 10px;margin:0}.field-title{font-weight:700;margin-bottom:4px}@media(max-width:650px){.recipe-check-grid{grid-template-columns:1fr}}
+
+/* Eventos de varios días: barras continuas a través de las celdas */
+.calendar-day{position:relative;overflow:visible;z-index:0}
+
+.calendar-event-lanes{position:absolute;left:0;right:0;top:31px;display:flex;flex-direction:column;gap:3px;pointer-events:none;z-index:4}
+.calendar-event-bar{display:block;position:relative;height:18px;line-height:18px;font-size:10px;font-weight:700;white-space:nowrap;overflow:visible;background:var(--event-color);color:#fff;text-decoration:none;cursor:pointer;pointer-events:auto;z-index:5;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.calendar-event-bar span{display:block;overflow:hidden;text-overflow:ellipsis;padding:0 7px}
+.calendar-event-bar.bar-start{margin-left:0;width:calc(100% + 5px);border-radius:7px 0 0 7px}
+.calendar-event-bar.bar-middle{margin-left:-5px;width:calc(100% + 10px);border-radius:0}
+.calendar-event-bar.bar-end{margin-left:-5px;width:calc(100% + 5px);border-radius:0 7px 7px 0}
+.calendar-event-bar.bar-start.bar-end{margin-left:0;width:100%;border-radius:7px}
+.calendar-event-bar.multi-day:not(.bar-start) span{padding-left:4px}
+html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)}
+@media(max-width:650px){
+  .calendar-event-lanes{top:25px;gap:2px}
+  .calendar-event-bar{height:14px;line-height:14px;font-size:8px}
+  .calendar-event-bar span{padding:0 4px}
+}
+
+/* V40: barras de eventos multidía, continuas incluso con el espacio entre celdas */
+.calendar-grid{overflow:visible}
+.calendar-day{position:relative;overflow:visible}
+.calendar-event-lanes{position:absolute;left:0;right:0;top:31px;z-index:20}
+.calendar-event-bar{box-sizing:border-box;min-width:0}
+.calendar-event-bar.bar-start{z-index:22}
+.calendar-event-bar.bar-middle{z-index:21}
+.calendar-event-bar.bar-end{z-index:22}
+@media(max-width:650px){
+  .calendar-event-lanes{top:25px}
+}

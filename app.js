@@ -48,6 +48,7 @@ async function ensureCloudRow(user){
 let cloudSaveTimer=null;
 let cloudSaveInFlight=false;
 let cloudSaveQueued=false;
+let cloudShadow=null;
 
 function cloudPayload(){
  return {
@@ -89,9 +90,7 @@ async function loadAllFromCloud(){
  if(error)throw error;
  const cloud=data?.data&&typeof data.data==='object'?data.data:{};
  const legacy=cloud.food&&typeof cloud.food==='object'?cloud.food:null;
- const isNewSchema=cloud.schemaVersion>=2;
- // V22 could have written empty top-level arrays over the legacy Comidas payload.
- // During this one-time migration, prefer non-empty legacy/local data when the cloud field is empty.
+ const isNewSchema=Number(cloud.schemaVersion||0)>=2;
  const chooseArray=(key,legacyKey=key)=>{
   if(Array.isArray(cloud[key]) && (cloud[key].length>0 || isNewSchema))return cloud[key];
   if(legacy && Array.isArray(legacy[legacyKey]) && legacy[legacyKey].length>0)return legacy[legacyKey];
@@ -113,21 +112,31 @@ async function loadAllFromCloud(){
  if(cloud.expenseCategories&&typeof cloud.expenseCategories==='object' && (Object.keys(cloud.expenseCategories).length || isNewSchema))expenseCategories=cloud.expenseCategories;
  else if(Object.keys(local.expenseCategories).length)expenseCategories=local.expenseCategories;
  localCacheFromState();
- // Mark the cloud copy with the stable schema only after loading/merging, then persist it once.
- await saveAllToCloud();
+ // IMPORTANT: loading from cloud is read-only. Never write the whole local state back here.
+ // This prevents an empty module on one device from overwriting populated data on another.
+ cloudShadow=JSON.parse(JSON.stringify(cloud));
  return true;
 }
 async function saveAllToCloud(){
  if(!supabaseClient||!currentUser)return false;
  if(cloudSaveInFlight){cloudSaveQueued=true;return false;}
+ const payload=cloudPayload();
+ const baseline=cloudShadow||{};
+ const changedKeys=Object.keys(payload).filter(k=>JSON.stringify(payload[k])!==JSON.stringify(baseline[k]));
+ if(!changedKeys.length)return true;
  cloudSaveInFlight=true;
  try{
   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
   if(error)throw error;
   const current=data?.data&&typeof data.data==='object'?data.data:{};
-  const next={...current,...cloudPayload()};
+  const patch={};
+  changedKeys.forEach(k=>{patch[k]=payload[k]});
+  // Merge only the fields that actually changed on this device.
+  // Other fields currently stored in Supabase are preserved untouched.
+  const next={...current,...patch,schemaVersion:3};
   const {error:upsertError}=await supabaseClient.from('app_data').upsert({user_id:currentUser.id,data:next},{onConflict:'user_id'});
   if(upsertError)throw upsertError;
+  cloudShadow=JSON.parse(JSON.stringify(next));
   state.cloudSyncError='';
   return true;
  }catch(err){
@@ -139,13 +148,6 @@ async function saveAllToCloud(){
   if(cloudSaveQueued){cloudSaveQueued=false;setTimeout(()=>saveAllToCloud(),0);}
  }
 }
-
-function queueCloudSave(){
- if(!currentUser||!supabaseClient)return;
- clearTimeout(cloudSaveTimer);
- cloudSaveTimer=setTimeout(()=>saveAllToCloud(),300);
-}
-
 async function handleAuthSubmit(e){
  e.preventDefault();
  if(!supabaseClient){showAuthMessage('No se ha podido cargar el servicio de autenticación.','error');return}
@@ -612,7 +614,7 @@ function savePreparation(id=''){const name=document.querySelector('#fPrepName').
 function deletePreparation(id){state.preparations=state.preparations.filter(x=>x.id!==id);save();closeModal();render()}
 function recipeForm(r=null){return `<div class="form"><label>Nombre de la receta<input id="fRecipeName" value="${esc(r?.name||'')}" placeholder="Ej. Pollo al horno"></label><label>Tipo<select id="fRecipeType">${foodTypes.map(x=>`<option ${x===r?.type?'selected':''}>${x}</option>`).join('')}</select></label><div class="form-two"><label>Raciones<input id="fRecipeServings" type="number" min="1" value="${r?.servings||2}"></label><label>Tiempo<input id="fRecipeTime" value="${esc(r?.time||'')}" placeholder="30 min"></label></div><label>Ingredientes <small>uno por línea: ingrediente | cantidad | unidad</small><textarea id="fRecipeIngredients" placeholder="Tomate | 150 | g\nArroz | 80 | g\nAceite de oliva | 10 | ml">${esc(r?.ingredientsText||'')}</textarea><label>Preparación<textarea id="fRecipeSteps" placeholder="Pasos de elaboración">${esc(r?.steps||'')}</textarea></label><label>Descripción<textarea id="fRecipeDesc" placeholder="Cómo es y cuándo te gusta prepararla">${esc(r?.description||'')}</textarea></label><label>Combina con<input id="fRecipePairs" value="${esc(r?.pairs||'')}" placeholder="Ej. ensalada verde"></label><label class="checkline"><input id="fRecipeFav" type="checkbox" ${r?.favorite?'checked':''}> Marcar como favorita</label><label class="checkline"><input id="fRecipeFreezable" type="checkbox" ${r?.freezable?'checked':''}> Se puede congelar</label><button class="primary" onclick="saveRecipe('${r?.id||''}')">${r?'Guardar cambios':'Guardar receta'}</button>${r?`<button class="danger-button" onclick="deleteRecipe('${r.id}')">Eliminar receta</button>`:''}</div>`}
 function parseIngredients(text=''){return text.split(/\n+/).map(line=>line.trim()).filter(Boolean).map(line=>{const p=line.split('|').map(x=>x.trim());return {ingredient:p[0],quantity:p[1]||'',unit:p[2]||''}})}
-function saveRecipe(id=''){const name=document.querySelector('#fRecipeName').value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}r.name=name;r.type=document.querySelector('#fRecipeType').value;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.freezable=document.querySelector('#fRecipeFreezable').checked;save();closeModal();render();if(currentUser&&supabaseClient)saveAllToCloud()}
+function saveRecipe(id=''){const name=document.querySelector('#fRecipeName').value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}r.name=name;r.type=document.querySelector('#fRecipeType').value;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.freezable=document.querySelector('#fRecipeFreezable').checked;save();closeModal();render()}
 function editRecipe(id){const r=state.recipes.find(x=>x.id===id);if(r)openModal('Editar receta',recipeForm(r))}
 function deleteRecipe(id){state.recipes=state.recipes.filter(x=>x.id!==id);save();closeModal();render()}
 function viewRecipe(id){const r=state.recipes.find(x=>x.id===id);if(!r)return;openModal(r.name,`<div class="recipe-detail"><p>${esc(r.description||'')}</p><h4>Ingredientes</h4><ul>${(r.ingredients||parseIngredients(r.ingredientsText||'')).map(x=>`<li>${esc(x.ingredient)} · ${esc(x.quantity)} ${esc(x.unit)}</li>`).join('')}</ul><h4>Preparación</h4><p class="recipe-steps">${esc(r.steps||'')}</p>${r.pairs?`<h4>Combina con</h4><p>${esc(r.pairs)}</p>`:''}</div>`)}

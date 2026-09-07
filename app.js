@@ -7,6 +7,8 @@ const SUPABASE_PUBLISHABLE_KEY='sb_publishable_DCKU0ae2X_tXHyEwb6o1HA_OpP50Rpt';
 const supabaseClient=window.supabase?.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY);
 let currentUser=null;
 let authMode='login';
+let deferredInstallPrompt=null;
+let syncStatusTimer=null;
 
 function showAuthMessage(message,type=''){
  const el=document.querySelector('#authMessage');
@@ -35,6 +37,18 @@ function showApp(){
  document.querySelector('#authScreen')?.classList.add('hidden');
  document.querySelector('#appShell')?.classList.remove('hidden');
 }
+function setSyncStatus(status,message){
+ const el=document.querySelector('#syncStatus');
+ if(!el)return;
+ clearTimeout(syncStatusTimer);
+ el.classList.remove('syncing','error');
+ if(status==='syncing'){el.classList.add('syncing');el.textContent='↻ Guardando…';}
+ else if(status==='error'){el.classList.add('error');el.textContent='⚠️ Sin sincronizar';}
+ else {el.textContent='☁️ Sincronizado';}
+ if(status==='syncing')return;
+ syncStatusTimer=setTimeout(()=>{if(state.cloudSyncError)setSyncStatus('error');},3500);
+}
+
 async function ensureCloudRow(user){
  if(!supabaseClient||!user)return;
  const {data,error}=await supabaseClient.from('app_data').select('user_id').eq('user_id',user.id).maybeSingle();
@@ -126,6 +140,7 @@ async function loadAllFromCloud(){
 }
 async function syncCloudField(key,value){
  if(!supabaseClient||!currentUser)return false;
+ setSyncStatus('syncing');
  try{
   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
   if(error)throw error;
@@ -135,10 +150,12 @@ async function syncCloudField(key,value){
   if(upsertError)throw upsertError;
   cloudShadow=JSON.parse(JSON.stringify(next));
   state.cloudSyncError='';
+  setSyncStatus('ok');
   return true;
  }catch(err){
   console.error('Error sincronizando '+key,err);
   state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+  setSyncStatus('error');
   return false;
  }
 }
@@ -150,6 +167,7 @@ function queueCloudSave(){
 
 async function saveAllToCloud(){
  if(!supabaseClient||!currentUser)return false;
+ setSyncStatus('syncing');
  if(cloudSaveInFlight){cloudSaveQueued=true;return false;}
  const payload=cloudPayload();
  const baseline=cloudShadow||{};
@@ -169,10 +187,12 @@ async function saveAllToCloud(){
   if(upsertError)throw upsertError;
   cloudShadow=JSON.parse(JSON.stringify(next));
   state.cloudSyncError='';
+  setSyncStatus('ok');
   return true;
  }catch(err){
   console.error('No se han podido sincronizar los datos.',err);
   state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+  setSyncStatus('error');
   return false;
  }finally{
   cloudSaveInFlight=false;
@@ -730,12 +750,20 @@ function saveCategoriesSettings(){
 }
 function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));queueCloudSave()}
 function exportData(){
- const data={version:18,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
- const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
+ const data={version:19,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
+ const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ const stamp=new Date().toLocaleString('es-ES');localStorage.setItem(KEY+'lastBackup',stamp);
+ const el=document.querySelector('#backupStatus');if(el)el.textContent='Última copia manual: '+stamp;
 }
+
 async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','recipes','inventory','preparations','shoppingChecks','prepDone'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Mis cosas.')}}
 
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;updateInstallButton()});
+window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateInstallButton(true)});
+function updateInstallButton(installed=false){const b=document.querySelector('#installAppBtn'),h=document.querySelector('#installHelp');if(!b)return;if(installed||window.matchMedia('(display-mode: standalone)').matches){b.textContent='Aplicación instalada';b.disabled=true;if(h)h.textContent='Mis cosas ya está instalada en este dispositivo.';return}if(deferredInstallPrompt){b.disabled=false;b.textContent='Instalar Mis cosas';if(h)h.textContent='Instalación con un toque desde este navegador. ';}else{b.disabled=false;b.textContent='Cómo instalar';if(h)h.textContent='En Android/Chrome: menú ⋮ → Añadir a pantalla de inicio. En iPhone: Compartir → Añadir a pantalla de inicio.';}}
+async function installApp(){if(window.matchMedia('(display-mode: standalone)').matches){updateInstallButton(true);return}if(!deferredInstallPrompt){updateInstallButton();return}deferredInstallPrompt.prompt();const choice=await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;updateInstallButton(choice.outcome==='accepted')}
 initAuth();
+updateInstallButton();
 
 // Utilidades y controles globales (restaurados y centralizados)
 function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'-01T12:00');d.setMonth(d.getMonth()+n);state.expenseMonth=monthKey(d);render()}

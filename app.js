@@ -715,15 +715,28 @@ async function importRecipes(input){
   if(file.name.toLowerCase().endsWith('.csv'))raw=parseRecipeCsv(text);else raw=JSON.parse(text);
   if(!Array.isArray(raw))throw new Error('El archivo no contiene una lista de recetas.');
   const incoming=raw.map(normalizeImportedRecipe);
-  const existingIds=new Set(state.recipes.map(r=>String(r.id)));
-  const existingNames=new Set(state.recipes.map(r=>normalizeRecipeImportName(r.name)));
-  const additions=[];let skipped=0;
-  for(const r of incoming){const nameKey=normalizeRecipeImportName(r.name);if(existingIds.has(String(r.id))||existingNames.has(nameKey)){skipped++;continue}existingIds.add(String(r.id));existingNames.add(nameKey);additions.push(r)}
-  if(!additions.length){input.value='';alert(`No se ha añadido ninguna receta. ${skipped} ya existían.`);return}
-  if(!confirm(`Se van a añadir ${additions.length} recetas nuevas. Las que ya existan se conservarán sin modificarlas. ¿Continuar?`)){input.value='';return}
+  const existingIds=new Map(state.recipes.map(r=>[String(r.id),r]));
+  const existingNames=new Map(state.recipes.map(r=>[normalizeRecipeImportName(r.name),r]));
+  const additions=[];const updates=[];
+  for(const incomingRecipe of incoming){
+   const nameKey=normalizeRecipeImportName(incomingRecipe.name);
+   const current=existingIds.get(String(incomingRecipe.id))||existingNames.get(nameKey);
+   if(current){
+    const favorite=current.favorite;
+    const localId=current.id;
+    Object.assign(current,incomingRecipe,{id:localId,favorite});
+    updates.push(current);
+   }else{
+    additions.push(incomingRecipe);
+    existingIds.set(String(incomingRecipe.id),incomingRecipe);
+    existingNames.set(nameKey,incomingRecipe);
+   }
+  }
+  if(!additions.length&&!updates.length){input.value='';alert('No hay recetas que importar.');return}
+  if(!confirm(`Se van a añadir ${additions.length} recetas nuevas y actualizar ${updates.length} recetas existentes con sus preparaciones detalladas. No se borrará ninguna otra receta. ¿Continuar?`)){input.value='';return}
   state.recipes.push(...additions);normalizeRecipes();localCacheFromState();render();
   if(supabaseClient&&currentUser)await syncCloudField('recipes',state.recipes);
-  input.value='';alert(`Importación completada: ${additions.length} recetas añadidas${skipped?` y ${skipped} omitidas porque ya existían`:''}.`);
+  input.value='';alert(`Importación completada: ${additions.length} nuevas y ${updates.length} actualizadas.`);
  }catch(e){input.value='';console.error('Error importando recetas',e);alert('No se han podido importar las recetas. Comprueba que sea un JSON/CSV de recetas válido.');}
 }
 async function saveRecipe(id=''){const name=document.querySelector('#fRecipeName')?.value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}const types=[...document.querySelectorAll('.fRecipeType:checked')].map(x=>x.value);const seasons=[...document.querySelectorAll('.fRecipeSeason:checked')].map(x=>x.value);r.name=name;r.types=types.length?types:['Comida'];r.type=r.types[0];r.seasons=seasons;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.freezable=document.querySelector('#fRecipeFreezable').checked;localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncCloudField('recipes',state.recipes)}}

@@ -68,7 +68,7 @@ function cloudPayload(){
   calendarMonth:state.calendarMonth||'',
   settings:state.settings&&typeof state.settings==='object'?state.settings:{},
   expenseCategories:typeof expenseCategories==='object'?expenseCategories:{},
-  schemaVersion:2
+  schemaVersion:3
  };
 }
 
@@ -117,6 +117,12 @@ async function loadAllFromCloud(){
  cloudShadow=JSON.parse(JSON.stringify(cloud));
  return true;
 }
+function queueCloudSave(){
+ if(!supabaseClient||!currentUser)return;
+ clearTimeout(cloudSaveTimer);
+ cloudSaveTimer=setTimeout(()=>{saveAllToCloud();},350);
+}
+
 async function saveAllToCloud(){
  if(!supabaseClient||!currentUser)return false;
  if(cloudSaveInFlight){cloudSaveQueued=true;return false;}
@@ -686,7 +692,7 @@ function saveCategoriesSettings(){
  Object.entries(expenseCategories).forEach(([g,a])=>a.forEach((old,i)=>{const el=document.querySelector('#cat-'+encodeURIComponent(g)+'-'+i);if(el&&el.value.trim()&&el.value.trim()!==old){const nn=el.value.trim();if(!a.includes(nn)||nn===old){const idx=expenseCategories[g].indexOf(old);if(idx>=0)expenseCategories[g][idx]=nn}}}));
  saveCategories();closeModal();render();
 }
-function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories))}
+function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));queueCloudSave()}
 function exportData(){
  const data={version:18,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)

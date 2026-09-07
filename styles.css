@@ -181,3 +181,31 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
 @media(max-width:650px){
   .calendar-event-lanes{top:25px}
 }
+
+/* V43: corrección de los nombres de recetas dentro del menú semanal.
+   El enlace debe ocupar exactamente la columna central del grid y conservar
+   el tamaño tipográfico que tenía el texto original. */
+.meal-line .menu-recipe-link{
+  display:block;
+  width:100%;
+  min-width:0;
+  max-width:100%;
+  box-sizing:border-box;
+  margin:0;
+  padding:0;
+  border:0;
+  background:transparent;
+  color:inherit;
+  font-family:inherit;
+  font-size:12px;
+  font-weight:700;
+  line-height:1.3;
+  text-align:left;
+  white-space:normal;
+  overflow-wrap:normal;
+  word-break:normal;
+  cursor:pointer;
+  appearance:none;
+}
+.meal-line .menu-recipe-link:hover{text-decoration:underline;text-underline-offset:3px}
+.meal-line .menu-recipe-link:focus-visible{outline:2px solid var(--sage,#7F9A7D);outline-offset:3px;border-radius:3px}

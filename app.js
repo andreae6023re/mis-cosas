@@ -684,6 +684,7 @@ function food(c){
  <aside class="food-side"><section class="food-panel"><div class="panel-heading"><div><h3>Inventario</h3><span>Lo que tienes ahora</span></div><div class="actions"><button class="secondary small" onclick="document.querySelector('#inventoryImportInput').click()">Importar</button><input id="inventoryImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importInventory(this)"><button class="secondary small" onclick="openModal('Nuevo producto',inventoryForm())">+ Añadir</button></div></div><div class="inventory-mini"><div><b>Congelador</b><span>${counts.freezer}</span></div><div><b>Despensa</b><span>${counts.pantry}</span></div><div><b>Frescos</b><span>${counts.fresh}</span></div></div>${expiringInventory().length?`<div class="food-alert"><b>Próximo a caducar</b><span>${expiringInventory().map(x=>esc(x.name)).join(', ')}</span></div>`:''}<button class="text-button" onclick="openModal('Inventario',inventoryListForm())">Ver y gestionar inventario →</button></section>
  <section class="food-panel"><div class="panel-heading"><div><h3>Preparar esta semana</h3><span>${pendingPrep} pendientes</span></div><button class="secondary small" onclick="openModal('Nueva preparación',preparationForm())">+ Añadir</button></div><div class="prep-list">${prep.slice(0,6).map(x=>`<button class="prep-row ${state.prepDone[x.id]?'done':''}" onclick="togglePrep('${x.id}')"><span class="check-mini">${state.prepDone[x.id]?'✓':''}</span><div><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${x.freezable?'Congelable':'Para consumir'}</small></div></button>`).join('')||'<div class="muted">Todavía no tienes preparaciones.</div>'}</div>${prep.length>6?`<button class="text-button" onclick="openModal('Preparaciones',preparationsListForm())">Ver todas →</button>`:''}</section></aside></div>
  <section class="food-panel shopping-panel"><div class="panel-heading"><div><h3>Lista de la compra</h3><span>${pendingShop} pendientes · ${shopping.length} en total</span></div><button class="secondary small" onclick="openModal('Lista de la compra',shoppingForm())">Ver lista</button></div><div class="shopping-progress"><div><span style="width:${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}%"></span></div><small>${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}% completada</small></div><div class="shopping-preview">${shopping.slice(0,8).map(x=>`<button class="shopping-item ${state.shoppingChecks[x.key]?'done':''}" onclick="toggleShopping('${x.key}')"><span>${state.shoppingChecks[x.key]?'✓':'○'}</span>${esc(x.name)}</button>`).join('')||'<span class="muted">Se calculará al aceptar un menú.</span>'}</div></section>
+ ${menu?.status==='accepted'?`<section class="food-panel consumption-panel"><div class="panel-heading"><div><h3>Consumo del menú</h3><span>Revisa antes de descontar el inventario</span></div><button class="secondary small" onclick="openModal('Consumo del menú',menuConsumptionForm())">${menu.consumptionRegistered?'Consumo registrado':'Revisar consumo'}</button></div><p class="muted">${menu.consumptionRegistered?'Este menú ya se ha descontado del inventario.':'Tus productos no se descuentan automáticamente; tú decides cuándo hacerlo.'}</p></section>`:''}
  <section class="food-panel recipes-panel"><div class="panel-heading"><div><h3>Mis recetas</h3><span>${state.recipes.length} guardadas</span></div><div class="actions"><button class="secondary small" onclick="document.querySelector('#recipeImportInput').click()">Importar recetas</button><input id="recipeImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importRecipes(this)"><button class="primary small" onclick="openModal('Añadir receta',recipeForm())">+ Añadir receta</button></div></div><div class="recipe-grid">${state.recipes.map(r=>`<article class="recipe-card"><div class="recipe-card-top"><span class="pill">${esc(recipeTypeLabel(r))}</span>${r.favorite?'<span class="favorite-mark">★</span>':''}</div><h4>${esc(r.name)}</h4><p>${esc(r.description||'Sin descripción')}</p><div class="recipe-meta"><span>${r.servings||1} raciones</span><span>${esc(r.time||'Tiempo no indicado')}</span>${r.freezable?'<span>Congelable</span>':''}</div><div class="actions"><button class="secondary small" onclick="viewRecipe('${r.id}')">Ver</button><button class="secondary small" onclick="editRecipe('${r.id}')">Editar</button></div></article>`).join('')||'<div class="empty-state">Todavía no tienes recetas. Añade la primera.</div>'}</div></section></div>`;
 }
 function foodQuickForm(){return `<div class="actions food-quick"><button class="primary" onclick="closeModal();openModal('Nuevo producto',inventoryForm())">Producto de inventario</button><button class="secondary" onclick="closeModal();openModal('Añadir receta',recipeForm())">Receta</button><button class="secondary" onclick="closeModal();openModal('Nueva preparación',preparationForm())">Preparación</button></div>`}
@@ -911,7 +912,107 @@ function menuHistoryForm(){
  }).join('');
  return items||'<div class="muted">Todavía no hay menús guardados.</div>';
 }
-function shoppingItems(){if(!state.menu||state.menu.status!=='accepted')return [];const map=new Map();Object.values(state.menu.days||{}).forEach(day=>{[day.lunch,day.dinner].forEach(name=>{const r=state.recipes.find(x=>x.name===name);(r?.ingredients||parseIngredients(r?.ingredientsText||'')).forEach(i=>{const raw=String(i.ingredient||'').trim();if(!raw)return;const key=normalizeIngredient(raw);const has=state.inventory.some(x=>{const n=normalizeIngredient(x.name);return n===key||n.includes(key)||key.includes(n)});if(!has&&!map.has(key))map.set(key,{key,name:`${raw}${i.quantity?' · '+i.quantity+' '+(i.unit||''):''}`,group:foodGroup(raw)})})})});return [...map.values()].sort((a,b)=>a.group.localeCompare(b.group,'es')||a.name.localeCompare(b.name,'es'))}
+function parseInventoryQuantity(value){
+ const s=String(value||'').trim().toLowerCase().replace(',','.');
+ const m=s.match(/(-?\d+(?:\.\d+)?|\d+\s*\/\s*\d+)/);
+ if(!m)return null;
+ const raw=m[1].replace(/\s+/g,'');
+ const n=raw.includes('/')?(()=>{const [a,b]=raw.split('/').map(Number);return b?a/b:null})():Number(raw);
+ if(n==null||Number.isNaN(n))return null;
+ const unit=(s.match(/(kg|g|mg|l|ml|ud|unidad(?:es)?|u|bote(?:s)?|lata(?:s)?|paquete(?:s)?|rebanada(?:s)?)/)||[])[1]||'';
+ const normalizedUnit=/^u(d|nidad|nidades)?$/.test(unit)?'ud':unit;
+ return {value:n,unit:normalizedUnit};
+}
+function inventoryNameMatches(required,available){
+ const a=normalizeIngredient(required),b=normalizeIngredient(available);
+ return a===b||a.includes(b)||b.includes(a)
+}
+function findInventoryMatch(ingredient){
+ return state.inventory.find(x=>inventoryNameMatches(ingredient,x.name));
+}
+function inventoryCoverage(ingredient,qty,unit){
+ const item=findInventoryMatch(ingredient);
+ if(!item)return {item:null,covered:0,missing:qty};
+ if(qty===''||qty==null||unit===''||unit==='al gusto')return {item,covered:null,missing:0};
+ const iq=parseInventoryQuantity(item.quantity);
+ const rq=parseInventoryQuantity(`${qty} ${unit}`);
+ if(!iq||!rq)return {item,covered:null,missing:0};
+ if(iq.unit!==rq.unit)return {item,covered:null,missing:0};
+ const missing=Math.max(0,rq.value-iq.value);
+ return {item,covered:Math.min(iq.value,rq.value),missing};
+}
+function formatMissing(qty,unit){
+ if(qty==null||qty==='')return '';
+ const n=Math.abs(Number(qty));
+ const pretty=Number.isInteger(n)?String(n):String(Math.round(n*100)/100);
+ return `${pretty} ${unit}`.trim();
+}
+function aggregateMenuIngredients(){
+ const map=new Map();
+ if(!state.menu||state.menu.status!=='accepted')return [];
+ Object.values(state.menu.days||{}).forEach(day=>{
+  ['lunch','dinner','breakfast','snack'].forEach(slot=>{
+   const r=state.recipes.find(x=>x.name===day?.[slot]);
+   if(!r)return;
+   (r.ingredients||parseIngredients(r.ingredientsText||'')).forEach(i=>{
+    const raw=String(i.ingredient||'').trim();if(!raw)return;
+    const key=normalizeIngredient(raw);
+    const q=parseInventoryQuantity(`${i.quantity||''} ${i.unit||''}`);
+    const existing=map.get(key);
+    if(!existing){map.set(key,{ingredient:raw,quantity:i.quantity||'',unit:i.unit||'',numeric:q?.value??null,count:1});}
+    else if(existing.numeric!=null&&q?.value!=null&&existing.unit===i.unit){existing.numeric+=q.value;existing.quantity=String(existing.numeric);existing.count++}
+    else {existing.count++}
+   });
+  });
+ });
+ return [...map.values()];
+}
+function shoppingItems(){
+ const items=aggregateMenuIngredients(),out=[];
+ items.forEach(i=>{
+  const coverage=inventoryCoverage(i.ingredient,i.quantity,i.unit);
+  if(!coverage.item){
+   out.push({key:normalizeIngredient(i.ingredient),name:`${i.ingredient}${i.quantity?' · '+i.quantity+' '+(i.unit||''):''}`,group:foodGroup(i.ingredient)});
+   return;
+  }
+  if(coverage.missing>0){
+   out.push({key:normalizeIngredient(i.ingredient),name:`${i.ingredient} · faltan ${formatMissing(coverage.missing,i.unit)}`,group:foodGroup(i.ingredient)});
+  }
+ });
+ return out.sort((a,b)=>a.group.localeCompare(b.group,'es')||a.name.localeCompare(b.name,'es'));
+}
+function menuInventoryCoverage(){
+ const items=aggregateMenuIngredients();
+ return items.map(i=>{
+  const c=inventoryCoverage(i.ingredient,i.quantity,i.unit);
+  return {ingredient:i.ingredient,required:i.quantity&&i.unit?`${i.quantity} ${i.unit}`:'',inventory:c.item?.quantity||'',inventoryName:c.item?.name||'',missing:c.missing||0,covered:c.covered,unit:i.unit};
+ });
+}
+function menuConsumptionForm(){
+ const rows=menuInventoryCoverage();
+ const usable=rows.filter(x=>x.inventoryName);
+ const missing=rows.filter(x=>x.missing>0||!x.inventoryName);
+ return `<div class="consumption-modal"><p class="muted">El menú no descuenta nada automáticamente. Revisa qué ingredientes se van a consumir y confirma al final.</p>${usable.map(x=>`<div class="consumption-row"><div><b>${esc(x.ingredient)}</b><small>${x.required?`Necesitas ${esc(x.required)} · `:''}Tienes ${esc(x.inventory)}${x.missing>0?` · <strong>Faltan ${esc(formatMissing(x.missing,x.unit))}</strong>`:''}</small></div></div>`).join('')||'<div class="muted">No hay ingredientes del menú que coincidan con el inventario.</div>'}${missing.length?`<div class="consumption-alert"><b>Ingredientes que tendrás que comprar</b><span>${missing.map(x=>esc(x.ingredient)).join(', ')}</span></div>`:''}<button class="primary" onclick="confirmMenuConsumption()">Registrar consumo y actualizar inventario</button></div>`;
+}
+function confirmMenuConsumption(){
+ if(!state.menu||state.menu.status!=='accepted')return;
+ if(state.menu.consumptionRegistered){alert('El consumo de este menú ya está registrado.');return}
+ const rows=menuInventoryCoverage();
+ let changed=0;
+ rows.forEach(x=>{
+  if(!x.inventoryName||x.missing>0)return;
+  const item=findInventoryMatch(x.ingredient);
+  const iq=parseInventoryQuantity(item?.quantity),rq=parseInventoryQuantity(`${x.required}`);
+  if(item&&iq&&rq&&iq.unit===rq.unit){
+   const remaining=Math.max(0,iq.value-rq.value);
+   item.quantity=String(Number.isInteger(remaining)?remaining:Math.round(remaining*100)/100)+' '+iq.unit;
+   changed++;
+  }
+ });
+ state.menu.consumptionRegistered=true;
+ save();render();
+ alert(`Consumo registrado. Se han actualizado ${changed} productos del inventario.`);
+}
 function foodGroup(name){const n=normalizeIngredient(name);if(/pollo|pavo|ternera|cerdo|carne|huevo|salmon|atun|merluza|pescado|tofu|lenteja|garbanzo|judia/.test(n))return 'Proteínas';if(/tomate|lechuga|espinaca|brocoli|calabacin|berenjena|pimiento|cebolla|zanahoria|patata|verdura|fruta|manzana|platano/.test(n))return 'Fruta y verdura';if(/arroz|pasta|harina|pan|avena|quinoa|cereal/.test(n))return 'Despensa';if(/leche|yogur|queso|burrata|mozzarella/.test(n))return 'Refrigerados';return 'Otros'}
 function toggleShopping(key){state.shoppingChecks[key]=!state.shoppingChecks[key];save();render()}
 function shoppingForm(){const items=shoppingItems(),groups=[...new Set(items.map(x=>x.group))];return `<div class="shopping-list-modal">${groups.map(g=>`<div class="shopping-group"><h4>${esc(g)}</h4>${items.filter(x=>x.group===g).map(x=>`<label class="checkline shopping-check ${state.shoppingChecks[x.key]?'done':''}"><input type="checkbox" ${state.shoppingChecks[x.key]?'checked':''} onchange="toggleShopping('${x.key}')"><span>${esc(x.name)}</span></label>`).join('')}</div>`).join('')||'<p class="muted">No hay compras pendientes.</p>'}</div>`}

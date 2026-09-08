@@ -232,3 +232,12 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
 .cook-step{font-size:22px;line-height:1.55;margin:10px 0;min-height:160px;display:flex;align-items:center}
 .cook-actions{display:flex;justify-content:space-between;gap:10px}
 @media(max-width:650px){.cook-step{font-size:18px;min-height:200px}.menu-history-inline{align-items:flex-start;flex-direction:column}.history-row{align-items:flex-start;flex-direction:column}.history-row button{width:100%}}
+
+/* V51: inventario inteligente y consumo del menú */
+.consumption-modal{display:flex;flex-direction:column;gap:12px}
+.consumption-row{padding:10px 0;border-bottom:1px solid var(--line,#ddd7cc)}
+.consumption-row>div{display:flex;flex-direction:column;gap:4px}
+.consumption-row small{color:var(--muted,#777)}
+.consumption-row strong{font-weight:700}
+.consumption-alert{padding:12px;border-radius:10px;background:#f3eee6;display:flex;flex-direction:column;gap:4px}
+.consumption-alert span{font-size:13px}

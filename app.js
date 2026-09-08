@@ -768,9 +768,66 @@ function normalizeIngredient(s=''){return String(s).toLowerCase().normalize('NFD
 function recipeScore(r,used=[]){const f=state.settings.food||{},inv=state.inventory.map(x=>normalizeIngredient(x.name));let score=0;(r.ingredients||parseIngredients(r.ingredientsText||'')).forEach(i=>{const n=normalizeIngredient(i.ingredient);if(f.useInventory!==false&&n&&inv.some(x=>x===n||x.includes(n)||n.includes(x)))score+=5});if(r.favorite)score+=3;if(f.quickMeals!==false&&r.time){const m=parseInt(String(r.time));if(!isNaN(m)&&m<=Number(f.weekdayMinutes||30))score+=2}if(used.includes(r.id))score-=8;if(f.vegetables!==false&&/(verdura|calabacin|berenjena|brocoli|espinaca|pimiento|tomate|ensalada|zanahoria|calabaza)/i.test((r.name||'')+' '+(r.description||'')))score+=2;return score}
 function menuRecipePool(types){return state.recipes.filter(r=>types.some(t=>hasRecipeType(r,t))&&recipeInCurrentSeason(r))}
 
-function generateMenu(){const f=state.settings.food||{};let meals=menuRecipePool(['Comida']),dinners=menuRecipePool(['Cena']),breakfasts=menuRecipePool(['Desayuno']),snacks=menuRecipePool(['Merienda','Dulce']);if(!meals.length){alert('Añade alguna receta marcada como Comida y de la temporada actual antes de generar el menú.');return}if(!dinners.length){alert('Añade alguna receta marcada como Cena y de la temporada actual antes de generar el menú.');return}const rank=p=>[...p].sort((a,b)=>recipeScore(b)-recipeScore(a));meals=rank(meals);dinners=rank(dinners);breakfasts=rank(breakfasts);snacks=rank(snacks);const daysObj={};let used=[];for(let i=0;i<7;i++){const choose=(pool,avoid)=>{if(!pool.length)return null;const avail=pool.filter(r=>!avoid.includes(r.id));return (avail.length?avail:pool)[i%(avail.length||pool.length)]};const lunch=choose(meals,used.slice(-3));used.push(lunch.id);const dinner=choose(dinners,used.slice(-3));used.push(dinner.id);const breakfast=i<5?(f.breakfast||'Café con leche + tostada con aceite y tomate'):(choose(breakfasts,used.slice(-2))?.name||'Desayuno especial sencillo');const snack=f.snacks!==false?(choose(snacks,used.slice(-2))?.name||(f.sweet&&i===4?'Dulce saludable':'Fruta o yogur vegetal')):'';daysObj[i]={lunch:lunch.name,dinner:dinner.name,breakfast,snack,tupper:f.twoTuppers!==false&&[1,3].includes(i)}}state.menu={week:monthKey(),status:'proposal',days:daysObj,generatedAt:new Date().toISOString()};state.shoppingChecks={};save();render()}
+function shuffledTop(pool,limit=6){
+ const ranked=[...pool].sort((a,b)=>recipeScore(b)-recipeScore(a));
+ const top=ranked.slice(0,Math.min(limit,ranked.length));
+ for(let i=top.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[top[i],top[j]]=[top[j],top[i]]}
+ return top;
+}
+function pickWeeklyRecipe(pool,usedIds){
+ if(!pool.length)return null;
+ const available=pool.filter(r=>!usedIds.has(r.id));
+ const source=available.length?available:pool;
+ const ranked=shuffledTop(source,Math.min(8,source.length));
+ return ranked[0]||source[0];
+}
+function generateMenu(){
+ const f=state.settings.food||{};
+ const meals=menuRecipePool(['Comida']);
+ const dinners=menuRecipePool(['Cena']);
+ const breakfasts=menuRecipePool(['Desayuno']);
+ const snacks=menuRecipePool(['Merienda','Dulce']);
+ if(!meals.length){alert('Añade alguna receta marcada como Comida y de la temporada actual antes de generar el menú.');return}
+ if(!dinners.length){alert('Añade alguna receta marcada como Cena y de la temporada actual antes de generar el menú.');return}
+ const daysObj={};
+ const usedLunch=new Set(),usedDinner=new Set(),usedSnack=new Set();
+ for(let i=0;i<7;i++){
+   const lunch=pickWeeklyRecipe(meals,usedLunch);
+   const dinner=pickWeeklyRecipe(dinners,usedDinner);
+   usedLunch.add(lunch.id); usedDinner.add(dinner.id);
+   const breakfast=i<5?(f.breakfast||'Café con leche + tostada con aceite y tomate'):(pickWeeklyRecipe(breakfasts,usedSnack)?.name||'Desayuno especial sencillo');
+   const snack=f.snacks!==false?(pickWeeklyRecipe(snacks,usedSnack)?.name||(f.sweet&&i===4?'Dulce saludable':'Fruta o yogur vegetal')):'';
+   if(i>=5){const br=breakfasts.length?state.recipes.find(r=>r.name===breakfast):null;if(br)usedSnack.add(br.id)}
+   const sn=snack?state.recipes.find(r=>r.name===snack):null;if(sn)usedSnack.add(sn.id);
+   daysObj[i]={lunch:lunch.name,dinner:dinner.name,breakfast,snack,tupper:f.twoTuppers!==false&&[1,3].includes(i)}
+ }
+ state.menu={week:monthKey(),status:'proposal',days:daysObj,generatedAt:new Date().toISOString()};
+ state.shoppingChecks={};
+ save();render()
+}
+
 function acceptMenu(){if(!state.menu)return;state.menu.status='accepted';state.menu.acceptedAt=new Date().toISOString();state.shoppingChecks={};save();render()}
-function changeMeal(day,slot){if(!state.menu)return;const list=state.recipes.filter(r=>hasRecipeType(r,'Comida')||hasRecipeType(r,'Cena')).filter(recipeInCurrentSeason);if(!list.length){alert('Añade alguna receta primero.');return}const current=state.menu.days[day]?.[slot];const candidates=list.filter(r=>r.name!==current).sort((a,b)=>recipeScore(b)-recipeScore(a));if(!candidates.length)return;state.menu.days[day][slot]=candidates[0].name;state.menu.status='proposal';state.shoppingChecks={};save();render()}
+function changeMeal(day,slot){
+ if(!state.menu)return;
+ const type=slot==='lunch'?'Comida':'Cena';
+ const list=menuRecipePool([type]);
+ if(!list.length){alert('Añade alguna receta de '+type.toLowerCase()+' y de la temporada actual antes de cambiarla.');return}
+ const current=state.menu.days[day]?.[slot];
+ const weekUsed=new Set();
+ Object.entries(state.menu.days||{}).forEach(([d,vals])=>{
+   if(String(d)===String(day))return;
+   ['lunch','dinner'].forEach(k=>{const name=vals?.[k];const r=state.recipes.find(x=>x.name===name);if(r)weekUsed.add(r.id)})
+ });
+ const candidates=list.filter(r=>r.name!==current&&!weekUsed.has(r.id));
+ const source=candidates.length?candidates:list.filter(r=>r.name!==current);
+ if(!source.length)return;
+ const pick=shuffledTop(source,Math.min(6,source.length))[0]||source[0];
+ state.menu.days[day][slot]=pick.name;
+ state.menu.status='proposal';
+ state.shoppingChecks={};
+ save();render()
+}
+
 function shoppingItems(){if(!state.menu||state.menu.status!=='accepted')return [];const map=new Map();Object.values(state.menu.days||{}).forEach(day=>{[day.lunch,day.dinner].forEach(name=>{const r=state.recipes.find(x=>x.name===name);(r?.ingredients||parseIngredients(r?.ingredientsText||'')).forEach(i=>{const raw=String(i.ingredient||'').trim();if(!raw)return;const key=normalizeIngredient(raw);const has=state.inventory.some(x=>{const n=normalizeIngredient(x.name);return n===key||n.includes(key)||key.includes(n)});if(!has&&!map.has(key))map.set(key,{key,name:`${raw}${i.quantity?' · '+i.quantity+' '+(i.unit||''):''}`,group:foodGroup(raw)})})})});return [...map.values()].sort((a,b)=>a.group.localeCompare(b.group,'es')||a.name.localeCompare(b.name,'es'))}
 function foodGroup(name){const n=normalizeIngredient(name);if(/pollo|pavo|ternera|cerdo|carne|huevo|salmon|atun|merluza|pescado|tofu|lenteja|garbanzo|judia/.test(n))return 'Proteínas';if(/tomate|lechuga|espinaca|brocoli|calabacin|berenjena|pimiento|cebolla|zanahoria|patata|verdura|fruta|manzana|platano/.test(n))return 'Fruta y verdura';if(/arroz|pasta|harina|pan|avena|quinoa|cereal/.test(n))return 'Despensa';if(/leche|yogur|queso|burrata|mozzarella/.test(n))return 'Refrigerados';return 'Otros'}
 function toggleShopping(key){state.shoppingChecks[key]=!state.shoppingChecks[key];save();render()}

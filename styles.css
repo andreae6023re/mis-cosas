@@ -214,3 +214,21 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
 .home-today-meal .home-menu-recipe-click{cursor:pointer}
 .home-today-meal .home-menu-recipe-click:hover{text-decoration:underline;text-underline-offset:3px}
 .home-today-meal .home-menu-recipe-click:focus-visible{outline:2px solid var(--sage,#7F9A7D);outline-offset:2px;border-radius:3px}
+
+/* V50: menú, historial y modo cocinar */
+.menu-history-inline{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding:12px 0;border-top:1px solid var(--line,#ddd7cc)}
+.menu-history-inline>div{display:flex;flex-direction:column;gap:2px}
+.menu-history-inline>div span{font-size:12px;color:var(--muted,#777)}
+.history-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--line,#ddd7cc)}
+.history-row>div{display:flex;flex-direction:column;gap:4px;min-width:0}
+.history-row small{color:var(--muted,#777);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.recipe-detail-actions,.recipe-card-actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+.recipe-card-actions{margin-top:10px}
+.recipe-excluded{opacity:.62}
+.cook-mode{display:flex;flex-direction:column;gap:22px;padding:6px 0}
+.cook-progress>span{display:block;font-size:13px;color:var(--muted,#777);margin-bottom:8px}
+.cook-progress>div{height:8px;border-radius:999px;background:#ece9e2;overflow:hidden}
+.cook-progress i{display:block;height:100%;background:var(--sage,#7F9A7D);border-radius:999px}
+.cook-step{font-size:22px;line-height:1.55;margin:10px 0;min-height:160px;display:flex;align-items:center}
+.cook-actions{display:flex;justify-content:space-between;gap:10px}
+@media(max-width:650px){.cook-step{font-size:18px;min-height:200px}.menu-history-inline{align-items:flex-start;flex-direction:column}.history-row{align-items:flex-start;flex-direction:column}.history-row button{width:100%}}

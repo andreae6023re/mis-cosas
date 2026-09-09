@@ -244,3 +244,23 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
 .menu-manual-pill{margin-left:6px;font-size:.68rem;vertical-align:middle}.menu-picker-list{display:grid;gap:8px;max-height:55vh;overflow:auto;margin:12px 0}.menu-picker-item{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 14px;border:1px solid var(--border);background:var(--card);border-radius:12px;color:var(--text);cursor:pointer}.menu-picker-item:hover,.menu-picker-item.selected{border-color:var(--sage)}.menu-picker-item small{display:block;color:var(--muted);margin-top:3px}
 
 .recipe-card-marks{display:flex;align-items:center;gap:5px}.recipe-mark{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:8px;background:#efede7;font-size:13px}.recipe-mark.fun{background:#eee9df}.recipe-mark.freeze{background:#e7ecee}.recipe-detail-marks{display:flex;gap:7px;flex-wrap:wrap;margin:-4px 0 14px}.recipe-badge{display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:8px;background:#efede7;font-size:11px;color:var(--muted)}.recipe-badge.fun{background:#eee9df}.recipe-badge.freeze{background:#e7ecee}
+
+/* V55: menú semanal más compacto.
+   Las dos acciones de cada comida permanecen en la misma fila y se reduce
+   el espacio vertical sin cambiar la información mostrada. */
+.weekly-menu .menu-day{padding:10px}
+.weekly-menu .menu-day-head{margin-bottom:5px}
+.weekly-menu .meal-line{grid-template-columns:48px minmax(0,1fr) 26px 26px;gap:5px;padding:5px 0}
+.weekly-menu .meal-line>span{font-size:9px}
+.weekly-menu .meal-line strong,
+.weekly-menu .meal-line .menu-recipe-link{font-size:11.5px;line-height:1.2}
+.weekly-menu .meal-line button{width:26px;height:26px;padding:0}
+.weekly-menu .meal-line.breakfast,
+.weekly-menu .meal-line.snack{padding-top:4px;padding-bottom:4px}
+.weekly-menu .meal-line.snack{grid-template-columns:48px minmax(0,1fr)}
+.weekly-menu .menu-manual-pill{font-size:8px;padding:3px 5px}
+
+@media(max-width:650px){
+  .weekly-menu .menu-day{padding:9px}
+  .weekly-menu .meal-line{grid-template-columns:48px minmax(0,1fr) 26px 26px;gap:4px;padding:5px 0}
+}

@@ -296,3 +296,45 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
   .weekly-menu .menu-day-action{padding:4px 5px;font-size:8px}
   .weekly-menu .meal-line{grid-template-columns:48px minmax(0,1fr);gap:4px}
 }
+
+/* V59 — menú semanal: estructura robusta y compacta.
+   Evita que el nombre de la receta quede comprimido por columnas residuales. */
+.weekly-menu .meal-line{
+  display:flex !important;
+  align-items:center;
+  gap:6px;
+  padding:5px 0;
+  min-width:0;
+}
+.weekly-menu .meal-line>span:first-child{
+  flex:0 0 48px;
+  width:48px;
+  min-width:48px;
+  font-size:9px;
+}
+.weekly-menu .meal-line .menu-recipe-link,
+.weekly-menu .meal-line>strong{
+  flex:1 1 auto !important;
+  width:auto !important;
+  min-width:0 !important;
+  max-width:none !important;
+  display:block;
+  font-size:11.5px;
+  line-height:1.2;
+  overflow-wrap:normal;
+  word-break:normal;
+}
+.weekly-menu .meal-line .menu-manual-pill{display:none !important}
+.weekly-menu .menu-day-action{
+  padding:3px 5px !important;
+  font-size:8px !important;
+  line-height:1 !important;
+  font-weight:600;
+}
+@media(max-width:650px){
+  .weekly-menu .meal-line{gap:4px;padding:4px 0}
+  .weekly-menu .meal-line>span:first-child{flex-basis:48px;width:48px;min-width:48px;font-size:8px}
+  .weekly-menu .meal-line .menu-recipe-link,
+  .weekly-menu .meal-line>strong{font-size:11px;line-height:1.18}
+  .weekly-menu .menu-day-action{padding:3px 4px !important;font-size:7.5px !important}
+}

@@ -264,3 +264,15 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
   .weekly-menu .menu-day{padding:9px}
   .weekly-menu .meal-line{grid-template-columns:48px minmax(0,1fr) 26px 26px;gap:4px;padding:5px 0}
 }
+
+/* V57: corrección del menú semanal compacto.
+   La etiqueta "Elegida" no debe ocupar una columna propia: se superpone
+   discretamente en la zona derecha del nombre y deja todo el ancho central
+   disponible para el título de la receta. */
+.weekly-menu .meal-line{position:relative;grid-template-columns:48px minmax(0,1fr) 26px 26px;gap:5px}
+.weekly-menu .meal-line .menu-manual-pill{position:absolute;right:57px;top:4px;margin:0;font-size:8px;padding:2px 4px;line-height:1.2;z-index:2;pointer-events:none}
+.weekly-menu .meal-line .menu-recipe-link{padding-right:0}
+@media(max-width:650px){
+  .weekly-menu .meal-line{grid-template-columns:48px minmax(0,1fr) 26px 26px;gap:4px}
+  .weekly-menu .meal-line .menu-manual-pill{right:54px;top:3px}
+}

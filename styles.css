@@ -241,3 +241,4 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
 .consumption-row strong{font-weight:700}
 .consumption-alert{padding:12px;border-radius:10px;background:#f3eee6;display:flex;flex-direction:column;gap:4px}
 .consumption-alert span{font-size:13px}
+.menu-manual-pill{margin-left:6px;font-size:.68rem;vertical-align:middle}.menu-picker-list{display:grid;gap:8px;max-height:55vh;overflow:auto;margin:12px 0}.menu-picker-item{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 14px;border:1px solid var(--border);background:var(--card);border-radius:12px;color:var(--text);cursor:pointer}.menu-picker-item:hover,.menu-picker-item.selected{border-color:var(--sage)}.menu-picker-item small{display:block;color:var(--muted);margin-top:3px}

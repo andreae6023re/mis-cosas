@@ -679,7 +679,7 @@ function food(c){
  <section class="food-preferences"><button class="pref-chip ${f.useInventory!==false?'active':''}" onclick="toggleFoodPref('useInventory')">Aprovechar lo que tengo</button><button class="pref-chip ${f.quickMeals!==false?'active':''}" onclick="toggleFoodPref('quickMeals')">Comidas rápidas</button><button class="pref-chip ${f.vegetables!==false?'active':''}" onclick="toggleFoodPref('vegetables')">Más verduras</button><button class="pref-chip ${f.twoTuppers!==false?'active':''}" onclick="toggleFoodPref('twoTuppers')">2 tuppers</button><button class="pref-chip ${f.sweet?'active':''}" onclick="toggleFoodPref('sweet')">Incluir dulce</button><button class="pref-chip ${f.bread?'active':''}" onclick="toggleFoodPref('bread')">Hacer pan</button></section>
  <section class="food-stats"><div><span>Congelador</span><strong>${counts.freezer}</strong><small>productos</small></div><div><span>Despensa</span><strong>${counts.pantry}</strong><small>productos</small></div><div><span>Frescos</span><strong>${counts.fresh}</strong><small>productos</small></div><div><span>Recetas</span><strong>${state.recipes.length}</strong><small>guardadas</small></div></section>
  <div class="food-layout"><section class="food-panel menu-panel"><div class="panel-heading"><div><h3>Menú semanal</h3><span>${menu?.status==='accepted'?'Menú aceptado':'Propuesta pendiente de revisar'}</span></div>${menu?`<div class="actions"><button class="secondary small" onclick="generateMenu()">Regenerar</button><button class="primary small" onclick="acceptMenu()">Aceptar menú</button></div>`:''}</div>
- <div class="weekly-menu">${days.map((d,i)=>{const x=slots[i]||{};return `<div class="menu-day"><div class="menu-day-head"><b>${d}</b>${x.tupper?'<span class="pill">Tupper</span>':''}${i===4&&f.fridayFun!==false?'<span class="pill">🎉 Comida divertida</span>':''}${i===2&&x.funDinner?'<span class="pill">🎉 Cena divertida</span>':''}</div><div class="meal-line"><span>Comida</span>${menuRecipeTitle(x.lunch,'menu-meal-title')}<button class="icon-button" onclick="changeMeal(${i},'lunch')">↻</button></div><div class="meal-line"><span>Cena</span>${menuRecipeTitle(x.dinner,'menu-meal-title')}<button class="icon-button" onclick="changeMeal(${i},'dinner')">↻</button></div><div class="meal-line breakfast"><span>Desayuno</span>${menuRecipeTitle(x.breakfast,'menu-meal-title')}</div><div class="meal-line snack"><span>Merienda</span>${x.snack?menuRecipeTitle(x.snack,'menu-meal-title'):''}</div></div>`}).join('')||'<div class="empty-state">Genera una propuesta para empezar.</div>'}</div>
+ <div class="weekly-menu">${days.map((d,i)=>{const x=slots[i]||{};return `<div class="menu-day"><div class="menu-day-head"><b>${d}</b>${x.tupper?'<span class="pill">Tupper</span>':''}${i===4&&f.fridayFun!==false?'<span class="pill">🎉 Comida divertida</span>':''}${i===2&&x.funDinner?'<span class="pill">🎉 Cena divertida</span>':''}</div><div class="meal-line"><span>Comida</span>${menuRecipeTitle(x.lunch,'menu-meal-title')}${state.menu?.manualSlots?.[`${i}:lunch`]?'<span class="pill menu-manual-pill">Elegida</span>':''}<button class="icon-button" onclick="openMenuRecipePicker(${i},'lunch')" title="Elegir receta">☰</button><button class="icon-button" onclick="changeMeal(${i},'lunch')" title="Cambiar sugerencia">↻</button></div><div class="meal-line"><span>Cena</span>${menuRecipeTitle(x.dinner,'menu-meal-title')}${state.menu?.manualSlots?.[`${i}:dinner`]?'<span class="pill menu-manual-pill">Elegida</span>':''}<button class="icon-button" onclick="openMenuRecipePicker(${i},'dinner')" title="Elegir receta">☰</button><button class="icon-button" onclick="changeMeal(${i},'dinner')" title="Cambiar sugerencia">↻</button></div><div class="meal-line breakfast"><span>Desayuno</span>${menuRecipeTitle(x.breakfast,'menu-meal-title')}</div><div class="meal-line snack"><span>Merienda</span>${x.snack?menuRecipeTitle(x.snack,'menu-meal-title'):''}</div></div>`}).join('')||'<div class="empty-state">Genera una propuesta para empezar.</div>'}</div>
  ${menu?.status==='proposal'?'<div class="menu-hint">Revisa las comidas y usa ↻ para cambiar solo las que quieras. Cuando te guste, pulsa <b>Aceptar menú</b>.</div>':''}<div class="menu-history-inline"><div><b>Historial de menús</b><span>${(state.menuHistory||[]).length} guardados</span></div>${(state.menuHistory||[]).length?`<button class="text-button" onclick="openModal('Historial de menús',menuHistoryForm())">Ver historial →</button>`:'<span class="muted">Al aceptar un menú se guardará aquí.</span>'}</div></section>
  <aside class="food-side"><section class="food-panel"><div class="panel-heading"><div><h3>Inventario</h3><span>Lo que tienes ahora</span></div><div class="actions"><button class="secondary small" onclick="document.querySelector('#inventoryImportInput').click()">Importar</button><input id="inventoryImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importInventory(this)"><button class="secondary small" onclick="openModal('Nuevo producto',inventoryForm())">+ Añadir</button></div></div><div class="inventory-mini"><div><b>Congelador</b><span>${counts.freezer}</span></div><div><b>Despensa</b><span>${counts.pantry}</span></div><div><b>Frescos</b><span>${counts.fresh}</span></div></div>${expiringInventory().length?`<div class="food-alert"><b>Próximo a caducar</b><span>${expiringInventory().map(x=>esc(x.name)).join(', ')}</span></div>`:''}<button class="text-button" onclick="openModal('Inventario',inventoryListForm())">Ver y gestionar inventario →</button></section>
  <section class="food-panel"><div class="panel-heading"><div><h3>Preparar esta semana</h3><span>${pendingPrep} pendientes</span></div><button class="secondary small" onclick="openModal('Nueva preparación',preparationForm())">+ Añadir</button></div><div class="prep-list">${prep.slice(0,6).map(x=>`<button class="prep-row ${state.prepDone[x.id]?'done':''}" onclick="togglePrep('${x.id}')"><span class="check-mini">${state.prepDone[x.id]?'✓':''}</span><div><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${x.freezable?'Congelable':'Para consumir'}</small></div></button>`).join('')||'<div class="muted">Todavía no tienes preparaciones.</div>'}</div>${prep.length>6?`<button class="text-button" onclick="openModal('Preparaciones',preparationsListForm())">Ver todas →</button>`:''}</section></aside></div>
@@ -846,6 +846,7 @@ function generateMenu(){
  const snacks=menuRecipePool(['Merienda','Dulce']);
  if(!meals.length){alert('Añade alguna receta marcada como Comida y de la temporada actual antes de generar el menú.');return}
  if(!dinners.length){alert('Añade alguna receta marcada como Cena y de la temporada actual antes de generar el menú.');return}
+ const previousManual=(state.menu&&state.menu.manualSlots&&typeof state.menu.manualSlots==='object')?{...state.menu.manualSlots}:{};
  const daysObj={};
  const usedLunch=new Set(),usedDinner=new Set(),usedSnack=new Set();
  for(let i=0;i<7;i++){
@@ -853,8 +854,12 @@ function generateMenu(){
    const isFunDinner=i===2;
    const lunchPool=isFunLunch&&funMeals.length?funMeals:meals;
    const dinnerPool=isFunDinner&&funDinners.length?funDinners:dinners;
-   const lunch=pickWeeklyRecipe(lunchPool,usedLunch);
-   const dinner=pickWeeklyRecipe(dinnerPool,usedDinner);
+   const manualLunchId=previousManual[`${i}:lunch`];
+   const manualDinnerId=previousManual[`${i}:dinner`];
+   const manualLunch=manualLunchId?lunchPool.find(r=>String(r.id)===String(manualLunchId))||meals.find(r=>String(r.id)===String(manualLunchId)):null;
+   const manualDinner=manualDinnerId?dinnerPool.find(r=>String(r.id)===String(manualDinnerId))||dinners.find(r=>String(r.id)===String(manualDinnerId)):null;
+   const lunch=manualLunch||pickWeeklyRecipe(lunchPool,usedLunch);
+   const dinner=manualDinner||pickWeeklyRecipe(dinnerPool,usedDinner);
    usedLunch.add(lunch.id); usedDinner.add(dinner.id);
    const breakfast=i<5?(f.breakfast||'Café con leche + tostada con aceite y tomate'):(pickWeeklyRecipe(breakfasts,usedSnack)?.name||'Desayuno especial sencillo');
    const snack=f.snacks!==false?(pickWeeklyRecipe(snacks,usedSnack)?.name||(f.sweet&&i===4?'Dulce saludable':'Fruta o yogur vegetal')):'';
@@ -862,7 +867,7 @@ function generateMenu(){
    const sn=snack?state.recipes.find(r=>r.name===snack):null;if(sn)usedSnack.add(sn.id);
    daysObj[i]={lunch:lunch.name,dinner:dinner.name,breakfast,snack,tupper:f.twoTuppers!==false&&[1,3].includes(i),funLunch:isFunLunch&&lunchPool===funMeals,funDinner:isFunDinner&&dinnerPool===funDinners}
  }
- state.menu={week:monthKey(),status:'proposal',days:daysObj,generatedAt:new Date().toISOString()};
+ state.menu={week:monthKey(),status:'proposal',days:daysObj,manualSlots:previousManual,generatedAt:new Date().toISOString()};
  state.shoppingChecks={};
  save();render()
 }
@@ -877,6 +882,34 @@ function acceptMenu(){
  state.menu=accepted;
  state.shoppingChecks={};
  save();render();
+}
+function openMenuRecipePicker(day,slot){
+ const type=slot==='lunch'?'Comida':'Cena';
+ const all=menuRecipePool([type]);
+ const fun=all.filter(r=>r.funRecipe===true);
+ const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
+ const pool=special&&fun.length?fun:all;
+ if(!pool.length){alert('No hay recetas disponibles para este hueco.');return}
+ const current=state.menu?.days?.[day]?.[slot];
+ const currentId=state.recipes.find(r=>r.name===current)?.id;
+ const sorted=[...pool].sort((a,b)=>String(a.name).localeCompare(String(b.name),'es'));
+ openModal(`Elegir ${slot==='lunch'?'comida':'cena'}`,`<div class="menu-picker"><p class="muted">Elige una receta para este día. Se mantendrá aunque vuelvas a generar el menú.</p><div class="menu-picker-list">${sorted.map(r=>`<button class="menu-picker-item ${String(r.id)===String(currentId)?'selected':''}" onclick="selectManualMenuRecipe(${day},'${slot}','${r.id}')"><span><b>${esc(r.name)}</b><small>${esc(r.time||'')}${r.funRecipe?' · 🎉 Divertida':''}${r.freezable?' · ❄️ Congelable':''}</small></span>${String(r.id)===String(currentId)?'<span>✓</span>':''}</button>`).join('')}</div><button class="secondary small" onclick="clearManualMenuRecipe(${day},'${slot}')">Dejar automático</button></div>`);
+}
+function selectManualMenuRecipe(day,slot,id){
+ const r=state.recipes.find(x=>String(x.id)===String(id));
+ if(!r||!state.menu)return;
+ state.menu.manualSlots=state.menu.manualSlots||{};
+ state.menu.manualSlots[`${day}:${slot}`]=r.id;
+ state.menu.days[day][slot]=r.name;
+ if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&r.funRecipe===true;
+ else state.menu.days[day].funDinner=Number(day)===2&&r.funRecipe===true;
+ state.menu.status='proposal';state.shoppingChecks={};save();closeModal();render();
+}
+function clearManualMenuRecipe(day,slot){
+ if(!state.menu)return;
+ state.menu.manualSlots=state.menu.manualSlots||{};
+ delete state.menu.manualSlots[`${day}:${slot}`];
+ state.menu.status='proposal';save();closeModal();generateMenu();
 }
 function changeMeal(day,slot){
  if(!state.menu)return;

@@ -338,3 +338,5 @@ html[data-theme="dark"] .calendar-event-bar{box-shadow:0 1px 2px rgba(0,0,0,.25)
   .weekly-menu .meal-line>strong{font-size:11px;line-height:1.18}
   .weekly-menu .menu-day-action{padding:3px 4px !important;font-size:7.5px !important}
 }
+
+.menu-preparations{margin-top:12px;padding-top:10px;border-top:1px solid var(--border);display:grid;gap:6px}.menu-preparations>small{display:block}.prep-needed{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text)}.prep-needed span{width:18px;text-align:center;color:var(--muted)}.prep-needed.done{opacity:.6}.prep-needed.done b{text-decoration:line-through}.recipe-required-preps{display:flex;flex-wrap:wrap;gap:6px}.recipe-required-prep{display:inline-flex;align-items:center;padding:5px 8px;border-radius:8px;background:var(--surface-2,#efede7);font-size:12px;color:var(--muted)}

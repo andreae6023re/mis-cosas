@@ -670,7 +670,7 @@ function menuRecipeTitle(name,extraClass=''){
  return `<button class="menu-recipe-link ${extraClass}" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</button>`;
 }
 function food(c){
- const inv=state.inventory, prep=state.preparations, menu=state.menu;
+ const inv=Array.isArray(state.inventory)?state.inventory:[], prep=Array.isArray(state.preparations)?state.preparations:[], menu=state.menu;
  const counts={freezer:inv.filter(x=>x.storage==='freezer').length,pantry:inv.filter(x=>x.storage==='pantry').length,fresh:inv.filter(x=>x.storage==='fresh').length};
  const days=['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo']; const slots=menu?.days||{}; const f=state.settings.food||{};
  const shopping=shoppingItems(), neededPreps=preparationsForMenu(), prepOrder=[...neededPreps,...prep.filter(x=>!neededPreps.some(n=>String(n.id)===String(x.id)))], pendingShop=shopping.filter(x=>!state.shoppingChecks[x.key]).length, pendingPrep=prepOrder.filter(x=>!state.prepDone[x.id]).length;
@@ -827,7 +827,7 @@ function menuRecipePool(types){return state.recipes.filter(r=>types.some(t=>hasR
 function dinnerRecipeAllowed(r){const text=normalizeIngredient([r?.name||'',r?.description||'',(r?.ingredients||parseIngredients(r?.ingredientsText||'')).map(i=>i.ingredient).join(' ')].join(' '));return !/(pescado|merluza|salmon|atun|bonito|bacalao|gambas|langostino|sardina|caballa|trucha|lubina|dorada|rape|calamar|sepia|marisco|curry|tikka|tandoori|korma|butter chicken)/i.test(text)}
 function dinnerMenuPool(){return menuRecipePool(['Cena']).filter(dinnerRecipeAllowed)}
 function preparationIdsForRecipe(r){return Array.isArray(r?.preparationIds)?r.preparationIds.map(String):[]}
-function preparationsForMenu(){const ids=new Set();if(!state.menu)return [];Object.values(state.menu.days||{}).forEach(day=>['lunch','dinner','breakfast','snack'].forEach(slot=>{const r=state.recipes.find(x=>x.name===day?.[slot]);if(r)preparationIdsForRecipe(r).forEach(id=>ids.add(id))}));return [...ids].map(id=>state.preparations.find(p=>String(p.id)===id)).filter(Boolean)}
+function preparationsForMenu(){const ids=new Set();if(!state.menu||!Array.isArray(state.preparations))return [];Object.values(state.menu.days||{}).forEach(day=>['lunch','dinner','breakfast','snack'].forEach(slot=>{const r=state.recipes.find(x=>x.name===day?.[slot]);if(r)preparationIdsForRecipe(r).forEach(id=>ids.add(id))}));return [...ids].map(id=>state.preparations.find(p=>String(p.id)===id)).filter(Boolean)}
 
 
 function shuffledTop(pool,limit=6){

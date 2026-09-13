@@ -64,6 +64,11 @@ let cloudShadow=null;
 let cloudWriteChain=Promise.resolve();
 let cloudLocalDirty=false;
 let cloudChangeRevision=0;
+let menuLocalDirty=false;
+let menuSyncRevision=0;
+let menuSyncChain=Promise.resolve();
+let menuPendingFields={menu:false,menuHistory:false,shoppingChecks:false};
+let menuSyncScheduled=false;
 
 function cloudPayload(){
  return {
@@ -190,7 +195,8 @@ function saveAllToCloud(){
   setSyncStatus('syncing');
   const payload=cloudPayload();
   const baseline=cloudShadow||{};
-  const changedKeys=Object.keys(payload).filter(k=>JSON.stringify(payload[k])!==JSON.stringify(baseline[k]));
+  const menuManagedKeys=new Set(['menu','menuHistory','shoppingChecks']);
+  const changedKeys=Object.keys(payload).filter(k=>!menuManagedKeys.has(k)&&JSON.stringify(payload[k])!==JSON.stringify(baseline[k]));
   if(!changedKeys.length){setSyncStatus('ok');return true}
   try{
    const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
@@ -215,6 +221,93 @@ function saveAllToCloud(){
  });
  return cloudWriteChain;
 }
+async function syncMenuBundle(fields={menu:true,menuHistory:false,shoppingChecks:false}){
+ if(!supabaseClient||!currentUser)return false;
+ menuLocalDirty=true;
+ menuPendingFields.menu=menuPendingFields.menu||!!fields.menu;
+ menuPendingFields.menuHistory=menuPendingFields.menuHistory||!!fields.menuHistory;
+ menuPendingFields.shoppingChecks=menuPendingFields.shoppingChecks||!!fields.shoppingChecks;
+ const requestedRevision=++menuSyncRevision;
+ if(menuSyncScheduled)return menuSyncChain;
+ menuSyncScheduled=true;
+ menuSyncChain=menuSyncChain.then(async()=>{
+  menuSyncScheduled=false;
+  const fieldsToWrite={...menuPendingFields};
+  menuPendingFields={menu:false,menuHistory:false,shoppingChecks:false};
+  setSyncStatus('syncing');
+  let attempts=0;
+  while(attempts<3){
+   attempts++;
+   try{
+    // Always snapshot the LATEST local menu at execution time, never at click time.
+    const selected={};
+    if(fieldsToWrite.menu)selected.menu=state.menu||null;
+    if(fieldsToWrite.menuHistory)selected.menuHistory=Array.isArray(state.menuHistory)?state.menuHistory:[];
+    if(fieldsToWrite.shoppingChecks)selected.shoppingChecks=state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{};
+
+    const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
+    if(error)throw error;
+    const current=data?.data&&typeof data.data==='object'?data.data:{};
+    const remoteMenu=current.menu&&typeof current.menu==='object'?current.menu:null;
+    const remoteRevision=Number(remoteMenu?.revision||0);
+    const localMenu=selected.menu&&typeof selected.menu==='object'?selected.menu:null;
+    const next={...current,...selected,schemaVersion:3};
+
+    if(localMenu){
+      // Optimistic revision: this write is allowed only if the cloud revision has
+      // not changed since we read it. If another device won the race, re-read and
+      // retry with the latest local state rather than silently reverting the user's edit.
+      const nextMenu={...localMenu,revision:Math.max(Number(localMenu.revision||0),remoteRevision)+1,updatedAt:new Date().toISOString()};
+      next.menu=nextMenu;
+      const {data:updated,error:updateError}=await supabaseClient
+        .from('app_data')
+        .update({data:next})
+        .eq('user_id',currentUser.id)
+        .filter('data->menu->>revision','eq',String(remoteRevision))
+        .select('data')
+        .maybeSingle();
+      if(updateError)throw updateError;
+      if(!updated){
+        // Another device changed the menu between our read and write. Retry.
+        continue;
+      }
+      state.menu=JSON.parse(JSON.stringify(nextMenu));
+    }else{
+      const {data:updated,error:updateError}=await supabaseClient
+        .from('app_data').update({data:next}).eq('user_id',currentUser.id).select('data').maybeSingle();
+      if(updateError)throw updateError;
+      if(!updated)throw new Error('No se ha podido actualizar el menú en la nube.');
+    }
+    cloudShadow=JSON.parse(JSON.stringify(next));
+    state.cloudSyncError='';
+    if(requestedRevision===menuSyncRevision){menuLocalDirty=false;}
+    localCacheFromState();
+    setSyncStatus('ok');
+    // If another local menu change arrived while we were writing, immediately
+    // schedule one more write using the newest state.
+    if(requestedRevision!==menuSyncRevision){
+      menuSyncScheduled=true;
+      menuSyncChain=menuSyncChain.then(()=>syncMenuBundle({menu:true}));
+    }
+    return true;
+   }catch(err){
+    console.error('Error sincronizando el menú',err);
+    state.cloudSyncError=String(err?.message||err||'Error de sincronización del menú');
+    setSyncStatus('error');
+    return false;
+   }
+  }
+  const err=new Error('El menú cambió en otro dispositivo mientras se guardaba.');
+  state.cloudSyncError=err.message;
+  setSyncStatus('error');
+  return false;
+ });
+ return menuSyncChain;
+}
+async function syncMenuChoice(){
+ return syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
+}
+
 async function handleAuthSubmit(e){
  e.preventDefault();
  if(!supabaseClient){showAuthMessage('No se ha podido cargar el servicio de autenticación.','error');return}
@@ -284,7 +377,7 @@ supabaseClient.auth.onAuthStateChange((_event,session)=>{
 // Supabase. Wait for pending writes first, then read the latest cloud state.
 let cloudRefreshBusy=false;
 async function refreshCloudOnResume(){
- if(!supabaseClient||!currentUser||cloudRefreshBusy||cloudLocalDirty)return;
+ if(!supabaseClient||!currentUser||cloudRefreshBusy||cloudLocalDirty||menuLocalDirty)return;
  cloudRefreshBusy=true;
  try{
   await cloudWriteChain;
@@ -307,7 +400,7 @@ function startCloudPolling(){
  if(cloudPollingStarted)return;
  cloudPollingStarted=true;
  setInterval(()=>{
-  if(document.hidden||cloudLocalDirty||cloudRefreshBusy||!currentUser)return;
+  if(document.hidden||cloudLocalDirty||menuLocalDirty||cloudRefreshBusy||!currentUser)return;
   void refreshCloudOnResume();
  },15000);
 }
@@ -991,14 +1084,17 @@ function generateMenu(){
  }
  const sweetPool=f.sweet!==false?sweets:[];
  const sweet= sweetPool.length ? pickWeeklyRecipe(sweetPool,new Set()) : null;
- state.menu={week:currentWeek,status:'proposal',days:daysObj,sweet:sweet?sweet.name:'',sweetId:sweet?sweet.id:null,manualSlots:previousManual,generatedAt:new Date().toISOString()};
+ state.menu={week:currentWeek,status:'proposal',days:daysObj,sweet:sweet?sweet.name:'',sweetId:sweet?sweet.id:null,manualSlots:previousManual,generatedAt:new Date().toISOString(),revision:Number(state.menu?.revision||0),updatedAt:new Date().toISOString()};
  state.shoppingChecks={};
- save();render()
+ menuLocalDirty=true;
+ localCacheFromState();
+ render();
+ void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
 }
 function changeWeeklySweet(){
  if(!state.menu)return; const pool=menuRecipePool(['Dulce']); if(!pool.length){alert('No hay recetas marcadas como Dulce.');return;}
  const current=state.menu.sweetId; const candidates=pool.filter(r=>String(r.id)!==String(current)); const sweet=pickWeeklyRecipe(candidates.length?candidates:pool,new Set());
- state.menu.sweet=sweet.name; state.menu.sweetId=sweet.id; state.menu.status='proposal'; save(); render();
+ state.menu.sweet=sweet.name; state.menu.sweetId=sweet.id; state.menu.status='proposal'; menuLocalDirty=true; localCacheFromState(); render(); void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:false});
 }
 function acceptMenu(){
  if(!state.menu)return;
@@ -1011,11 +1107,9 @@ function acceptMenu(){
  state.menuHistory=[accepted,...state.menuHistory.filter(m=>String(m.week)!==String(accepted.week))].slice(0,12);
  state.menu=accepted;
  state.shoppingChecks={};
- localCacheFromState();render();
- cloudChangeRevision++;cloudLocalDirty=true;
- if(supabaseClient&&currentUser){
-   void Promise.all([syncCloudField('menu',state.menu),syncCloudField('menuHistory',state.menuHistory),syncCloudField('shoppingChecks',state.shoppingChecks)]);
- } else { queueCloudSave(); }
+ menuLocalDirty=true; localCacheFromState();render();
+ if(supabaseClient&&currentUser){ void syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
+ else { queueCloudSave(); }
 }
 function openMenuRecipePicker(day,slot){
  const type=slot==='lunch'?'Comida':'Cena';
@@ -1042,25 +1136,36 @@ async function selectManualMenuRecipe(day,slot,id){
  state.shoppingChecks={};
  // A manual menu choice is a deliberate edit: persist the menu itself immediately.
  // Do not use the generic delayed save here.
- cloudChangeRevision++;cloudLocalDirty=true;
- localCacheFromState();
+ menuLocalDirty=true; localCacheFromState();
  closeModal();
  render();
- if(supabaseClient&&currentUser){
-   await syncCloudField('menu',state.menu);
-   await syncCloudField('shoppingChecks',state.shoppingChecks);
- }
+ if(supabaseClient&&currentUser){ await syncMenuChoice(); }
 }
 async function clearManualMenuRecipe(day,slot){
  if(!state.menu)return;
+ const type=slot==='lunch'?'Comida':'Cena';
+ const all=menuRecipePool([type]);
+ const fun=all.filter(r=>r.funRecipe===true);
+ const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
+ const pool=special&&fun.length?fun:all;
+ const current=state.menu.days?.[day]?.[slot];
+ const currentId=state.menu.days?.[day]?.[slot==='lunch'?'lunchId':'dinnerId'];
+ const used=new Set(Object.entries(state.menu.days||{}).filter(([d])=>String(d)!==String(day)).map(([,v])=>v?.[slot==='lunch'?'lunchId':'dinnerId']).filter(Boolean));
+ const candidates=pool.filter(r=>String(r.id)!==String(currentId)&&!used.has(r.id));
+ const pick=shuffledTop(candidates.length?candidates:pool.filter(r=>String(r.id)!==String(currentId)),Math.min(8,(candidates.length?candidates:pool).length))[0]||pool[0];
+ if(!pick)return;
  state.menu.manualSlots=state.menu.manualSlots||{};
  delete state.menu.manualSlots[`${day}:${slot}`];
+ state.menu.days[day][slot]=pick.name;
+ state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=pick.id;
+ if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&pick.funRecipe===true;
+ else state.menu.days[day].funDinner=Number(day)===2&&pick.funRecipe===true;
  state.menu.status='proposal';
+ state.shoppingChecks={};
  localCacheFromState();
- closeModal();
- // Regenerate locally, then persist the resulting menu immediately.
- generateMenu();
- if(supabaseClient&&currentUser)await syncCloudField('menu',state.menu);
+ closeModal();render();
+ if(supabaseClient&&currentUser)await syncMenuBundle({menu:true,shoppingChecks:true});
+ else queueCloudSave();
 }
 function changeMeal(day,slot){
  if(!state.menu)return;
@@ -1088,7 +1193,8 @@ function changeMeal(day,slot){
  state.menu.days[day][slot==='lunch'?'funLunch':'funDinner']=special&&pick.funRecipe===true;
  state.menu.status='proposal';
  state.shoppingChecks={};
- save();render()
+ menuLocalDirty=true; localCacheFromState(); render();
+ void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
 }
 async function restoreMenuHistory(id){
  const found=state.menuHistory?.find(m=>String(m.id)===String(id));
@@ -1099,11 +1205,9 @@ async function restoreMenuHistory(id){
  state.menuHistory.unshift(JSON.parse(JSON.stringify(state.menu)));
  state.menuHistory=state.menuHistory.slice(0,12);
  state.shoppingChecks={};
- cloudChangeRevision++;cloudLocalDirty=true;
- localCacheFromState();render();
- if(supabaseClient&&currentUser){
-   await Promise.all([syncCloudField('menu',state.menu),syncCloudField('menuHistory',state.menuHistory),syncCloudField('shoppingChecks',state.shoppingChecks)]);
- } else queueCloudSave();
+ menuLocalDirty=true; localCacheFromState();render();
+ if(supabaseClient&&currentUser){ await syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
+ else queueCloudSave();
 }
 function menuHistoryForm(){
  const items=(state.menuHistory||[]).map(m=>{
@@ -1230,7 +1334,7 @@ function confirmMenuConsumption(){
  alert(`Consumo registrado. Se han actualizado ${changed} productos del inventario.`);
 }
 function foodGroup(name){const n=normalizeIngredient(name);if(/pollo|pavo|ternera|cerdo|carne|huevo|salmon|atun|merluza|pescado|tofu|lenteja|garbanzo|judia/.test(n))return 'Proteínas';if(/tomate|lechuga|espinaca|brocoli|calabacin|berenjena|pimiento|cebolla|zanahoria|patata|verdura|fruta|manzana|platano/.test(n))return 'Fruta y verdura';if(/arroz|pasta|harina|pan|avena|quinoa|cereal/.test(n))return 'Despensa';if(/leche|yogur|queso|burrata|mozzarella/.test(n))return 'Refrigerados';return 'Otros'}
-function toggleShopping(key){state.shoppingChecks[key]=!state.shoppingChecks[key];save();render()}
+function toggleShopping(key){state.shoppingChecks[key]=!state.shoppingChecks[key];menuLocalDirty=true;localCacheFromState();render();if(supabaseClient&&currentUser)void syncMenuBundle({menu:false,menuHistory:false,shoppingChecks:true});else queueCloudSave()}
 function shoppingForm(){const items=shoppingItems(),groups=[...new Set(items.map(x=>x.group))];return `<div class="shopping-list-modal">${groups.map(g=>`<div class="shopping-group"><h4>${esc(g)}</h4>${items.filter(x=>x.group===g).map(x=>`<label class="checkline shopping-check ${state.shoppingChecks[x.key]?'done':''}"><input type="checkbox" ${state.shoppingChecks[x.key]?'checked':''} onchange="toggleShopping('${x.key}')"><span>${esc(x.name)}</span></label>`).join('')}</div>`).join('')||'<p class="muted">No hay compras pendientes.</p>'}</div>`}
 function viewPreparation(id){
  const x=state.preparations.find(i=>String(i.id)===String(id));if(!x)return;

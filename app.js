@@ -86,12 +86,15 @@ function cloudPayload(){
  };
 }
 
+function normalizeStorageValue(value, fallback='pantry'){
+  const s=String(value??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[_-]+/g,' ').replace(/\s+/g,' ');
+  if(['freezer','congelador','congelados','congelado','congelador/freezer','freezer/congelador'].includes(s))return 'freezer';
+  if(['fresh','fresco','frescos','fresca','frescas'].includes(s))return 'fresh';
+  if(['pantry','despensa','despensa/pantry','pantry/despensa'].includes(s))return 'pantry';
+  return fallback;
+}
 function normalizeInventoryStorageState(){
-  state.inventory=(Array.isArray(state.inventory)?state.inventory:[]).map(x=>{
-    const s=String(x.storage??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-    const storage=['freezer','congelador','congelados','congelado'].includes(s)?'freezer':(['fresh','fresco','frescos'].includes(s)?'fresh':'pantry');
-    return {...x,storage};
-  });
+  state.inventory=(Array.isArray(state.inventory)?state.inventory:[]).map(x=>({...x,storage:normalizeStorageValue(x.storage,'pantry')}));
 }
 function localCacheFromState(){
   normalizeInventoryStorageState();
@@ -290,6 +293,10 @@ async function refreshCloudOnResume(){
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshCloudOnResume()});
 window.addEventListener('focus',()=>void refreshCloudOnResume());
 window.addEventListener('pageshow',()=>void refreshCloudOnResume());
+// Keep two devices converged even when the PWA stays open in the background.
+// Reads are cheap and loadAllFromCloud is read-only unless it finds a genuinely
+// empty cloud field that needs one-time recovery.
+setInterval(()=>{if(!document.hidden)void refreshCloudOnResume()},5000);
 }
 const KEY='mis_cosas_';
 const state={
@@ -760,31 +767,31 @@ async function importInventory(input){
    incoming=lines.map(line=>{const cols=line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(x=>x.trim().replace(/^"|"$/g,''));const o={};headers.forEach((h,i)=>o[h]=cols[i]??'');return o})
   }else{incoming=JSON.parse(text)}
   if(!Array.isArray(incoming))throw new Error('El archivo debe contener una lista de productos.');
-  const normalizeStorageValue=(value)=>{
-    const s=String(value??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-    if(['freezer','congelador','congelados','congelado'].includes(s))return 'freezer';
-    if(['fresh','fresco','frescos'].includes(s))return 'fresh';
-    if(['pantry','despensa'].includes(s))return 'pantry';
-    return 'pantry';
-  };
+  const filename=file.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const forcedStorage=filename.includes('congelador')||filename.includes('freezer')?'freezer':(filename.includes('despensa')||filename.includes('pantry')?'pantry':null);
   const valid=incoming.map(x=>({
     id:x.id||crypto.randomUUID(),
     name:String(x.name||'').trim(),
     quantity:String(x.quantity??'').trim(),
-    storage:normalizeStorageValue(x.storage),
+    storage:forcedStorage||normalizeStorageValue(x.storage,'pantry'),
     expiry:String(x.expiry||'').trim(),
     notes:String(x.notes||'').trim()
   })).filter(x=>x.name);
   if(!valid.length){input.value='';alert('No se han encontrado productos válidos.');return}
   const byId=new Map(state.inventory.map(x=>[String(x.id||''),x]));
+  const byNameStorage=new Map(state.inventory.map(x=>[normalizeInventoryImportName(x.name)+'|'+normalizeStorageValue(x.storage,'pantry'),x]));
   let updated=0;
   const incomingIds=new Set();
   valid.forEach(x=>{
-    const existing=byId.get(String(x.id));
+    // Prefer ID, but also match by product name + destination storage.
+    // This fixes old imports where freezer products were incorrectly saved as pantry.
+    const key=normalizeInventoryImportName(x.name)+'|'+x.storage;
+    const existing=byId.get(String(x.id))||byNameStorage.get(key);
     if(existing){
       Object.assign(existing,x);
       updated++;
-      incomingIds.add(String(x.id));
+      incomingIds.add(String(existing.id));
+      byNameStorage.set(key,existing);
     }
   });
   const keys=new Set(state.inventory.map(x=>normalizeInventoryImportName(x.name)+'|'+(x.storage||'pantry')));

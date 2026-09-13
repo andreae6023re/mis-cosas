@@ -299,9 +299,22 @@ async function refreshCloudOnResume(){
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshCloudOnResume()});
 window.addEventListener('focus',()=>void refreshCloudOnResume());
 window.addEventListener('pageshow',()=>void refreshCloudOnResume());
-// Keep two devices converged even when the PWA stays open in the background.
-// No aggressive polling: writes are pushed immediately and the cloud is refreshed
-// when the app regains focus/visibility. This avoids a read racing a local edit.
+
+// Cross-device sync: when both devices remain open, refresh periodically.
+// It is deliberately gentle and NEVER reads while there are local changes pending.
+let cloudPollingStarted=false;
+function startCloudPolling(){
+ if(cloudPollingStarted)return;
+ cloudPollingStarted=true;
+ setInterval(()=>{
+  if(document.hidden||cloudLocalDirty||cloudRefreshBusy||!currentUser)return;
+  void refreshCloudOnResume();
+ },15000);
+}
+
+// Keep the current device connected to changes made on another device.
+// This is intentionally 15s rather than the old 5s polling.
+startCloudPolling();
 
 }
 const KEY='mis_cosas_';

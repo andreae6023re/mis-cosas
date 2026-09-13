@@ -62,6 +62,8 @@ async function ensureCloudRow(user){
 let cloudSaveTimer=null;
 let cloudShadow=null;
 let cloudWriteChain=Promise.resolve();
+let cloudLocalDirty=false;
+let cloudChangeRevision=0;
 
 function cloudPayload(){
  return {
@@ -117,6 +119,10 @@ async function loadAllFromCloud(){
  const legacy=cloud.food&&typeof cloud.food==='object'?cloud.food:null;
  const isNewSchema=Number(cloud.schemaVersion||0)>=2;
  const chooseArray=(key,legacyKey=key)=>{
+  // Once a row has a modern schema, the cloud value is authoritative — including []
+  // because an empty array may be an intentional user deletion. Only brand-new legacy
+  // rows may recover populated local data.
+  if(isNewSchema && Array.isArray(cloud[key]))return cloud[key];
   if(Array.isArray(cloud[key]) && cloud[key].length>0)return cloud[key];
   if(legacy && Array.isArray(legacy[legacyKey]) && legacy[legacyKey].length>0)return legacy[legacyKey];
   if(Array.isArray(local[key]) && local[key].length>0)return local[key];
@@ -140,17 +146,13 @@ async function loadAllFromCloud(){
  // IMPORTANT: loading from cloud is read-only. Never write the whole local state back here.
  // This prevents an empty module on one device from overwriting populated data on another.
  cloudShadow=JSON.parse(JSON.stringify(cloud));
- // One-time safe recovery: if local data exists where cloud is empty, upload only that field.
- const recoveryKeys=['recipes','inventory','preparations','tasks','expenses','transactions','accounts','budgets','events','habits'];
- for(const key of recoveryKeys){
-  if(Array.isArray(cloud[key]) && cloud[key].length===0 && Array.isArray(local[key]) && local[key].length>0){
-   await syncCloudField(key,state[key]);
-  }
- }
+ // Never auto-recover a populated local array into a modern cloud row.
+ // An empty cloud array can be intentional (for example, after deleting inventory).
  return true;
 }
 function syncCloudField(key,value){
  if(!supabaseClient||!currentUser)return Promise.resolve(false);
+ const writeRevision=cloudChangeRevision;
  cloudWriteChain=cloudWriteChain.then(async()=>{
   setSyncStatus('syncing');
   try{
@@ -163,6 +165,7 @@ function syncCloudField(key,value){
    if(upsertError)throw upsertError;
    cloudShadow=JSON.parse(JSON.stringify(next));
    state.cloudSyncError='';
+   if(cloudChangeRevision===writeRevision)cloudLocalDirty=false;
    setSyncStatus('ok');
    return true;
   }catch(err){
@@ -182,6 +185,7 @@ function queueCloudSave(){
 
 function saveAllToCloud(){
  if(!supabaseClient||!currentUser)return Promise.resolve(false);
+ const writeRevision=cloudChangeRevision;
  cloudWriteChain=cloudWriteChain.then(async()=>{
   setSyncStatus('syncing');
   const payload=cloudPayload();
@@ -199,6 +203,7 @@ function saveAllToCloud(){
    if(upsertError)throw upsertError;
    cloudShadow=JSON.parse(JSON.stringify(next));
    state.cloudSyncError='';
+   if(cloudChangeRevision===writeRevision)cloudLocalDirty=false;
    setSyncStatus('ok');
    return true;
   }catch(err){
@@ -279,7 +284,7 @@ supabaseClient.auth.onAuthStateChange((_event,session)=>{
 // Supabase. Wait for pending writes first, then read the latest cloud state.
 let cloudRefreshBusy=false;
 async function refreshCloudOnResume(){
- if(!supabaseClient||!currentUser||cloudRefreshBusy)return;
+ if(!supabaseClient||!currentUser||cloudRefreshBusy||cloudLocalDirty)return;
  cloudRefreshBusy=true;
  try{
   await cloudWriteChain;
@@ -295,9 +300,9 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refre
 window.addEventListener('focus',()=>void refreshCloudOnResume());
 window.addEventListener('pageshow',()=>void refreshCloudOnResume());
 // Keep two devices converged even when the PWA stays open in the background.
-// Reads are cheap and loadAllFromCloud is read-only unless it finds a genuinely
-// empty cloud field that needs one-time recovery.
-setInterval(()=>{if(!document.hidden)void refreshCloudOnResume()},5000);
+// No aggressive polling: writes are pushed immediately and the cloud is refreshed
+// when the app regains focus/visibility. This avoids a read racing a local edit.
+
 }
 const KEY='mis_cosas_';
 const state={
@@ -351,7 +356,7 @@ function linkRecipePreparations(){
 const fmt=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(n||0);
 const todayKey=()=>{const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};
 const today=new Date();
-function save(){localCacheFromState();queueCloudSave()}
+function save(){cloudChangeRevision++;cloudLocalDirty=true;localCacheFromState();queueCloudSave()}
 function go(v){state.view=v;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));render()}
 function render(){
  const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],settings:['Ajustes','Configura la aplicación']};
@@ -679,6 +684,7 @@ function ensureRecurringTransactions(){
  if(changed)save();
 }
 function monthKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
+function weekKey(d=new Date()){const x=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));const day=x.getUTCDay()||7;x.setUTCDate(x.getUTCDate()+4-day);const y=x.getUTCFullYear();const yearStart=new Date(Date.UTC(y,0,1));const w=Math.ceil((((x-yearStart)/86400000)+1)/7);return `${y}-W${String(w).padStart(2,'0')}`}
 function money(n){return new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(Number(n)||0)}
 function accountOptions(sel){return state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}</option>`).join('')}
 function accountBalance(a){return Number(a.startingBalance||0)+state.transactions.reduce((s,t)=>{if(t.type==='transfer'){if(t.from===a.id)s-=+t.amount;if(t.to===a.id)s+=+t.amount}else if(t.account===a.id)s+=(t.type==='income'?1:-1)*(+t.amount);return s},0)}
@@ -951,7 +957,8 @@ function generateMenu(){
  const sweets=menuRecipePool(['Dulce']);
  if(!meals.length){alert('Añade alguna receta marcada como Comida y de la temporada actual antes de generar el menú.');return}
  if(!dinners.length){alert('Añade alguna receta marcada como Cena y de la temporada actual antes de generar el menú.');return}
- const previousManual=(state.menu&&state.menu.manualSlots&&typeof state.menu.manualSlots==='object')?{...state.menu.manualSlots}:{};
+ const currentWeek=weekKey();
+ const previousManual=(state.menu?.week===currentWeek&&state.menu?.manualSlots&&typeof state.menu.manualSlots==='object')?{...state.menu.manualSlots}:{};
  const daysObj={};
  const usedLunch=new Set(),usedDinner=new Set();
  for(let i=0;i<7;i++){
@@ -971,7 +978,7 @@ function generateMenu(){
  }
  const sweetPool=f.sweet!==false?sweets:[];
  const sweet= sweetPool.length ? pickWeeklyRecipe(sweetPool,new Set()) : null;
- state.menu={week:monthKey(),status:'proposal',days:daysObj,sweet:sweet?sweet.name:'',sweetId:sweet?sweet.id:null,manualSlots:previousManual,generatedAt:new Date().toISOString()};
+ state.menu={week:currentWeek,status:'proposal',days:daysObj,sweet:sweet?sweet.name:'',sweetId:sweet?sweet.id:null,manualSlots:previousManual,generatedAt:new Date().toISOString()};
  state.shoppingChecks={};
  save();render()
 }
@@ -991,7 +998,11 @@ function acceptMenu(){
  state.menuHistory=[accepted,...state.menuHistory.filter(m=>String(m.week)!==String(accepted.week))].slice(0,12);
  state.menu=accepted;
  state.shoppingChecks={};
- save();if(supabaseClient&&currentUser)void syncCloudField('recipes',state.recipes);render();
+ localCacheFromState();render();
+ cloudChangeRevision++;cloudLocalDirty=true;
+ if(supabaseClient&&currentUser){
+   void Promise.all([syncCloudField('menu',state.menu),syncCloudField('menuHistory',state.menuHistory),syncCloudField('shoppingChecks',state.shoppingChecks)]);
+ } else { queueCloudSave(); }
 }
 function openMenuRecipePicker(day,slot){
  const type=slot==='lunch'?'Comida':'Cena';
@@ -1005,21 +1016,38 @@ function openMenuRecipePicker(day,slot){
  const sorted=[...pool].sort((a,b)=>String(a.name).localeCompare(String(b.name),'es'));
  openModal(`Elegir ${slot==='lunch'?'comida':'cena'}`,`<div class="menu-picker"><p class="muted">Elige una receta para este día. Se mantendrá aunque vuelvas a generar el menú.</p><div class="menu-picker-list">${sorted.map(r=>`<button class="menu-picker-item ${String(r.id)===String(currentId)?'selected':''}" onclick="selectManualMenuRecipe(${day},'${slot}','${r.id}')"><span><b>${esc(r.name)}</b><small>${esc(r.time||'')}</small></span>${String(r.id)===String(currentId)?'<span>✓</span>':''}</button>`).join('')}</div><button class="secondary small" onclick="clearManualMenuRecipe(${day},'${slot}')">Dejar automático</button></div>`);
 }
-function selectManualMenuRecipe(day,slot,id){
+async function selectManualMenuRecipe(day,slot,id){
  const r=state.recipes.find(x=>String(x.id)===String(id));
  if(!r||!state.menu)return;
  state.menu.manualSlots=state.menu.manualSlots||{};
  state.menu.manualSlots[`${day}:${slot}`]=r.id;
  state.menu.days[day][slot]=r.name;
+ state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=r.id;
  if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&r.funRecipe===true;
  else state.menu.days[day].funDinner=Number(day)===2&&r.funRecipe===true;
- state.menu.status='proposal';state.shoppingChecks={};save();closeModal();render();
+ state.menu.status='proposal';
+ state.shoppingChecks={};
+ // A manual menu choice is a deliberate edit: persist the menu itself immediately.
+ // Do not use the generic delayed save here.
+ cloudChangeRevision++;cloudLocalDirty=true;
+ localCacheFromState();
+ closeModal();
+ render();
+ if(supabaseClient&&currentUser){
+   await syncCloudField('menu',state.menu);
+   await syncCloudField('shoppingChecks',state.shoppingChecks);
+ }
 }
-function clearManualMenuRecipe(day,slot){
+async function clearManualMenuRecipe(day,slot){
  if(!state.menu)return;
  state.menu.manualSlots=state.menu.manualSlots||{};
  delete state.menu.manualSlots[`${day}:${slot}`];
- state.menu.status='proposal';save();closeModal();generateMenu();
+ state.menu.status='proposal';
+ localCacheFromState();
+ closeModal();
+ // Regenerate locally, then persist the resulting menu immediately.
+ generateMenu();
+ if(supabaseClient&&currentUser)await syncCloudField('menu',state.menu);
 }
 function changeMeal(day,slot){
  if(!state.menu)return;
@@ -1041,12 +1069,15 @@ function changeMeal(day,slot){
  if(!source.length)return;
  const pick=shuffledTop(source,Math.min(8,source.length))[0]||source[0];
  state.menu.days[day][slot]=pick.name;
+ state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=pick.id;
+ state.menu.manualSlots=state.menu.manualSlots||{};
+ state.menu.manualSlots[`${day}:${slot}`]=pick.id;
  state.menu.days[day][slot==='lunch'?'funLunch':'funDinner']=special&&pick.funRecipe===true;
  state.menu.status='proposal';
  state.shoppingChecks={};
  save();render()
 }
-function restoreMenuHistory(id){
+async function restoreMenuHistory(id){
  const found=state.menuHistory?.find(m=>String(m.id)===String(id));
  if(!found)return;
  state.menu=JSON.parse(JSON.stringify(found));
@@ -1054,7 +1085,12 @@ function restoreMenuHistory(id){
  state.menuHistory=state.menuHistory.filter(m=>String(m.id)!==String(id));
  state.menuHistory.unshift(JSON.parse(JSON.stringify(state.menu)));
  state.menuHistory=state.menuHistory.slice(0,12);
- state.shoppingChecks={};save();render();
+ state.shoppingChecks={};
+ cloudChangeRevision++;cloudLocalDirty=true;
+ localCacheFromState();render();
+ if(supabaseClient&&currentUser){
+   await Promise.all([syncCloudField('menu',state.menu),syncCloudField('menuHistory',state.menuHistory),syncCloudField('shoppingChecks',state.shoppingChecks)]);
+ } else queueCloudSave();
 }
 function menuHistoryForm(){
  const items=(state.menuHistory||[]).map(m=>{

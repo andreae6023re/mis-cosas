@@ -86,7 +86,15 @@ function cloudPayload(){
  };
 }
 
+function normalizeInventoryStorageState(){
+  state.inventory=(Array.isArray(state.inventory)?state.inventory:[]).map(x=>{
+    const s=String(x.storage??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    const storage=['freezer','congelador','congelados','congelado'].includes(s)?'freezer':(['fresh','fresco','frescos'].includes(s)?'fresh':'pantry');
+    return {...x,storage};
+  });
+}
 function localCacheFromState(){
+  normalizeInventoryStorageState();
  Object.keys(state).forEach(k=>{
   if(k==='view'||k==='cloudSyncError')return;
   if(k==='calendarMonth'){localStorage.setItem(KEY+k,String(state[k]||''));return}
@@ -752,20 +760,47 @@ async function importInventory(input){
    incoming=lines.map(line=>{const cols=line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(x=>x.trim().replace(/^"|"$/g,''));const o={};headers.forEach((h,i)=>o[h]=cols[i]??'');return o})
   }else{incoming=JSON.parse(text)}
   if(!Array.isArray(incoming))throw new Error('El archivo debe contener una lista de productos.');
+  const normalizeStorageValue=(value)=>{
+    const s=String(value??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    if(['freezer','congelador','congelados','congelado'].includes(s))return 'freezer';
+    if(['fresh','fresco','frescos'].includes(s))return 'fresh';
+    if(['pantry','despensa'].includes(s))return 'pantry';
+    return 'pantry';
+  };
   const valid=incoming.map(x=>({
     id:x.id||crypto.randomUUID(),
     name:String(x.name||'').trim(),
     quantity:String(x.quantity??'').trim(),
-    storage:x.storage==='freezer'||x.storage==='fresh'?' '+x.storage:x.storage
-  })).filter(x=>x.name).map(x=>({...x,storage:String(x.storage).trim()==='freezer'?'freezer':String(x.storage).trim()==='fresh'?'fresh':'pantry',expiry:String(x.expiry||'').trim(),notes:String(x.notes||'').trim()}));
+    storage:normalizeStorageValue(x.storage),
+    expiry:String(x.expiry||'').trim(),
+    notes:String(x.notes||'').trim()
+  })).filter(x=>x.name);
   if(!valid.length){input.value='';alert('No se han encontrado productos válidos.');return}
+  const byId=new Map(state.inventory.map(x=>[String(x.id||''),x]));
+  let updated=0;
+  const incomingIds=new Set();
+  valid.forEach(x=>{
+    const existing=byId.get(String(x.id));
+    if(existing){
+      Object.assign(existing,x);
+      updated++;
+      incomingIds.add(String(x.id));
+    }
+  });
   const keys=new Set(state.inventory.map(x=>normalizeInventoryImportName(x.name)+'|'+(x.storage||'pantry')));
-  const additions=valid.filter(x=>{const key=normalizeInventoryImportName(x.name)+'|'+x.storage;if(keys.has(key))return false;keys.add(key);return true});
-  const skipped=valid.length-additions.length;
-  if(!additions.length){input.value='';alert(`No se ha añadido ningún producto. ${skipped} ya estaban en ese almacenamiento.`);return}
-  if(!confirm(`Se van a añadir ${additions.length} productos a Despensa${skipped?` y ${skipped} se omitirán porque ya existen`:''}. ¿Continuar?`)){input.value='';return}
+  const additions=valid.filter(x=>{
+    if(incomingIds.has(String(x.id)))return false;
+    const key=normalizeInventoryImportName(x.name)+'|'+x.storage;
+    if(keys.has(key))return false;
+    keys.add(key);return true;
+  });
+  const skipped=valid.length-additions.length-updated;
+  if(!updated&&!additions.length){input.value='';alert(`No se ha añadido ningún producto. ${skipped} ya estaban en ese almacenamiento.`);return}
+  const locations={freezer:'Congelador',pantry:'Despensa',fresh:'Frescos'};
+  const summary=[...new Set(valid.map(x=>locations[x.storage]))].join(', ');
+  if(!confirm(`Se van a importar ${valid.length} productos (${summary}).\n\nNuevos: ${additions.length} · Actualizados: ${updated} · Sin cambios: ${Math.max(0,skipped)}.\n\n¿Continuar?`)){input.value='';return}
   state.inventory.push(...additions);localCacheFromState();render();await syncCloudField('inventory',state.inventory);input.value='';
-  alert(`Importación completada: ${additions.length} productos añadidos${skipped?` y ${skipped} omitidos`:''}.`)
+  alert(`Importación completada: ${additions.length} añadidos, ${updated} actualizados y ${Math.max(0,skipped)} sin cambios.`)
  }catch(err){input.value='';alert('No se ha podido importar el inventario. Revisa que el JSON o CSV tenga un formato válido.')}
 }
 function inventoryForm(item=null){return `<div class="form"><label>Producto<input id="fInvName" value="${esc(item?.name||'')}" placeholder="Ej. pechuga de pollo"></label><div class="form-two"><label>Cantidad<input id="fInvQty" value="${esc(item?.quantity||'')}" placeholder="Ej. 2 unidades"></label><label>Ubicación<select id="fInvStorage"><option value="freezer" ${item?.storage==='freezer'?'selected':''}>Congelador</option><option value="pantry" ${item?.storage==='pantry'?'selected':''}>Despensa</option><option value="fresh" ${item?.storage==='fresh'?'selected':''}>Frescos</option></select></label></div><label>Fecha de caducidad / consumo preferente<input id="fInvExpiry" type="date" value="${item?.expiry||''}"></label><label>Notas<textarea id="fInvNotes">${esc(item?.notes||'')}</textarea></label><button class="primary" onclick="saveInventory('${item?.id||''}')">${item?'Guardar cambios':'Añadir producto'}</button>${item?`<button class="danger-button" onclick="deleteInventory('${item.id}')">Eliminar</button>`:''}</div>`}

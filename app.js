@@ -242,10 +242,46 @@ async function initAuth(){
   try{await ensureCloudRow(currentUser);await loadAllFromCloud();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
   catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
  }else showAuth('login');
- supabaseClient.auth.onAuthStateChange((_event,session)=>{
-  if(session?.user){currentUser=session.user;showApp()}
-  else{currentUser=null;showAuth('login')}
- });
+supabaseClient.auth.onAuthStateChange((_event,session)=>{
+  if(session?.user){
+   currentUser=session.user;
+   // Important: auth events can fire after the UI is already visible.
+   // Always load the cloud copy before exposing the app so a second device
+   // does not stay on an old localStorage snapshot.
+   void (async()=>{
+    try{
+     await ensureCloudRow(currentUser);
+     await loadAllFromCloud();
+     showApp();applyAppearance();render();
+    }catch(err){
+     console.error('Error cargando datos tras cambio de sesión',err);
+     state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+     setSyncStatus('error');
+     showApp();
+    }
+   })();
+  }else{currentUser=null;showAuth('login')}
+});
+
+// When the PWA is resumed on mobile (or the tab regains focus), refresh from
+// Supabase. Wait for pending writes first, then read the latest cloud state.
+let cloudRefreshBusy=false;
+async function refreshCloudOnResume(){
+ if(!supabaseClient||!currentUser||cloudRefreshBusy)return;
+ cloudRefreshBusy=true;
+ try{
+  await cloudWriteChain;
+  await loadAllFromCloud();
+  applyAppearance();render();
+ }catch(err){
+  console.error('Error actualizando desde la nube',err);
+  state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+  setSyncStatus('error');
+ }finally{cloudRefreshBusy=false}
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshCloudOnResume()});
+window.addEventListener('focus',()=>void refreshCloudOnResume());
+window.addEventListener('pageshow',()=>void refreshCloudOnResume());
 }
 const KEY='mis_cosas_';
 const state={

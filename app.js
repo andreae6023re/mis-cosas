@@ -402,7 +402,7 @@ async function handleAuthSubmit(e){
    currentUser=result.data.user;
    await ensureCloudRow(currentUser);
    await loadAllFromCloud();
-   await runRecipeAuditV83();
+   await runRecipeAuditV85();
    showApp();applyAppearance();render();checkNotifications();
   }
  }catch(err){showAuthMessage(authErrorText(err),'error')}
@@ -424,7 +424,7 @@ async function initAuth(){
  if(error){showAuthMessage(error.message,'error');showAuth('login');return}
  if(data.session?.user){
   currentUser=data.session.user;
-  try{await ensureCloudRow(currentUser);await loadAllFromCloud();await runRecipeAuditV83();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
+  try{await ensureCloudRow(currentUser);await loadAllFromCloud();await runRecipeAuditV85();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
   catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
  }else showAuth('login');
 supabaseClient.auth.onAuthStateChange((_event,session)=>{
@@ -437,7 +437,7 @@ supabaseClient.auth.onAuthStateChange((_event,session)=>{
     try{
      await ensureCloudRow(currentUser);
      await loadAllFromCloud();
-     await runRecipeAuditV83();
+     await runRecipeAuditV85();
      showApp();applyAppearance();render();
     }catch(err){
      console.error('Error cargando datos tras cambio de sesión',err);
@@ -532,9 +532,10 @@ function autoPreparationIdsForRecipe(r){
 function linkRecipePreparations(){
  state.recipes=state.recipes.map(r=>{
   const explicit=Array.isArray(r.preparationIds)?r.preparationIds.map(String).filter(id=>state.preparations.some(p=>String(p.id)===id)):[];
-  return {...r,preparationIds:[...new Set(explicit.length?explicit:autoPreparationIdsForRecipe(r))]};
+  return {...r,preparationIds:[...new Set(explicit)]};
  });
 }
+
 
 
 // V83 recipe/preparation audit.
@@ -606,12 +607,12 @@ function auditRecipeCorrections(){
  return changed;
 }
 async function runRecipeAuditV83(){
- if(localStorage.getItem(KEY+'recipeAuditVersion')==='83')return false;
+ if(localStorage.getItem(KEY+'recipeAuditVersion')==='84')return false;
  const prepChanged=auditPrepCanonicalize();
  const recipeChanged=auditRecipeCorrections();
  normalizeRecipes();
  localCacheFromState();
- localStorage.setItem(KEY+'recipeAuditVersion','83');
+ localStorage.setItem(KEY+'recipeAuditVersion','84');
  if((prepChanged||recipeChanged)&&supabaseClient&&currentUser&&foodModulesReady){
   try{
    if(prepChanged)await syncFoodModule('preparations',state.preparations);

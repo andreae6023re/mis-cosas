@@ -69,6 +69,93 @@ let menuSyncRevision=0;
 let menuSyncChain=Promise.resolve();
 let menuPendingFields={menu:false,menuHistory:false,shoppingChecks:false};
 let menuSyncScheduled=false;
+let foodModuleQueues={};
+let foodModuleRevisions={};
+let foodModulesReady=false;
+let foodModulesSetupError='';
+const FOOD_MODULE_KEYS={recipes:'recipes',preparations:'preparations',inventory:'inventory',menu:'menu',menuHistory:'menuHistory',shoppingChecks:'shoppingChecks',prepDone:'prepDone'};
+function foodModuleValue(module){
+ if(module==='recipes')return Array.isArray(state.recipes)?state.recipes:[];
+ if(module==='preparations')return Array.isArray(state.preparations)?state.preparations:[];
+ if(module==='inventory')return Array.isArray(state.inventory)?state.inventory:[];
+ if(module==='menu')return state.menu||null;
+ if(module==='menuHistory')return Array.isArray(state.menuHistory)?state.menuHistory:[];
+ if(module==='shoppingChecks')return state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{};
+ if(module==='prepDone')return state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{};
+ return null;
+}
+function setFoodModuleValue(module,value){
+ if(module==='recipes')state.recipes=Array.isArray(value)?value:[];
+ else if(module==='preparations')state.preparations=Array.isArray(value)?value:[];
+ else if(module==='inventory')state.inventory=Array.isArray(value)?value:[];
+ else if(module==='menu')state.menu=value&&typeof value==='object'?value:null;
+ else if(module==='menuHistory')state.menuHistory=Array.isArray(value)?value:[];
+ else if(module==='shoppingChecks')state.shoppingChecks=value&&typeof value==='object'?value:{};
+ else if(module==='prepDone')state.prepDone=value&&typeof value==='object'?value:{};
+}
+async function loadFoodModules(){
+ if(!supabaseClient||!currentUser)return false;
+ const {data,error}=await supabaseClient.from('app_data_modules').select('module,data,revision,updated_at').eq('user_id',currentUser.id);
+ if(error){foodModulesReady=false;foodModulesSetupError=String(error.message||error);throw error;}
+ const rows=Array.isArray(data)?data:[];
+ const present=new Set(rows.map(r=>r.module));
+ for(const row of rows){
+  if(!Object.prototype.hasOwnProperty.call(FOOD_MODULE_KEYS,row.module))continue;
+  setFoodModuleValue(row.module,row.data);
+  foodModuleRevisions[row.module]=Number(row.revision||0);
+ }
+ // One-time migration: if a module row does not exist yet, copy the current app_data value into it.
+ for(const module of Object.keys(FOOD_MODULE_KEYS))if(!present.has(module)){
+  const value=foodModuleValue(module);
+  const {error:migrationError}=await supabaseClient.from('app_data_modules').upsert({user_id:currentUser.id,module,data:value,revision:0,updated_at:new Date().toISOString()},{onConflict:'user_id,module'});
+  if(migrationError)throw migrationError;
+  foodModuleRevisions[module]=0;
+ }
+ normalizeInventoryStorageState();
+ normalizeRecipes();
+ localCacheFromState();
+ foodModulesReady=true;foodModulesSetupError='';
+ return true;
+}
+function syncFoodModule(module,value=foodModuleValue(module),options={}){
+ if(!supabaseClient||!currentUser)return Promise.resolve(false);
+ if(!foodModulesReady){
+  const msg='La sincronización de Comidas necesita la tabla app_data_modules. Ejecuta supabase-v81-food-modules.sql en Supabase.';
+  state.cloudSyncError=msg;setSyncStatus('error');console.error(msg,foodModulesSetupError);
+  return Promise.resolve(false);
+ }
+ const expected=Number(foodModuleRevisions[module]||0);
+ const nextValue=JSON.parse(JSON.stringify(value));
+ foodModuleQueues[module]=foodModuleQueues[module]||Promise.resolve();
+ foodModuleQueues[module]=foodModuleQueues[module].then(async()=>{
+  setSyncStatus('syncing');
+  try{
+   const {data:row,error:readError}=await supabaseClient.from('app_data_modules').select('data,revision').eq('user_id',currentUser.id).eq('module',module).maybeSingle();
+   if(readError)throw readError;
+   const remoteRevision=Number(row?.revision||0);
+   const currentRevision=Number(foodModuleRevisions[module]||0);
+   // If another device has advanced the same module, do not silently overwrite it.
+   if(options.expectedRevision!==undefined && remoteRevision!==Number(options.expectedRevision)){
+    setFoodModuleValue(module,row?.data);foodModuleRevisions[module]=remoteRevision;localCacheFromState();
+    throw new Error('Este módulo cambió en otro dispositivo. Se ha cargado la versión más reciente.');
+   }
+   const writeRevision=Math.max(remoteRevision,currentRevision)+1;
+   const {data:updated,error:updateError}=await supabaseClient.from('app_data_modules')
+    .update({data:nextValue,revision:writeRevision,updated_at:new Date().toISOString()})
+    .eq('user_id',currentUser.id).eq('module',module).eq('revision',remoteRevision).select('data,revision').maybeSingle();
+   if(updateError)throw updateError;
+   if(!updated)throw new Error('El módulo cambió en otro dispositivo. Vuelve a intentarlo.');
+   foodModuleRevisions[module]=Number(updated.revision||writeRevision);
+   state.cloudSyncError='';
+   localCacheFromState();
+   setSyncStatus('ok');
+   return true;
+  }catch(err){
+   console.error('Error sincronizando '+module,err);state.cloudSyncError=String(err?.message||err||'Error de sincronización');setSyncStatus('error');return false;
+  }
+ });
+ return foodModuleQueues[module];
+}
 
 function cloudPayload(){
  return {
@@ -151,8 +238,14 @@ async function loadAllFromCloud(){
  // IMPORTANT: loading from cloud is read-only. Never write the whole local state back here.
  // This prevents an empty module on one device from overwriting populated data on another.
  cloudShadow=JSON.parse(JSON.stringify(cloud));
- // Never auto-recover a populated local array into a modern cloud row.
- // An empty cloud array can be intentional (for example, after deleting inventory).
+ // Food modules live in their own rows so menu, recipes, preparations and inventory
+ // cannot overwrite one another through the monolithic app_data JSON document.
+ try{await loadFoodModules();}catch(moduleErr){
+  foodModulesReady=false;foodModulesSetupError=String(moduleErr?.message||moduleErr||'Error');
+  console.warn('No se pudieron cargar los módulos independientes; se mantiene app_data.',moduleErr);
+  state.cloudSyncError='No se ha configurado la sincronización de Comidas. Ejecuta supabase-v81-food-modules.sql en Supabase.';
+  setSyncStatus('error');
+ }
  return true;
 }
 function syncCloudField(key,value){
@@ -195,7 +288,7 @@ function saveAllToCloud(){
   setSyncStatus('syncing');
   const payload=cloudPayload();
   const baseline=cloudShadow||{};
-  const menuManagedKeys=new Set(['menu','menuHistory','shoppingChecks']);
+  const menuManagedKeys=new Set(['recipes','preparations','inventory','menu','menuHistory','shoppingChecks','prepDone']);
   const changedKeys=Object.keys(payload).filter(k=>!menuManagedKeys.has(k)&&JSON.stringify(payload[k])!==JSON.stringify(baseline[k]));
   if(!changedKeys.length){setSyncStatus('ok');return true}
   try{
@@ -224,84 +317,19 @@ function saveAllToCloud(){
 async function syncMenuBundle(fields={menu:true,menuHistory:false,shoppingChecks:false}){
  if(!supabaseClient||!currentUser)return false;
  menuLocalDirty=true;
- menuPendingFields.menu=menuPendingFields.menu||!!fields.menu;
- menuPendingFields.menuHistory=menuPendingFields.menuHistory||!!fields.menuHistory;
- menuPendingFields.shoppingChecks=menuPendingFields.shoppingChecks||!!fields.shoppingChecks;
- const requestedRevision=++menuSyncRevision;
- if(menuSyncScheduled)return menuSyncChain;
- menuSyncScheduled=true;
- menuSyncChain=menuSyncChain.then(async()=>{
-  menuSyncScheduled=false;
-  const fieldsToWrite={...menuPendingFields};
-  menuPendingFields={menu:false,menuHistory:false,shoppingChecks:false};
-  setSyncStatus('syncing');
-  let attempts=0;
-  while(attempts<3){
-   attempts++;
-   try{
-    // Always snapshot the LATEST local menu at execution time, never at click time.
-    const selected={};
-    if(fieldsToWrite.menu)selected.menu=state.menu||null;
-    if(fieldsToWrite.menuHistory)selected.menuHistory=Array.isArray(state.menuHistory)?state.menuHistory:[];
-    if(fieldsToWrite.shoppingChecks)selected.shoppingChecks=state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{};
-
-    const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
-    if(error)throw error;
-    const current=data?.data&&typeof data.data==='object'?data.data:{};
-    const remoteMenu=current.menu&&typeof current.menu==='object'?current.menu:null;
-    const remoteRevision=Number(remoteMenu?.revision||0);
-    const localMenu=selected.menu&&typeof selected.menu==='object'?selected.menu:null;
-    const next={...current,...selected,schemaVersion:3};
-
-    if(localMenu){
-      // Optimistic revision: this write is allowed only if the cloud revision has
-      // not changed since we read it. If another device won the race, re-read and
-      // retry with the latest local state rather than silently reverting the user's edit.
-      const nextMenu={...localMenu,revision:Math.max(Number(localMenu.revision||0),remoteRevision)+1,updatedAt:new Date().toISOString()};
-      next.menu=nextMenu;
-      const {data:updated,error:updateError}=await supabaseClient
-        .from('app_data')
-        .update({data:next})
-        .eq('user_id',currentUser.id)
-        .filter('data->menu->>revision','eq',String(remoteRevision))
-        .select('data')
-        .maybeSingle();
-      if(updateError)throw updateError;
-      if(!updated){
-        // Another device changed the menu between our read and write. Retry.
-        continue;
-      }
-      state.menu=JSON.parse(JSON.stringify(nextMenu));
-    }else{
-      const {data:updated,error:updateError}=await supabaseClient
-        .from('app_data').update({data:next}).eq('user_id',currentUser.id).select('data').maybeSingle();
-      if(updateError)throw updateError;
-      if(!updated)throw new Error('No se ha podido actualizar el menú en la nube.');
-    }
-    cloudShadow=JSON.parse(JSON.stringify(next));
-    state.cloudSyncError='';
-    if(requestedRevision===menuSyncRevision){menuLocalDirty=false;}
-    localCacheFromState();
-    setSyncStatus('ok');
-    // If another local menu change arrived while we were writing, immediately
-    // schedule one more write using the newest state.
-    if(requestedRevision!==menuSyncRevision){
-      menuSyncScheduled=true;
-      menuSyncChain=menuSyncChain.then(()=>syncMenuBundle({menu:true}));
-    }
-    return true;
-   }catch(err){
-    console.error('Error sincronizando el menú',err);
-    state.cloudSyncError=String(err?.message||err||'Error de sincronización del menú');
-    setSyncStatus('error');
-    return false;
-   }
+ const modules=[];
+ if(fields.menu)modules.push('menu');
+ if(fields.menuHistory)modules.push('menuHistory');
+ if(fields.shoppingChecks)modules.push('shoppingChecks');
+ const run=async()=>{
+  for(const module of modules){
+   const ok=await syncFoodModule(module,foodModuleValue(module));
+   if(!ok)return false;
   }
-  const err=new Error('El menú cambió en otro dispositivo mientras se guardaba.');
-  state.cloudSyncError=err.message;
-  setSyncStatus('error');
-  return false;
- });
+  menuLocalDirty=false;
+  return true;
+ };
+ menuSyncChain=menuSyncChain.then(run);
  return menuSyncChain;
 }
 async function syncMenuChoice(){
@@ -919,7 +947,7 @@ async function importInventory(input){
   const locations={freezer:'Congelador',pantry:'Despensa',fresh:'Frescos'};
   const summary=[...new Set(valid.map(x=>locations[x.storage]))].join(', ');
   if(!confirm(`Se van a importar ${valid.length} productos (${summary}).\n\nNuevos: ${additions.length} · Actualizados: ${updated} · Sin cambios: ${Math.max(0,skipped)}.\n\n¿Continuar?`)){input.value='';return}
-  state.inventory.push(...additions);delete state.inventoryClearedAt;localCacheFromState();render();await syncCloudField('inventory',state.inventory);input.value='';
+  state.inventory.push(...additions);delete state.inventoryClearedAt;localCacheFromState();render();await syncFoodModule('inventory',state.inventory);input.value='';
   alert(`Importación completada: ${additions.length} añadidos, ${updated} actualizados y ${Math.max(0,skipped)} sin cambios.`)
  }catch(err){input.value='';alert('No se ha podido importar el inventario. Revisa que el JSON o CSV tenga un formato válido.')}
 }
@@ -928,17 +956,17 @@ async function clearAllInventory(){
  if(!confirm('Vas a borrar TODO el inventario: Congelador, Despensa y Frescos.\n\nNo se borrarán recetas, preparaciones, menús, gastos, tareas ni calendario.\n\n¿Quieres continuar?'))return;
  state.inventory=[];state.inventoryClearedAt=new Date().toISOString();localCacheFromState();render();
  if(supabaseClient&&currentUser){
-  await syncCloudField('inventory',[]);
+  await syncFoodModule('inventory',[]);
   alert('Inventario borrado correctamente en este dispositivo y en la nube.');
  }else alert('Inventario borrado de este dispositivo.');
 }
 
-function saveInventory(id=''){const name=document.querySelector('#fInvName')?.value.trim();if(!name)return;let x=id?state.inventory.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.inventory.push(x)}x.name=name;x.quantity=document.querySelector('#fInvQty')?.value.trim()||'';x.storage=document.querySelector('#fInvStorage')?.value||'fresh';x.expiry=document.querySelector('#fInvExpiry')?.value||'';x.notes=document.querySelector('#fInvNotes')?.value.trim()||'';delete state.inventoryClearedAt;localCacheFromState();closeModal();render();void syncCloudField('inventory',state.inventory)}
-function deleteInventory(id){state.inventory=state.inventory.filter(x=>x.id!==id);if(!state.inventory.length)state.inventoryClearedAt=new Date().toISOString();localCacheFromState();closeModal();render();void syncCloudField('inventory',state.inventory)}
+function saveInventory(id=''){const name=document.querySelector('#fInvName')?.value.trim();if(!name)return;let x=id?state.inventory.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.inventory.push(x)}x.name=name;x.quantity=document.querySelector('#fInvQty')?.value.trim()||'';x.storage=document.querySelector('#fInvStorage')?.value||'fresh';x.expiry=document.querySelector('#fInvExpiry')?.value||'';x.notes=document.querySelector('#fInvNotes')?.value.trim()||'';delete state.inventoryClearedAt;localCacheFromState();closeModal();render();void syncFoodModule('inventory',state.inventory)}
+function deleteInventory(id){state.inventory=state.inventory.filter(x=>x.id!==id);if(!state.inventory.length)state.inventoryClearedAt=new Date().toISOString();localCacheFromState();closeModal();render();void syncFoodModule('inventory',state.inventory)}
 function inventoryListForm(){return `<div class="inventory-full-list">${state.inventory.map(x=>`<div class="inventory-row"><div><b>${esc(x.name)}</b><span>${esc(x.quantity||'')} · ${x.storage==='freezer'?'Congelador':x.storage==='pantry'?'Despensa':'Frescos'}${x.expiry?' · '+new Date(x.expiry+'T12:00').toLocaleDateString('es-ES'):''}</span></div><button class="secondary small" onclick="openModal('Editar producto',inventoryForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button></div>`).join('')||'<div class="muted">Inventario vacío.</div>'}</div>`}
 function preparationForm(item=null){return `<div class="form"><label>Preparación<input id="fPrepName" value="${esc(item?.name||'')}" placeholder="Ej. sofrito casero"></label><label>Cantidad<input id="fPrepQty" value="${esc(item?.quantity||'')}" placeholder="Ej. 3 raciones"></label><label>Uso previsto<input id="fPrepUse" value="${esc(item?.use||'')}" placeholder="Ej. arroz, pasta, guisos"></label><label class="checkline"><input id="fPrepFreeze" type="checkbox" ${item?.freezable?'checked':''}> Se puede congelar</label><button class="primary" onclick="savePreparation('${item?.id||''}')">${item?'Guardar cambios':'Guardar preparación'}</button>${item?`<button class="danger-button" onclick="deletePreparation('${item.id}')">Eliminar</button>`:''}</div>`}
-function savePreparation(id=''){const name=document.querySelector('#fPrepName')?.value.trim();if(!name)return;let x=id?state.preparations.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.preparations.push(x)}x.name=name;x.quantity=document.querySelector('#fPrepQty')?.value.trim()||'';x.use=document.querySelector('#fPrepUse')?.value.trim()||'';x.freezable=!!document.querySelector('#fPrepFreeze')?.checked;linkRecipePreparations();localCacheFromState();closeModal();render();void syncCloudField('preparations',state.preparations);if(supabaseClient&&currentUser)void syncCloudField('recipes',state.recipes)}
-function deletePreparation(id){state.preparations=state.preparations.filter(x=>x.id!==id);state.recipes=state.recipes.map(r=>({...r,preparationIds:(Array.isArray(r.preparationIds)?r.preparationIds:[]).filter(pid=>String(pid)!==String(id))}));localCacheFromState();closeModal();render();void syncCloudField('preparations',state.preparations);if(supabaseClient&&currentUser)void syncCloudField('recipes',state.recipes)}
+function savePreparation(id=''){const name=document.querySelector('#fPrepName')?.value.trim();if(!name)return;let x=id?state.preparations.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.preparations.push(x)}x.name=name;x.quantity=document.querySelector('#fPrepQty')?.value.trim()||'';x.use=document.querySelector('#fPrepUse')?.value.trim()||'';x.freezable=!!document.querySelector('#fPrepFreeze')?.checked;linkRecipePreparations();localCacheFromState();closeModal();render();void syncFoodModule('preparations',state.preparations);if(supabaseClient&&currentUser)void syncFoodModule('recipes',state.recipes)}
+function deletePreparation(id){state.preparations=state.preparations.filter(x=>x.id!==id);state.recipes=state.recipes.map(r=>({...r,preparationIds:(Array.isArray(r.preparationIds)?r.preparationIds:[]).filter(pid=>String(pid)!==String(id))}));localCacheFromState();closeModal();render();void syncFoodModule('preparations',state.preparations);if(supabaseClient&&currentUser)void syncFoodModule('recipes',state.recipes)}
 function recipeForm(r=null){const selectedTypes=recipeTypes(r);const selectedSeasons=Array.isArray(r?.seasons)?r.seasons:[];return `<div class="form"><label>Nombre de la receta<input id="fRecipeName" value="${esc(r?.name||'')}" placeholder="Ej. Pollo al horno"></label><div><div class="field-title">¿Cuándo puedo tomarla?</div><div class="recipe-check-grid">${foodTypes.map(x=>`<label class="checkline"><input class="fRecipeType" type="checkbox" value="${x}" ${selectedTypes.includes(x)?'checked':''}> ${x}</label>`).join('')}</div><small class="muted">Puedes marcar varias opciones. Así el menú sabrá qué recetas sirven para comida, cena, desayuno, etc.</small></div><div><div class="field-title">Temporada</div><div class="recipe-check-grid"><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Verano" ${selectedSeasons.includes('Verano')?'checked':''}> Verano</label><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Invierno" ${selectedSeasons.includes('Invierno')?'checked':''}> Invierno</label><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Todo el año" ${selectedSeasons.includes('Todo el año')?'checked':''}> Todo el año</label></div><small class="muted">Si no marcas ninguna, se considera válida todo el año.</small></div><div class="form-two"><label>Raciones<input id="fRecipeServings" type="number" min="1" value="${r?.servings||2}"></label><label>Tiempo<input id="fRecipeTime" value="${esc(r?.time||'')}" placeholder="30 min"></label></div><label>Ingredientes <small>uno por línea: ingrediente | cantidad | unidad</small><textarea id="fRecipeIngredients" placeholder="Tomate | 150 | g\nArroz | 80 | g\nAceite de oliva | 10 | ml">${esc(r?.ingredientsText||'')}</textarea><label>Preparación<textarea id="fRecipeSteps" placeholder="Pasos de elaboración">${esc(r?.steps||'')}</textarea></label><label>Descripción<textarea id="fRecipeDesc" placeholder="Cómo es y cuándo te gusta prepararla">${esc(r?.description||'')}</textarea></label><label>Combina con<input id="fRecipePairs" value="${esc(r?.pairs||'')}" placeholder="Ej. ensalada verde"></label><div><div class="field-title">Preparaciones que utiliza</div><div class="recipe-check-grid prep-link-grid">${state.preparations.map(p=>{const ids=Array.isArray(r?.preparationIds)?r.preparationIds.map(String):[];return `<label class="checkline"><input class="fRecipePrep" type="checkbox" value="${esc(p.id)}" ${ids.includes(String(p.id))?'checked':''}> ${esc(p.name)}</label>`}).join('')||'<small class="muted">Aún no tienes preparaciones.</small>'}</div><small class="muted">Solo aparecerán en “Preparar esta semana” las preparaciones vinculadas a las recetas del menú.</small></div><label class="checkline"><input id="fRecipeFav" type="checkbox" ${r?.favorite?'checked':''}> Marcar como favorita</label><label class="checkline"><input id="fRecipeFreezable" type="checkbox" ${r?.freezable?'checked':''}> Se puede congelar</label><label class="checkline"><input id="fRecipeFun" type="checkbox" ${r?.funRecipe?'checked':''}> 🎉 Receta divertida</label><button class="primary" onclick="saveRecipe('${r?.id||''}')">${r?'Guardar cambios':'Guardar receta'}</button>${r?`<button class="danger-button" onclick="deleteRecipe('${r.id}')">Eliminar receta</button>`:''}</div>`}
 function parseIngredients(text=''){return text.split(/\n+/).map(line=>line.trim()).filter(Boolean).map(line=>{const p=line.split('|').map(x=>x.trim());return {ingredient:p[0],quantity:p[1]||'',unit:p[2]||''}})}
 function normalizeRecipeImportName(name=''){return String(name).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()}
@@ -1002,13 +1030,13 @@ async function importRecipes(input){
   if(!additions.length&&!updates.length){input.value='';alert('No hay recetas que importar.');return}
   if(!confirm(`Se van a añadir ${additions.length} recetas nuevas y actualizar ${updates.length} recetas existentes con sus preparaciones detalladas. No se borrará ninguna otra receta. ¿Continuar?`)){input.value='';return}
   state.recipes.push(...additions);normalizeRecipes();localCacheFromState();render();
-  if(supabaseClient&&currentUser)await syncCloudField('recipes',state.recipes);
+  if(supabaseClient&&currentUser)await syncFoodModule('recipes',state.recipes);
   input.value='';alert(`Importación completada: ${additions.length} nuevas y ${updates.length} actualizadas.`);
  }catch(e){input.value='';console.error('Error importando recetas',e);alert('No se han podido importar las recetas. Comprueba que sea un JSON/CSV de recetas válido.');}
 }
-async function saveRecipe(id=''){const name=document.querySelector('#fRecipeName')?.value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}const types=[...document.querySelectorAll('.fRecipeType:checked')].map(x=>x.value);const seasons=[...document.querySelectorAll('.fRecipeSeason:checked')].map(x=>x.value);r.name=name;r.types=types.length?types:['Comida'];r.type=r.types[0];r.seasons=seasons;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.preparationIds=[...document.querySelectorAll('.fRecipePrep:checked')].map(x=>String(x.value));r.freezable=document.querySelector('#fRecipeFreezable').checked;r.funRecipe=document.querySelector('#fRecipeFun')?.checked||false;localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncCloudField('recipes',state.recipes)}}
+async function saveRecipe(id=''){const name=document.querySelector('#fRecipeName')?.value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}const types=[...document.querySelectorAll('.fRecipeType:checked')].map(x=>x.value);const seasons=[...document.querySelectorAll('.fRecipeSeason:checked')].map(x=>x.value);r.name=name;r.types=types.length?types:['Comida'];r.type=r.types[0];r.seasons=seasons;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.preparationIds=[...document.querySelectorAll('.fRecipePrep:checked')].map(x=>String(x.value));r.freezable=document.querySelector('#fRecipeFreezable').checked;r.funRecipe=document.querySelector('#fRecipeFun')?.checked||false;localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncFoodModule('recipes',state.recipes)}}
 function editRecipe(id){const r=state.recipes.find(x=>x.id===id);if(r)openModal('Editar receta',recipeForm(r))}
-function deleteRecipe(id){state.recipes=state.recipes.filter(x=>x.id!==id);localCacheFromState();closeModal();render();void syncCloudField('recipes',state.recipes)}
+function deleteRecipe(id){state.recipes=state.recipes.filter(x=>x.id!==id);localCacheFromState();closeModal();render();void syncFoodModule('recipes',state.recipes)}
 function cookRecipe(id,stepIndex=0){
  const r=state.recipes.find(x=>x.id===id);if(!r)return;
  const steps=String(r.steps||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
@@ -1343,7 +1371,7 @@ function viewPreparation(id){
  const steps=x.steps||x.preparation||'';
  openModal(x.name,`<div class="recipe-detail preparation-detail"><div class="recipe-detail-marks">${x.quantity?`<span class="recipe-badge">${esc(x.quantity)}</span>`:''}${x.freezable?'<span class="recipe-badge freeze">❄️ Se puede congelar</span>':''}</div>${x.description?`<p>${esc(x.description)}</p>`:''}${x.use?`<h4>Uso previsto</h4><p>${esc(x.use)}</p>`:''}${ingredientsHtml}${steps?`<h4>Preparación</h4><p class="recipe-steps">${esc(steps)}</p>`:'<p class="muted">Esta preparación todavía no tiene ingredientes ni pasos detallados.</p>'}</div>`);
 }
-function togglePrep(id){state.prepDone[id]=!state.prepDone[id];save();render()}
+function togglePrep(id){state.prepDone[id]=!state.prepDone[id];localCacheFromState();render();if(supabaseClient&&currentUser)void syncFoodModule('prepDone',state.prepDone);else save()}
 function preparationsListForm(list=state.preparations){return `<div class="prep-full-list">${list.map(x=>`<div class="prep-row ${state.prepDone[x.id]?'done':''}"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')">${state.prepDone[x.id]?'✓':''}</button><button class="prep-content" onclick="viewPreparation('${x.id}')"><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${esc(x.use||'')}${x.freezable?' · Congelable':''}</small></button><button class="secondary small prep-edit" onclick="event.stopPropagation();openModal('Editar preparación',preparationForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button></div>`).join('')||'<div class="muted">No hay preparaciones.</div>'}</div>`}
 function calendarEventLane(e,monthEvents){const id=String(e.id);const active=monthEvents.filter(x=>{const s=eventStartDate(x),f=eventEndDate(x);return s&&f&&s<=eventEndDate(e)&&f>=eventStartDate(e)}).sort((a,b)=>String(eventStartDate(a)).localeCompare(String(eventStartDate(b)))||String(a.id).localeCompare(String(b.id)));return Math.max(0,active.findIndex(x=>String(x.id)===id))}
 function calendarBar(e,date,monthEvents){const start=eventStartDate(e),end=eventEndDate(e);const multi=start!==end;const isStart=date===start,isEnd=date===end;const lane=calendarEventLane(e,monthEvents);const col=cats[e.category]||cats.Otros;const label=isStart?esc(e.title):'';return `<span class="calendar-event-bar ${multi?'multi-day':''} ${isStart?'bar-start':''} ${isEnd?'bar-end':''} ${!isStart&&!isEnd?'bar-middle':''}" style="--event-color:${col};--event-lane:${lane}" title="${esc(e.title)}" onclick="event.stopPropagation();editEvent('${e.id}')"><span>${label}</span></span>`}

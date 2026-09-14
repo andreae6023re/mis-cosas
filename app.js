@@ -402,6 +402,7 @@ async function handleAuthSubmit(e){
    currentUser=result.data.user;
    await ensureCloudRow(currentUser);
    await loadAllFromCloud();
+   await runRecipeAuditV83();
    showApp();applyAppearance();render();checkNotifications();
   }
  }catch(err){showAuthMessage(authErrorText(err),'error')}
@@ -423,7 +424,7 @@ async function initAuth(){
  if(error){showAuthMessage(error.message,'error');showAuth('login');return}
  if(data.session?.user){
   currentUser=data.session.user;
-  try{await ensureCloudRow(currentUser);await loadAllFromCloud();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
+  try{await ensureCloudRow(currentUser);await loadAllFromCloud();await runRecipeAuditV83();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
   catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
  }else showAuth('login');
 supabaseClient.auth.onAuthStateChange((_event,session)=>{
@@ -436,6 +437,7 @@ supabaseClient.auth.onAuthStateChange((_event,session)=>{
     try{
      await ensureCloudRow(currentUser);
      await loadAllFromCloud();
+     await runRecipeAuditV83();
      showApp();applyAppearance();render();
     }catch(err){
      console.error('Error cargando datos tras cambio de sesión',err);
@@ -532,6 +534,92 @@ function linkRecipePreparations(){
   const explicit=Array.isArray(r.preparationIds)?r.preparationIds.map(String).filter(id=>state.preparations.some(p=>String(p.id)===id)):[];
   return {...r,preparationIds:[...new Set(explicit.length?explicit:autoPreparationIdsForRecipe(r))]};
  });
+}
+
+
+// V83 recipe/preparation audit.
+// The catalog below is a correction layer for the recipes previously supplied in Mis cosas.
+// It updates only recipes with a known stable ID, preserving user-specific flags such as
+// favorites and "receta divertida". Preparation IDs are also repaired by canonical name so
+// an older preparation dataset cannot make a recipe point to the wrong preparation.
+function normalizeAuditName(s=''){
+ return normalizeIngredient(String(s||'')).replace(/\b(casero|casera|basico|basica|suave|individual|para bowls y wraps|en monsieur cuisine)\b/g,'').replace(/\s+/g,' ').trim();
+}
+function auditPrepCanonicalize(){
+ const catalog=Array.isArray(window.MIS_COSAS_CANONICAL_PREPARATIONS_V83)?window.MIS_COSAS_CANONICAL_PREPARATIONS_V83:[];
+ if(!catalog.length)return false;
+ let changed=false;
+ const byName=new Map(state.preparations.map(p=>[normalizeIngredient(p?.name||''),p]));
+ const usedIds=new Set(state.preparations.map(p=>String(p.id)));
+ const idRemap=new Map();
+ const next=[];
+ // First align known preparations by name. If a canonical ID is occupied by a different
+ // custom preparation, move that custom item to a UUID rather than overwriting it.
+ for(const canonical of catalog){
+  const key=normalizeIngredient(canonical.name||'');
+  let existing=byName.get(key);
+  if(existing){
+   const oldId=String(existing.id), newId=String(canonical.id);
+   if(oldId!==newId){
+    if(usedIds.has(newId)){
+     const occupant=state.preparations.find(p=>String(p.id)===newId && p!==existing);
+     if(occupant && !catalog.some(c=>String(c.id)===String(occupant.id) && normalizeIngredient(c.name||'')===normalizeIngredient(occupant.name||''))){
+      occupant.id=crypto.randomUUID();
+      usedIds.delete(newId); usedIds.add(String(occupant.id)); changed=true;
+     }
+    }
+    idRemap.set(oldId,newId); existing.id=newId; changed=true;
+   }
+   // Restore missing canonical recipe/preparation detail without overwriting edits the user made.
+   ['quantity','use','freezable','ingredients','ingredientsText','steps','description'].forEach(k=>{
+    if((existing[k]===undefined||existing[k]===null||existing[k]==='') && canonical[k]!==undefined){existing[k]=canonical[k];changed=true;}
+   });
+  }else{
+   const copy=JSON.parse(JSON.stringify(canonical));
+   if(usedIds.has(String(copy.id)))copy.id=crypto.randomUUID();
+   state.preparations.push(copy);usedIds.add(String(copy.id));byName.set(key,copy);changed=true;
+  }
+ }
+ // Rewrite prepDone keys if an old ID was remapped.
+ if(idRemap.size){
+  const done={};
+  Object.entries(state.prepDone||{}).forEach(([id,v])=>{done[idRemap.get(String(id))||String(id)]=v});
+  state.prepDone=done;
+  state.recipes=state.recipes.map(r=>({...r,preparationIds:(Array.isArray(r.preparationIds)?r.preparationIds:[]).map(id=>idRemap.get(String(id))||String(id))}));
+ }
+ return changed;
+}
+function auditRecipeCorrections(){
+ const catalog=Array.isArray(window.MIS_COSAS_RECIPE_AUDIT_V83)?window.MIS_COSAS_RECIPE_AUDIT_V83:[];
+ if(!catalog.length)return false;
+ const byId=new Map(catalog.map(r=>[String(r.id),r]));
+ let changed=false;
+ state.recipes=state.recipes.map(r=>{
+  const c=byId.get(String(r.id)); if(!c)return r;
+  const next={...r};
+  ['name','types','seasons','time','servings','ingredients','ingredientsText','steps','description','pairs','preparationIds','method'].forEach(k=>{
+   if(c[k]!==undefined && JSON.stringify(next[k])!==JSON.stringify(c[k])){next[k]=JSON.parse(JSON.stringify(c[k]));changed=true;}
+  });
+  // Preserve user-controlled flags.
+  return next;
+ });
+ return changed;
+}
+async function runRecipeAuditV83(){
+ if(localStorage.getItem(KEY+'recipeAuditVersion')==='83')return false;
+ const prepChanged=auditPrepCanonicalize();
+ const recipeChanged=auditRecipeCorrections();
+ normalizeRecipes();
+ localCacheFromState();
+ localStorage.setItem(KEY+'recipeAuditVersion','83');
+ if((prepChanged||recipeChanged)&&supabaseClient&&currentUser&&foodModulesReady){
+  try{
+   if(prepChanged)await syncFoodModule('preparations',state.preparations);
+   if(recipeChanged||prepChanged)await syncFoodModule('recipes',state.recipes);
+   if(prepChanged)await syncFoodModule('prepDone',state.prepDone);
+  }catch(err){console.error('Error guardando auditoría V83',err)}
+ }
+ return prepChanged||recipeChanged;
 }
 const fmt=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(n||0);
 const todayKey=()=>{const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};

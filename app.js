@@ -267,7 +267,7 @@ async function loadAllFromCloud(){
   if(Array.isArray(local[key]) && local[key].length>0)return local[key];
   return Array.isArray(cloud[key])?cloud[key]:local[key];
  };
- state.tasks=chooseArray('tasks');state.expenses=chooseArray('expenses');state.transactions=chooseArray('transactions');state.accounts=chooseArray('accounts');state.budgets=chooseArray('budgets');state.events=chooseArray('events');state.habits=chooseArray('habits');state.cleaning=chooseArray('cleaning');
+ state.tasks=chooseArray('tasks');state.expenses=chooseArray('expenses');state.transactions=chooseArray('transactions');state.accounts=chooseArray('accounts');state.budgets=chooseArray('budgets');state.events=chooseArray('events');state.habits=chooseArray('habits');state.cleaning=normalizeCleaningArray(chooseArray('cleaning'));
  state.recipes=chooseArray('recipes');state.inventory=chooseArray('inventory');state.preparations=chooseArray('preparations');state.menuHistory=chooseArray('menuHistory');normalizeRecipes();
  const chooseObject=(key)=>{
   if(cloud[key]&&typeof cloud[key]==='object' && (Object.keys(cloud[key]).length>0 || isNewSchema))return cloud[key];
@@ -488,6 +488,10 @@ startCloudPolling();
 
 }
 const KEY='mis_cosas_';
+function normalizeCleaningArray(value){
+ if(!Array.isArray(value))return [];
+ return value.filter(x=>x&&typeof x==='object'&&String(x.name||'').trim()).map(x=>({...x,completed:x.completed&&typeof x.completed==='object'?x.completed:{}}));
+}
 const state={
  view:'home',
  tasks:JSON.parse(localStorage.getItem(KEY+'tasks')||'[]'),
@@ -497,7 +501,7 @@ const state={
  budgets:JSON.parse(localStorage.getItem(KEY+'budgets')||'[]'),
  events:JSON.parse(localStorage.getItem(KEY+'events')||'[]'),
  habits:JSON.parse(localStorage.getItem(KEY+'habits')||'[]'),
- cleaning:JSON.parse(localStorage.getItem(KEY+'cleaning')||'[]'),
+ cleaning:normalizeCleaningArray(JSON.parse(localStorage.getItem(KEY+'cleaning')||'[]')),
  recipes:JSON.parse(localStorage.getItem(KEY+'recipes')||'[]'),
  inventory:JSON.parse(localStorage.getItem(KEY+'inventory')||'[]'),
  preparations:JSON.parse(localStorage.getItem(KEY+'preparations')||'[]'),
@@ -632,7 +636,7 @@ function go(v){state.view=v;document.querySelectorAll('[data-view]').forEach(b=>
 function render(){
  const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],cleaning:['Limpieza','Rutinas diarias, semanales y periódicas'],settings:['Ajustes','Configura la aplicación']};
  document.querySelector('#pageTitle').textContent=names[state.view][0];document.querySelector('#pageSubtitle').textContent=names[state.view][1];
- ({home,tasks,expenses,food,calendar,habits,cleaning,settings}[state.view]||home)(document.querySelector('#content'));
+ const viewFn={home,tasks,expenses,food,calendar,habits,cleaning,settings}[state.view]||home;viewFn(document.querySelector('#content'));
 }
 function home(c){
  const d=today.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'}),pending=state.tasks.filter(x=>!x.done).length;
@@ -1531,6 +1535,7 @@ function cleaningNthWeekday(year,monthIndex,weekday,weekOfMonth){
 }
 function cleaningAnchorDate(item){const raw=item.anchorDate||item.createdAt||todayKey();const d=cleaningParseDate(String(raw).slice(0,10));return Number.isNaN(d.getTime())?new Date(today):d}
 function cleaningDue(item,date){
+ if(!item||typeof item!=='object')return false;
  const d=date instanceof Date?new Date(date):cleaningParseDate(date);d.setHours(12,0,0,0);
  const freq=item.frequency||'weekly';
  if(freq==='daily')return true;
@@ -1580,10 +1585,11 @@ function cleaningDayCard(date){
  const lines=due.map(x=>`<div class="cleaning-task ${x.completed?.[key]?'done':''}"><button class="cleaning-check" onclick="toggleCleaning('${x.id}','${key}')" aria-label="Marcar ${esc(x.name)}">${x.completed?.[key]?'✓':''}</button><div class="cleaning-task-main"><b>${esc(x.name)}</b><small>${esc(cleaningFrequencyLabel(x))}${x.notes?' · '+esc(x.notes):''}</small></div><button class="cleaning-edit" onclick="editCleaning('${x.id}')" aria-label="Editar">⋯</button></div>`).join('');
  return `<article class="cleaning-day-card ${key===todayKey()?'today':''}"><header class="cleaning-day-head"><div><span>${date.toLocaleDateString('es-ES',{weekday:'long'})}</span><strong>${date.getDate()}</strong></div><small>${done}/${due.length}</small></header><div class="cleaning-day-list">${lines||'<span class="muted">Nada programado</span>'}</div></article>`;
 }
+function manageCleaning(){document.querySelector('#cleaningManagement')?.scrollIntoView({behavior:'smooth',block:'start'});}
 function cleaning(c){
  const dates=cleaningWeekDates();const total=dates.reduce((n,d)=>n+state.cleaning.filter(x=>cleaningDue(x,d)).length,0);const done=dates.reduce((n,d)=>{const k=cleaningDateKey(d);return n+state.cleaning.filter(x=>cleaningDue(x,d)&&x.completed?.[k]).length},0);
  const counts=cleaningFrequencies.map(([v,l])=>`<span class="cleaning-stat"><b>${state.cleaning.filter(x=>(x.frequency||'weekly')===v).length}</b>${l}</span>`).join('');
- c.innerHTML=`<div class="cleaning-page"><section class="cleaning-hero"><div><span class="eyebrow">Rutinas del hogar</span><h2>Limpieza</h2><p>Organiza lo que toca cada día sin tener que acordarte de todo.</p></div><div class="actions"><button class="secondary" onclick="openModal('Nueva rutina de limpieza',cleaningForm())">Gestionar rutinas</button><button class="primary" onclick="openModal('Nueva rutina de limpieza',cleaningForm())">+ Añadir rutina</button></div></section><section class="cleaning-summary"><div><span>Esta semana</span><strong>${done}/${total}</strong><small>tareas completadas</small></div><div class="cleaning-frequency-summary">${counts}</div></section><div class="cleaning-week-scroll"><div class="cleaning-week">${dates.map(cleaningDayCard).join('')}</div></div><section class="cleaning-management"><div class="panel-heading"><div><h3>Todas mis rutinas</h3><span>Configura una vez y se repiten automáticamente.</span></div><button class="secondary small" onclick="openModal('Nueva rutina de limpieza',cleaningForm())">+ Rutina</button></div><div class="cleaning-routine-list">${state.cleaning.map(x=>`<div class="cleaning-routine-row"><div><b>${esc(x.name)}</b><span>${esc(cleaningFrequencyLabel(x))} · ${esc(cleaningScheduleText(x))}${x.notes?' · '+esc(x.notes):''}</span></div><button class="secondary small" onclick="editCleaning('${x.id}')">Editar</button></div>`).join('')||'<div class="empty-state"><span>Aún no tienes rutinas de limpieza.</span><button class="secondary" onclick="openModal(\'Nueva rutina de limpieza\',cleaningForm())">Añadir la primera</button></div>'}</div></section></div>`;
+ c.innerHTML=`<div class="cleaning-page"><section class="cleaning-hero"><div><span class="eyebrow">Rutinas del hogar</span><h2>Limpieza</h2><p>Organiza lo que toca cada día sin tener que acordarte de todo.</p></div><div class="actions"><button class="secondary" onclick="manageCleaning()">Gestionar rutinas</button><button class="primary" onclick="openModal('Nueva rutina de limpieza',cleaningForm())">+ Añadir rutina</button></div></section><section class="cleaning-summary"><div><span>Esta semana</span><strong>${done}/${total}</strong><small>tareas completadas</small></div><div class="cleaning-frequency-summary">${counts}</div></section><div class="cleaning-week-scroll"><div class="cleaning-week">${dates.map(cleaningDayCard).join('')}</div></div><section id="cleaningManagement" class="cleaning-management"><div class="panel-heading"><div><h3>Todas mis rutinas</h3><span>Configura una vez y se repiten automáticamente.</span></div><button class="secondary small" onclick="openModal('Nueva rutina de limpieza',cleaningForm())">+ Rutina</button></div><div class="cleaning-routine-list">${state.cleaning.map(x=>`<div class="cleaning-routine-row"><div><b>${esc(x.name)}</b><span>${esc(cleaningFrequencyLabel(x))} · ${esc(cleaningScheduleText(x))}${x.notes?' · '+esc(x.notes):''}</span></div><button class="secondary small" onclick="editCleaning('${x.id}')">Editar</button></div>`).join('')||'<div class="empty-state"><span>Aún no tienes rutinas de limpieza.</span><button class="secondary" onclick="openModal(\'Nueva rutina de limpieza\',cleaningForm())">Añadir la primera</button></div>'}</div></section></div>`;
 }
 
 function calendarEventLane(e,monthEvents){const id=String(e.id);const active=monthEvents.filter(x=>{const s=eventStartDate(x),f=eventEndDate(x);return s&&f&&s<=eventEndDate(e)&&f>=eventStartDate(e)}).sort((a,b)=>String(eventStartDate(a)).localeCompare(String(eventStartDate(b)))||String(a.id).localeCompare(String(b.id)));return Math.max(0,active.findIndex(x=>String(x.id)===id))}
@@ -1650,13 +1656,13 @@ function saveCategoriesSettings(){
 }
 function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));queueCloudSave()}
 function exportData(){
- const data={version:19,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,menuHistory:state.menuHistory||[],calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
+ const data={version:19,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,cleaning:state.cleaning,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,menuHistory:state.menuHistory||[],calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
  const stamp=new Date().toLocaleString('es-ES');localStorage.setItem(KEY+'lastBackup',stamp);
  const el=document.querySelector('#backupStatus');if(el)el.textContent='Última copia manual: '+stamp;
 }
 
-async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','recipes','inventory','preparations','shoppingChecks','prepDone','menuHistory'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Mis cosas.')}}
+async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','cleaning','recipes','inventory','preparations','shoppingChecks','prepDone','menuHistory'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;state.cleaning=normalizeCleaningArray(state.cleaning);save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Mis cosas.')}}
 
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;updateInstallButton()});
 window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateInstallButton(true)});
@@ -1679,7 +1685,10 @@ function toggleMobileMenu(){const sidebar=document.querySelector('.sidebar');con
 const menuBtn=document.querySelector('#menuBtn');
 if(menuBtn)menuBtn.addEventListener('click',toggleMobileMenu);
 document.querySelector('.menu-backdrop')?.addEventListener('click',closeMobileMenu);
-document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{go(b.dataset.view);closeMobileMenu();}));
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();go(b.dataset.view);closeMobileMenu();}));
+// Fallback delegado para la navegación: garantiza que las vistas añadidas dinámicamente
+// (incluida Limpieza) siempre respondan al clic aunque un listener individual no se haya enlazado.
+document.addEventListener('click',e=>{const b=e.target.closest?.('[data-view]');if(!b)return;if(b.closest('#nav')||b.closest('.bottom-nav')){e.preventDefault();e.stopPropagation();go(b.dataset.view);closeMobileMenu();}},true);
 
 document.querySelector('#closeModal').addEventListener('click',closeModal);
 document.querySelector('#quickAdd').addEventListener('click',()=>{

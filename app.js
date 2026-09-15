@@ -1519,7 +1519,7 @@ function preparationsListForm(list=state.preparations){return `<div class="prep-
 // LIMPIEZA — rutinas periódicas y planificación semanal
 // ============================================================
 const cleaningWeekdays=[['1','Lunes'],['2','Martes'],['3','Miércoles'],['4','Jueves'],['5','Viernes'],['6','Sábado'],['0','Domingo']];
-const cleaningFrequencies=[['daily','Diaria'],['weekly','Semanal'],['biweekly','Bisemanal (cada 2 semanas)'],['monthly','Mensual'],['quarterly','Trimestral'],['yearly','Anual']];
+const cleaningFrequencies=[['daily','Diaria'],['weekly','Semanal'],['biweekly','Bisemanal (cada 2 semanas)'],['monthly','Mensual'],['quarterly','Trimestral'],['yearly','Anual'],['biennial','Bianual (cada 6 meses)']];
 const cleaningWeeks=[['1','1.ª semana'],['2','2.ª semana'],['3','3.ª semana'],['4','4.ª semana'],['5','Última semana']];
 const cleaningMonths=[['1','Enero'],['2','Febrero'],['3','Marzo'],['4','Abril'],['5','Mayo'],['6','Junio'],['7','Julio'],['8','Agosto'],['9','Septiembre'],['10','Octubre'],['11','Noviembre'],['12','Diciembre']];
 function cleaningDateKey(d){const x=new Date(d);return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`}
@@ -1550,11 +1550,12 @@ function cleaningDue(item,date){
   return days>=0 && Math.floor(days/7)%2===0;
  }
  if(freq==='yearly' && d.getMonth()!==Number(item.month||anchor.getMonth()+1)-1)return false;
- if(freq!=='yearly'){
-  const interval=freq==='quarterly'?3:1;
-  if(cleaningMonthDiff(anchor,d)%interval!==0)return false;
+ if(freq==='monthly' || freq==='quarterly' || freq==='biennial'){
+  const interval=freq==='quarterly'?3:(freq==='biennial'?6:1);
+  const monthDiff=cleaningMonthDiff(anchor,d);
+  if(monthDiff<0 || monthDiff%interval!==0)return false;
  }
- if(freq==='yearly' || freq==='monthly' || freq==='quarterly'){
+ if(freq==='yearly' || freq==='biennial' || freq==='monthly' || freq==='quarterly'){
   const target=cleaningNthWeekday(d.getFullYear(),d.getMonth(),weekday,Number(item.weekOfMonth||1));
   return !!target&&cleaningDateKey(target)===cleaningDateKey(d);
  }
@@ -1569,6 +1570,7 @@ function cleaningScheduleText(item){
  if(f==='biweekly')return `Cada 2 semanas · ${day.toLowerCase()}`;
  const week=cleaningWeeks.find(x=>x[0]===String(item.weekOfMonth||1))?.[1]||'';
  if(f==='yearly'){const month=cleaningMonths.find(x=>x[0]===String(item.month||cleaningAnchorDate(item).getMonth()+1))?.[1]||'';return `${week} de ${month} · ${day.toLowerCase()}`}
+ if(f==='biennial')return `Cada 6 meses · ${week} · ${day.toLowerCase()}`;
  return `${week} · ${day.toLowerCase()}`;
 }
 function cleaningForm(item=null){

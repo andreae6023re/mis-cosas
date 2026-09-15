@@ -1519,7 +1519,7 @@ function preparationsListForm(list=state.preparations){return `<div class="prep-
 // LIMPIEZA — rutinas periódicas y planificación semanal
 // ============================================================
 const cleaningWeekdays=[['1','Lunes'],['2','Martes'],['3','Miércoles'],['4','Jueves'],['5','Viernes'],['6','Sábado'],['0','Domingo']];
-const cleaningFrequencies=[['daily','Diaria'],['weekly','Semanal'],['bimonthly','Bimensual (cada 2 meses)'],['monthly','Mensual'],['quarterly','Trimestral'],['yearly','Anual']];
+const cleaningFrequencies=[['daily','Diaria'],['weekly','Semanal'],['biweekly','Bisemanal (cada 2 semanas)'],['monthly','Mensual'],['quarterly','Trimestral'],['yearly','Anual']];
 const cleaningWeeks=[['1','1.ª semana'],['2','2.ª semana'],['3','3.ª semana'],['4','4.ª semana'],['5','Última semana']];
 const cleaningMonths=[['1','Enero'],['2','Febrero'],['3','Marzo'],['4','Abril'],['5','Mayo'],['6','Junio'],['7','Julio'],['8','Agosto'],['9','Septiembre'],['10','Octubre'],['11','Noviembre'],['12','Diciembre']];
 function cleaningDateKey(d){const x=new Date(d);return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`}
@@ -1543,12 +1543,18 @@ function cleaningDue(item,date){
  if(d.getDay()!==weekday)return false;
  if(freq==='weekly')return true;
  const anchor=cleaningAnchorDate(item);
+ if(freq==='biweekly'){
+  const anchorWeekday=anchor.getDay()===weekday;
+  if(!anchorWeekday)return false;
+  const days=Math.round((d-anchor)/(1000*60*60*24));
+  return days>=0 && Math.floor(days/7)%2===0;
+ }
  if(freq==='yearly' && d.getMonth()!==Number(item.month||anchor.getMonth()+1)-1)return false;
  if(freq!=='yearly'){
-  const interval=freq==='bimonthly'?2:freq==='quarterly'?3:1;
+  const interval=freq==='quarterly'?3:1;
   if(cleaningMonthDiff(anchor,d)%interval!==0)return false;
  }
- if(freq==='yearly' || freq==='monthly' || freq==='bimonthly' || freq==='quarterly'){
+ if(freq==='yearly' || freq==='monthly' || freq==='quarterly'){
   const target=cleaningNthWeekday(d.getFullYear(),d.getMonth(),weekday,Number(item.weekOfMonth||1));
   return !!target&&cleaningDateKey(target)===cleaningDateKey(d);
  }
@@ -1560,6 +1566,7 @@ function cleaningScheduleText(item){
  if(f==='daily')return 'Todos los días';
  const day=cleaningWeekdays.find(x=>x[0]===String(item.weekday??1))?.[1]||'';
  if(f==='weekly')return `Cada ${day.toLowerCase()}`;
+ if(f==='biweekly')return `Cada 2 semanas · ${day.toLowerCase()}`;
  const week=cleaningWeeks.find(x=>x[0]===String(item.weekOfMonth||1))?.[1]||'';
  if(f==='yearly'){const month=cleaningMonths.find(x=>x[0]===String(item.month||cleaningAnchorDate(item).getMonth()+1))?.[1]||'';return `${week} de ${month} · ${day.toLowerCase()}`}
  return `${week} · ${day.toLowerCase()}`;
@@ -1569,7 +1576,7 @@ function cleaningForm(item=null){
  const weekday=String(item?.weekday??1),week=String(item?.weekOfMonth??1),month=String(item?.month??(cleaningAnchorDate(item||{}).getMonth()+1));
  return `<div class="form"><label>Qué tengo que hacer<input id="fCleaningName" value="${esc(item?.name||'')}" placeholder="Ej. Limpiar baño"></label><label>Frecuencia<select id="fCleaningFreq" onchange="updateCleaningFormVisibility()">${cleaningFrequencies.map(([v,l])=>`<option value="${v}" ${f===v?'selected':''}>${l}</option>`).join('')}</select></label><div id="cleaningScheduleFields"><div class="form-two"><label>Día de la semana<select id="fCleaningWeekday">${cleaningWeekdays.map(([v,l])=>`<option value="${v}" ${weekday===v?'selected':''}>${l}</option>`).join('')}</select></label><label class="cleaning-week-field">Semana del mes<select id="fCleaningWeek">${cleaningWeeks.map(([v,l])=>`<option value="${v}" ${week===v?'selected':''}>${l}</option>`).join('')}</select></label></div><label class="cleaning-month-field">Mes del año<select id="fCleaningMonth">${cleaningMonths.map(([v,l])=>`<option value="${v}" ${month===v?'selected':''}>${l}</option>`).join('')}</select></label></div><label>Notas<textarea id="fCleaningNotes" placeholder="Opcional">${esc(item?.notes||'')}</textarea></label><button class="primary" onclick="saveCleaning('${item?.id||''}')">${item?'Guardar cambios':'Guardar rutina'}</button>${item?`<button class="danger-button" onclick="deleteCleaning('${item.id}')">Eliminar rutina</button>`:''}</div>`;
 }
-function updateCleaningFormVisibility(){const f=document.querySelector('#fCleaningFreq')?.value;document.querySelector('.cleaning-week-field')?.classList.toggle('hidden',f==='daily'||f==='weekly');document.querySelector('.cleaning-month-field')?.classList.toggle('hidden',f!=='yearly');}
+function updateCleaningFormVisibility(){const f=document.querySelector('#fCleaningFreq')?.value;document.querySelector('.cleaning-week-field')?.classList.toggle('hidden',f==='daily'||f==='weekly'||f==='biweekly');document.querySelector('.cleaning-month-field')?.classList.toggle('hidden',f!=='yearly');}
 function saveCleaning(id=''){
  const name=document.querySelector('#fCleaningName')?.value.trim();if(!name)return;
  let x=id?state.cleaning.find(i=>String(i.id)===String(id)):null;if(!x){x={id:crypto.randomUUID(),createdAt:todayKey()};state.cleaning.push(x)}

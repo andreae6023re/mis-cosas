@@ -366,3 +366,10 @@ html[data-theme="dark"] .habit-history-picker input[type="date"]{background:#303
 html[data-theme="dark"] .habit-history-day{background:#32332f;border-color:var(--border)}
 html[data-theme="dark"] .habit-history-day.selected{background:color-mix(in srgb,var(--sage) 20%,var(--card))}
 @media(max-width:650px){.habit-history-picker>label{align-items:flex-start;flex-direction:column;gap:6px}.habit-history-picker input[type="date"]{width:100%}.habit-history-days{grid-template-columns:repeat(7,72px)}}
+
+/* V93: huecos del menú reservados para comer fuera */
+.weekly-menu .menu-outside{display:inline-flex;align-items:center;gap:4px;color:var(--muted,#77736E);font-weight:700;font-size:11px}
+.menu-picker-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;padding-top:10px;border-top:1px solid var(--border,#DDD9D1)}
+.menu-picker-actions .selected{background:#e9eee7;color:#5e765f;border-color:#ccd8c9}
+.home-today-meal .home-menu-outside{color:var(--muted,#77736E)}
+@media(max-width:700px){.menu-picker-actions{gap:6px}.menu-picker-actions button{flex:1 1 auto}}

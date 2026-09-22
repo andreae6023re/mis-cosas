@@ -926,6 +926,7 @@ if(expenseCategories.Suscripciones?.includes('Podomo') && !expenseCategories.Sus
 const defaultAccounts=["Cuenta de gastos","Cuenta nómina","Cuenta ahorro","Revolut"];
 if(!Array.isArray(state.accounts))state.accounts=defaultAccounts.map(name=>({id:crypto.randomUUID(),name,startingBalance:0,active:true}));
 if(!Array.isArray(state.transactions))state.transactions=[];
+normalizeExpenseReferences();
 if(!Array.isArray(state.budgets))state.budgets=[];
 if(!state.settings || typeof state.settings!=='object')state.settings={};
 state.settings.notifications=state.settings.notifications||{tasks:true,calendar:true,expenses:true,food:true};
@@ -967,6 +968,69 @@ function ensureRecurringTransactions(){
  });
  if(changed)save();
 }
+function resolveAccountRef(ref){
+ const accounts=state.accounts||[];
+ if(ref==null)return null;
+ const raw=String(ref);
+ let a=accounts.find(x=>String(x.id)===raw);
+ if(a)return a.id;
+ a=accounts.find(x=>String(x.name).trim().toLowerCase()===raw.trim().toLowerCase());
+ return a?a.id:null;
+}
+function normalizeExpenseReferences(){
+ let changed=false;
+ const seen=new Set();
+ state.transactions.forEach(t=>{
+   if(!t.id){t.id=crypto.randomUUID();changed=true}
+   if(seen.has(t.id)){t.id=crypto.randomUUID();changed=true}
+   seen.add(t.id);
+   if(t.type==='transfer'){
+     const from=t.from??t.fromAccount??t.sourceAccount??t.origin??t.source;
+     const to=t.to??t.toAccount??t.destinationAccount??t.destination??t.target;
+     const rf=resolveAccountRef(from), rt=resolveAccountRef(to);
+     if(rf && t.from!==rf){t.from=rf;changed=true}
+     if(rt && t.to!==rt){t.to=rt;changed=true}
+     const amount=Number(t.amount);
+     if(Number.isFinite(amount) && amount<0){t.amount=Math.abs(amount);changed=true}
+   }else if(t.account){
+     const ra=resolveAccountRef(t.account);
+     if(ra && t.account!==ra){t.account=ra;changed=true}
+   }
+ });
+ if(changed)save();
+}
+function expenseReconciliation(){
+ const accounts=state.accounts||[], ids=new Set(accounts.map(a=>a.id)), tx=state.transactions||[];
+ let income=0,expense=0,transferIn=0,transferOut=0,invalid=0,invalidTransfer=0,nonPositive=0;
+ const issues=[];
+ const seen=new Set();
+ tx.forEach(t=>{
+   const amount=Number(t.amount);
+   if(!Number.isFinite(amount)||amount<=0){nonPositive++;issues.push({t,reason:'Importe no válido o igual a 0'});return}
+   if(seen.has(t.id)){issues.push({t,reason:'ID duplicado'});}else seen.add(t.id);
+   if(t.type==='transfer'){
+     if(!ids.has(t.from)||!ids.has(t.to)||t.from===t.to){invalidTransfer++;issues.push({t,reason:'Transferencia con cuenta de origen/destino no válida'});return}
+     transferOut+=amount;transferIn+=amount;
+   }else if(t.type==='income'){
+     if(!ids.has(t.account)){invalid++;issues.push({t,reason:'Ingreso asociado a una cuenta que no existe'});return}
+     income+=amount;
+   }else if(t.type==='expense'){
+     if(!ids.has(t.account)){invalid++;issues.push({t,reason:'Gasto asociado a una cuenta que no existe'});return}
+     expense+=amount;
+   }
+ });
+ const starting=accounts.reduce((s,a)=>s+Number(a.startingBalance||0),0);
+ const totalBalances=accounts.reduce((s,a)=>s+accountBalance(a),0);
+ const expected=starting+income-expense+transferIn-transferOut;
+ const difference=totalBalances-expected;
+ return {starting,income,expense,transferIn,transferOut,totalBalances,expected,difference,invalid,invalidTransfer,nonPositive,issues,ok:Math.abs(difference)<0.005&&invalid===0&&invalidTransfer===0&&nonPositive===0};
+}
+function reconciliationForm(){
+ const r=expenseReconciliation();
+ const status=r.ok?'<div class="reconcile-ok"><b>✓ Las cuentas cuadran</b><span>Los saldos actuales son coherentes con los saldos iniciales y todos los movimientos registrados.</span></div>':'<div class="reconcile-warn"><b>⚠ Hay algo que revisar</b><span>La diferencia calculada es '+money(r.difference)+' o hay movimientos con referencias inválidas.</span></div>';
+ const issues=r.issues.slice(0,20).map(x=>`<div class="reconcile-issue"><b>${esc(x.t.concept||x.t.category||x.t.type||'Movimiento')}</b><span>${esc(x.reason)} · ${money(x.t.amount||0)} · ${esc(x.t.date||'Sin fecha')}</span></div>`).join('');
+ return `<div class="form reconciliation-form">${status}<div class="reconcile-grid"><div><span>Saldo inicial total</span><b>${money(r.starting)}</b></div><div><span>Ingresos</span><b>${money(r.income)}</b></div><div><span>Gastos</span><b>${money(r.expense)}</b></div><div><span>Transferencias salientes</span><b>${money(r.transferOut)}</b></div><div><span>Transferencias entrantes</span><b>${money(r.transferIn)}</b></div><div><span>Saldos actuales</span><b>${money(r.totalBalances)}</b></div></div><p class="muted">El saldo inicial debe ser el saldo de la cuenta justo antes del primer movimiento que tienes registrado. Si introdujiste el saldo actual como “saldo inicial”, los movimientos históricos se volverán a sumar/restar y el saldo no cuadrará.</p>${issues?`<div class="reconcile-issues"><h4>Movimientos que revisar</h4>${issues}</div>`:''}<button class="secondary" onclick="closeModal();openModal('Configurar cuentas',accountsForm())">Revisar saldos iniciales</button></div>`;
+}
 function monthKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
 function weekKey(d=new Date()){const x=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));const day=x.getUTCDay()||7;x.setUTCDate(x.getUTCDate()+4-day);const y=x.getUTCFullYear();const yearStart=new Date(Date.UTC(y,0,1));const w=Math.ceil((((x-yearStart)/86400000)+1)/7);return `${y}-W${String(w).padStart(2,'0')}`}
 function money(n){return new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(Number(n)||0)}
@@ -993,7 +1057,7 @@ function expenses(c){
    <section class="expense-panel movements-panel"><div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos en ${title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
     <div class="movement-list">${tx.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos este mes.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
    </section>
-   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual</span></div><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button></div><div class="account-cards">${state.accounts.map(a=>`<div class="account-card"><div><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div><strong>${money(accountBalance(a))}</strong></div>`).join('')}</div></section>
+   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button></div></div><div class="account-cards">${state.accounts.map(a=>`<div class="account-card"><div><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div><strong>${money(accountBalance(a))}</strong></div>`).join('')}</div></section>
     <section class="expense-panel"><div class="panel-heading"><div><h3>Por categoría</h3><span>Gasto real del mes</span></div></div><div class="category-totals">${Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div><span>${esc(k)}</span><b>${money(v)}</b></div>`).join('')||'<span class="muted">Todavía no hay gastos.</span>'}</div></section></aside>
   </div>
   <div class="expense-bottom"><section class="expense-panel"><div class="panel-heading"><div><h3>Presupuestos</h3><span>Límite mensual por categoría</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100),over=s>b.amount;return `<div class="budget-item"><div class="row"><div><b>${esc(b.category)}</b><small>${money(s)} de ${money(b.amount)}</small></div><div class="budget-actions"><strong class="${over?'over-budget':''}">${over?'Excedido':money(b.amount-s)+' disponible'}</strong><button class="icon-button" onclick="openModal('Editar presupuesto',budgetForm(${JSON.stringify(b).replace(/"/g,'&quot;')}))">⋯</button></div></div><div class="budget-bar"><i class="${over?'over':''}" style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No tienes presupuestos configurados.</div>'}</div></section>

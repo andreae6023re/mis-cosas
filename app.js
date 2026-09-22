@@ -954,6 +954,8 @@ function ensureRecurringTransactions(){
  templates.forEach(t=>{
    if(!t.recurringMonths||!Array.isArray(t.recurringMonths))t.recurringMonths=[];
    const templateMonth=monthKey(new Date((t.date||todayKey())+'T12:00'));
+   // Nunca generar una recurrencia antes de la fecha en la que se creó/inició.
+   if(key<templateMonth)return;
    if(templateMonth===key){if(!t.recurringMonths.includes(key))t.recurringMonths.push(key);return;}
    if(t.recurringMonths.includes(key))return;
    const day=Math.min(Number(t.recurringDay||String(t.date||todayKey()).slice(8,10))||1,new Date(Number(key.slice(0,4)),Number(key.slice(5,7)),0).getDate());
@@ -977,6 +979,8 @@ function expenses(c){
  const transfers=tx.filter(t=>t.type==='transfer').length;
  const budgets=state.budgets.filter(b=>b.month===key), totalBudget=budgets.reduce((s,b)=>s+ +b.amount,0);
  const byCat={};tx.filter(t=>t.type==='expense').forEach(t=>byCat[t.category]=(byCat[t.category]||0)+ +t.amount);
+ const budgetCategories=new Set(budgets.map(b=>b.category));
+ const budgetedSpent=[...budgetCategories].reduce((s,cat)=>s+(byCat[cat]||0),0);
  const title=new Date(key+'-01T12:00').toLocaleDateString('es-ES',{month:'long',year:'numeric'});
  c.innerHTML=`<div class="expenses-page">
   <section class="expense-header">
@@ -984,7 +988,7 @@ function expenses(c){
    <div class="actions"><button class="secondary" onclick="openModal('Nueva transferencia',transferForm())">Transferir</button><button class="primary" onclick="openModal('Nuevo gasto',expenseForm())">+ Nuevo movimiento</button></div>
   </section>
   <section class="expense-monthbar"><button class="month-arrow" onclick="changeExpenseMonth(-1)">‹</button><div><span>Mes seleccionado</span><strong>${title}</strong></div><button class="month-arrow" onclick="changeExpenseMonth(1)">›</button></section>
-  <section class="expense-kpis"><div><span>Ingresos</span><strong>${money(income)}</strong></div><div><span>Gastos</span><strong>${money(spent)}</strong></div><div><span>Balance</span><strong>${money(income-spent)}</strong></div><div><span>Presupuesto disponible</span><strong>${totalBudget?money(totalBudget-spent):'—'}</strong><small>${totalBudget?money(totalBudget)+' presupuestados':'Sin presupuestos este mes'}</small></div></section>
+  <section class="expense-kpis"><div><span>Ingresos</span><strong>${money(income)}</strong></div><div><span>Gastos</span><strong>${money(spent)}</strong></div><div><span>Balance</span><strong>${money(income-spent)}</strong></div><div><span>Presupuesto disponible</span><strong>${totalBudget?money(totalBudget-budgetedSpent):'—'}</strong><small>${totalBudget?money(totalBudget)+' presupuestados':'Sin presupuestos este mes'}</small></div></section>
   <div class="expense-layout">
    <section class="expense-panel movements-panel"><div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos en ${title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
     <div class="movement-list">${tx.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos este mes.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>

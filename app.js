@@ -1,1808 +1,4099 @@
+const SUPABASE_URL = "https://rxkkwsnxgmbzveaipkob.supabase.co";
+const SUPABASE_KEY = "sb_publishable_cqZyBl4hAEI77KE39TFilg_In1ZCwzl";
 
-// ============================================================
-// SUPABASE / AUTENTICACIÓN
-// ============================================================
-const SUPABASE_URL='https://pmrhnwvrmqznenfkkumc.supabase.co';
-const SUPABASE_PUBLISHABLE_KEY='sb_publishable_DCKU0ae2X_tXHyEwb6o1HA_OpP50Rpt';
-const supabaseClient=window.supabase?.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY);
-let currentUser=null;
-let authMode='login';
-let deferredInstallPrompt=null;
-let syncStatusTimer=null;
+const supabaseClient = window.supabase.createClient(
+  SUPABASE_URL,
+  SUPABASE_KEY
+);
 
-function showAuthMessage(message,type=''){
- const el=document.querySelector('#authMessage');
- if(el){el.textContent=message||'';el.className='auth-message '+type}
-}
-function showAuth(mode='login'){
- authMode=mode;
- document.querySelector('#authScreen')?.classList.remove('hidden');
- document.querySelector('#appShell')?.classList.add('hidden');
- const title=document.querySelector('#authTitle'),sub=document.querySelector('#authSubtitle'),submit=document.querySelector('#authSubmit'),toggle=document.querySelector('#authToggle');
- if(!title)return;
- if(mode==='signup'){
-  title.textContent='Crear cuenta';
-  sub.textContent='Crea tu cuenta para usar Mis cosas en todos tus dispositivos.';
-  submit.textContent='Crear cuenta';
-  toggle.textContent='¿Ya tienes cuenta? Iniciar sesión';
- }else{
-  title.textContent='Iniciar sesión';
-  sub.textContent='Accede para tener tus datos sincronizados entre dispositivos.';
-  submit.textContent='Entrar';
-  toggle.textContent='¿No tienes cuenta? Crear una';
- }
- showAuthMessage('');
-}
-function showApp(){
- document.querySelector('#authScreen')?.classList.add('hidden');
- document.querySelector('#appShell')?.classList.remove('hidden');
-}
-function setSyncStatus(status,message){
- const el=document.querySelector('#syncStatus');
- if(!el)return;
- clearTimeout(syncStatusTimer);
- el.classList.remove('syncing','error');
- if(status==='syncing'){el.classList.add('syncing');el.textContent='↻ Guardando…';}
- else if(status==='error'){el.classList.add('error');el.textContent='⚠️ Sin sincronizar';}
- else {el.textContent='☁️ Sincronizado';}
- if(status==='syncing')return;
- syncStatusTimer=setTimeout(()=>{if(state.cloudSyncError)setSyncStatus('error');},3500);
-}
+const titles = {
+  inicio: "Hola 👋",
+  menu: "Tu menú",
+  recetas: "Recetario",
+  inventario: "Inventario",
+  compra: "Lista de compra"
+};
 
-async function ensureCloudRow(user){
- if(!supabaseClient||!user)return;
- const {data,error}=await supabaseClient.from('app_data').select('user_id').eq('user_id',user.id).maybeSingle();
- if(error)throw error;
- if(!data){
-  const {error:insertError}=await supabaseClient.from('app_data').insert({user_id:user.id,data:{}});
-  if(insertError)throw insertError;
- }
-}
+function showPage(id) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active-page"));
 
-let cloudSaveTimer=null;
-let cloudShadow=null;
-let cloudWriteChain=Promise.resolve();
-let cloudLocalDirty=false;
-let cloudChangeRevision=0;
-let menuLocalDirty=false;
-let menuSyncRevision=0;
-let menuSyncChain=Promise.resolve();
-let menuPendingFields={menu:false,menuHistory:false,shoppingChecks:false};
-let menuSyncScheduled=false;
-let foodModuleQueues={};
-let foodModuleRevisions={};
-let foodModulesReady=false;
-let foodModulesSetupError='';
-const FOOD_MODULE_KEYS={recipes:'recipes',preparations:'preparations',inventory:'inventory',menu:'menu',menuHistory:'menuHistory',shoppingChecks:'shoppingChecks',prepDone:'prepDone'};
-function foodModuleValue(module){
- if(module==='recipes')return Array.isArray(state.recipes)?state.recipes:[];
- if(module==='preparations')return Array.isArray(state.preparations)?state.preparations:[];
- if(module==='inventory')return Array.isArray(state.inventory)?state.inventory:[];
- if(module==='menu')return state.menu||null;
- if(module==='menuHistory')return Array.isArray(state.menuHistory)?state.menuHistory:[];
- if(module==='shoppingChecks')return state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{};
- if(module==='prepDone')return state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{};
- return null;
-}
-function setFoodModuleValue(module,value){
- if(module==='recipes')state.recipes=Array.isArray(value)?value:[];
- else if(module==='preparations')state.preparations=Array.isArray(value)?value:[];
- else if(module==='inventory')state.inventory=Array.isArray(value)?value:[];
- else if(module==='menu')state.menu=value&&typeof value==='object'?value:null;
- else if(module==='menuHistory')state.menuHistory=Array.isArray(value)?value:[];
- else if(module==='shoppingChecks')state.shoppingChecks=value&&typeof value==='object'?value:{};
- else if(module==='prepDone')state.prepDone=value&&typeof value==='object'?value:{};
-}
-async function loadFoodModules(){
- if(!supabaseClient||!currentUser)return false;
- const {data,error}=await supabaseClient.from('app_data_modules').select('module,data,revision,updated_at').eq('user_id',currentUser.id);
- if(error){foodModulesReady=false;foodModulesSetupError=String(error.message||error);throw error;}
- const rows=Array.isArray(data)?data:[];
- const present=new Set(rows.map(r=>r.module));
- for(const row of rows){
-  if(!Object.prototype.hasOwnProperty.call(FOOD_MODULE_KEYS,row.module))continue;
-  setFoodModuleValue(row.module,row.data);
-  foodModuleRevisions[row.module]=Number(row.revision||0);
- }
- // One-time migration: if a module row does not exist yet, copy the current app_data value into it.
- for(const module of Object.keys(FOOD_MODULE_KEYS))if(!present.has(module)){
-  const value=foodModuleValue(module);
-  const {error:migrationError}=await supabaseClient.from('app_data_modules').upsert({user_id:currentUser.id,module,data:value,revision:0,updated_at:new Date().toISOString()},{onConflict:'user_id,module'});
-  if(migrationError)throw migrationError;
-  foodModuleRevisions[module]=0;
- }
- normalizeInventoryStorageState();
- normalizeRecipes();
- localCacheFromState();
- foodModulesReady=true;foodModulesSetupError='';
- return true;
-}
-function syncFoodModule(module,value=foodModuleValue(module),options={}){
- if(!supabaseClient||!currentUser)return Promise.resolve(false);
- if(!foodModulesReady){
-  const msg='La sincronización de Comidas necesita la tabla app_data_modules. Ejecuta supabase-v81-food-modules.sql en Supabase.';
-  state.cloudSyncError=msg;setSyncStatus('error');console.error(msg,foodModulesSetupError);
-  return Promise.resolve(false);
- }
- const expected=Number(foodModuleRevisions[module]||0);
- const nextValue=JSON.parse(JSON.stringify(value));
- foodModuleQueues[module]=foodModuleQueues[module]||Promise.resolve();
- foodModuleQueues[module]=foodModuleQueues[module].then(async()=>{
-  setSyncStatus('syncing');
-  try{
-   const {data:row,error:readError}=await supabaseClient.from('app_data_modules').select('data,revision').eq('user_id',currentUser.id).eq('module',module).maybeSingle();
-   if(readError)throw readError;
-   const remoteRevision=Number(row?.revision||0);
-   const currentRevision=Number(foodModuleRevisions[module]||0);
-   // If another device has advanced the same module, do not silently overwrite it.
-   if(options.expectedRevision!==undefined && remoteRevision!==Number(options.expectedRevision)){
-    setFoodModuleValue(module,row?.data);foodModuleRevisions[module]=remoteRevision;localCacheFromState();
-    throw new Error('Este módulo cambió en otro dispositivo. Se ha cargado la versión más reciente.');
-   }
-   const writeRevision=Math.max(remoteRevision,currentRevision)+1;
-   const {data:updated,error:updateError}=await supabaseClient.from('app_data_modules')
-    .update({data:nextValue,revision:writeRevision,updated_at:new Date().toISOString()})
-    .eq('user_id',currentUser.id).eq('module',module).eq('revision',remoteRevision).select('data,revision').maybeSingle();
-   if(updateError)throw updateError;
-   if(!updated)throw new Error('El módulo cambió en otro dispositivo. Vuelve a intentarlo.');
-   foodModuleRevisions[module]=Number(updated.revision||writeRevision);
-   state.cloudSyncError='';
-   localCacheFromState();
-   setSyncStatus('ok');
-   return true;
-  }catch(err){
-   console.error('Error sincronizando '+module,err);state.cloudSyncError=String(err?.message||err||'Error de sincronización');setSyncStatus('error');return false;
+  const page = document.getElementById(id);
+  if (page) page.classList.add("active-page");
+
+  document.querySelectorAll(".nav,.bottom-nav button").forEach(b => {
+    b.classList.toggle("active", b.dataset.page === id);
+  });
+
+  const pageTitle = document.getElementById("page-title");
+  if (pageTitle) pageTitle.textContent = titles[id] || "ARA";
+
+  const sidebar = document.getElementById("sidebar");
+  if (sidebar) sidebar.classList.remove("open");
+
+  const overlay = document.getElementById("overlay");
+  if (overlay) overlay.style.display = "none";
+
+  window.scrollTo({ top: 0, behavior: "smooth" });
+
+  if (id === "inicio") {
+    loadHomeDashboard();
   }
- });
- return foodModuleQueues[module];
+
+  if (id === "inventario") {
+    loadInventory();
+  }
+
+  if (id === "menu") {
+    setupInventoryReviewPrompt();
+    loadMenu();
+  }
+
+  if (id === "recetas") {
+    setupRecipeButtons();
+    loadRecipes();
+  }
+
+  if (id === "compra") {
+    loadShoppingList();
+  }
 }
 
-async function syncPreparationMutation(action,itemOrId){
- if(!supabaseClient||!currentUser||!foodModulesReady)return false;
- const localItem=action==='delete'?null:JSON.parse(JSON.stringify(itemOrId));
- foodModuleQueues.preparations=foodModuleQueues.preparations||Promise.resolve();
- foodModuleQueues.preparations=foodModuleQueues.preparations.then(async()=>{
-  setSyncStatus('syncing');
-  let lastError=null;
-  for(let attempt=0;attempt<4;attempt++){
-   try{
-    const {data:row,error:readError}=await supabaseClient.from('app_data_modules').select('data,revision').eq('user_id',currentUser.id).eq('module','preparations').maybeSingle();
-    if(readError)throw readError;
-    const remote=Array.isArray(row?.data)?JSON.parse(JSON.stringify(row.data)):[];
-    let merged=remote;
-    if(action==='delete'){
-      const id=String(itemOrId);
-      merged=remote.filter(x=>String(x?.id)!==id);
-    }else{
-      const id=String(localItem.id);
-      const idx=remote.findIndex(x=>String(x?.id)===id);
-      if(idx>=0)merged[idx]={...remote[idx],...localItem};
-      else merged=[...remote,localItem];
+function toggleMenu() {
+  const sidebar = document.getElementById("sidebar");
+  if (!sidebar) return;
+
+  const open = sidebar.classList.toggle("open");
+
+  const overlay = document.getElementById("overlay");
+  if (overlay) overlay.style.display = open ? "block" : "none";
+}
+
+async function testSupabaseConnection() {
+  const { data, error } = await supabaseClient
+    .from("ingredients")
+    .select("id, name")
+    .limit(1);
+
+  if (error) {
+    console.error("❌ Error conectando con Supabase:", error);
+    return;
+  }
+
+  console.log("✅ Supabase conectado correctamente:", data);
+}
+
+
+/* =========================================================
+   INICIO · PANEL DE CONTROL
+   ========================================================= */
+
+function formatHomeDate(date) {
+  return date.toLocaleDateString("es-ES", {
+    weekday: "long",
+    day: "numeric",
+    month: "long"
+  });
+}
+
+function homeRecipeName(item) {
+  return item?.recipes?.name || "Sin receta";
+}
+
+function homeMealCard(type, item) {
+  const label = type === "comida" ? "Comida" : "Cena";
+  const icon = type === "comida" ? "🍴" : "🌙";
+  const hasRecipe = !!item?.recipe_id;
+
+  return `
+    <button type="button" class="home-meal-card ${hasRecipe ? "has-recipe" : "is-empty"}" onclick="showPage('menu')">
+      <div class="home-meal-icon">${icon}</div>
+      <div class="home-meal-content">
+        <small>${label}</small>
+        <strong>${escapeHtml(homeRecipeName(item))}</strong>
+        <span>${hasRecipe ? "Ver menú →" : "Añadir receta →"}</span>
+      </div>
+    </button>
+  `;
+}
+
+function homeStatCard(icon, value, label, page) {
+  return `
+    <button type="button" class="home-stat-card" onclick="showPage('${page}')">
+      <div class="home-stat-icon">${icon}</div>
+      <div>
+        <strong>${value}</strong>
+        <span>${label}</span>
+      </div>
+    </button>
+  `;
+}
+
+function homeInventoryCard(icon, title, count) {
+  return `
+    <button type="button" class="home-inventory-card" onclick="showPage('inventario')">
+      <div class="home-inventory-icon">${icon}</div>
+      <div>
+        <strong>${title}</strong>
+        <span>${count} ${count === 1 ? "producto" : "productos"}</span>
+      </div>
+    </button>
+  `;
+}
+
+async function loadHomeDashboard() {
+  const today = new Date();
+  const todayISO = dateToISO(today);
+  const weekStart = dateToISO(getMonday(today));
+
+  const mealsContainer = document.getElementById("home-today-meals");
+  const statsContainer = document.getElementById("home-stats");
+  const inventoryContainer = document.getElementById("home-inventory");
+
+  if (!mealsContainer || !statsContainer || !inventoryContainer) return;
+
+  const note = document.querySelector("#inicio .hero p");
+  if (note) {
+    note.textContent = `${capitalize(formatHomeDate(today))}. Todo lo que necesitas, en un vistazo.`;
+  }
+
+  const [planResult, shoppingResult, inventoryResult, recipesResult] = await Promise.all([
+    supabaseClient
+      .from("meal_plans")
+      .select("id")
+      .eq("week_start", weekStart)
+      .limit(1),
+    supabaseClient
+      .from("shopping_items")
+      .select("id", { count: "exact", head: true })
+      .eq("checked", false),
+    supabaseClient
+      .from("inventory")
+      .select("id, location"),
+    supabaseClient
+      .from("recipes")
+      .select("id", { count: "exact", head: true })
+  ]);
+
+  if (planResult.error) {
+    console.error("Error cargando plan del inicio:", planResult.error);
+  }
+  if (shoppingResult.error) {
+    console.error("Error cargando compra del inicio:", shoppingResult.error);
+  }
+  if (inventoryResult.error) {
+    console.error("Error cargando inventario del inicio:", inventoryResult.error);
+  }
+  if (recipesResult.error) {
+    console.error("Error cargando recetas del inicio:", recipesResult.error);
+  }
+
+  let todayItems = [];
+
+  const plan = planResult.data?.[0];
+  if (plan?.id) {
+    const todayResult = await supabaseClient
+      .from("meal_plan_items")
+      .select(`
+        meal_type,
+        recipe_id,
+        recipes (
+          id,
+          name
+        )
+      `)
+      .eq("meal_plan_id", plan.id)
+      .eq("date", todayISO)
+      .in("meal_type", ["comida", "cena"]);
+
+    if (todayResult.error) {
+      console.error("Error cargando el menú de hoy:", todayResult.error);
+    } else {
+      todayItems = todayResult.data || [];
     }
-    const remoteRevision=Number(row?.revision||0);
-    const writeRevision=remoteRevision+1;
-    const {data:updated,error:updateError}=await supabaseClient.from('app_data_modules')
-      .update({data:merged,revision:writeRevision,updated_at:new Date().toISOString()})
-      .eq('user_id',currentUser.id).eq('module','preparations').eq('revision',remoteRevision)
-      .select('data,revision').maybeSingle();
-    if(updateError)throw updateError;
-    if(!updated){lastError=new Error('La preparación cambió en otro dispositivo.');continue;}
-    state.preparations=Array.isArray(updated.data)?updated.data:[];
-    foodModuleRevisions.preparations=Number(updated.revision||writeRevision);
-    localCacheFromState();
-    state.cloudSyncError='';
-    setSyncStatus('ok');
-    return true;
-   }catch(err){lastError=err;break;}
   }
-  console.error('Error sincronizando preparaciones',lastError);
-  state.cloudSyncError=String(lastError?.message||lastError||'Error de sincronización de preparaciones');
-  setSyncStatus('error');
-  return false;
- });
- return foodModuleQueues.preparations;
+
+  const itemByType = {
+    comida: todayItems.find(item => item.meal_type === "comida") || null,
+    cena: todayItems.find(item => item.meal_type === "cena") || null
+  };
+
+  mealsContainer.innerHTML = `
+    ${homeMealCard("comida", itemByType.comida)}
+    ${homeMealCard("cena", itemByType.cena)}
+  `;
+
+  const pendingShopping = shoppingResult.count || 0;
+  const totalInventory = inventoryResult.data?.length || 0;
+  const totalRecipes = recipesResult.count || 0;
+
+  statsContainer.innerHTML = `
+    ${homeStatCard("🛒", pendingShopping, "por comprar", "compra")}
+    ${homeStatCard("📦", totalInventory, "en inventario", "inventario")}
+    ${homeStatCard("📖", totalRecipes, "recetas", "recetas")}
+  `;
+
+  const inventoryCounts = {
+    despensa: 0,
+    frigorifico: 0,
+    congelador: 0
+  };
+
+  (inventoryResult.data || []).forEach(item => {
+    if (item.location in inventoryCounts) {
+      inventoryCounts[item.location]++;
+    }
+  });
+
+  inventoryContainer.innerHTML = `
+    ${homeInventoryCard("🥫", "Despensa", inventoryCounts.despensa)}
+    ${homeInventoryCard("🥬", "Frigorífico", inventoryCounts.frigorifico)}
+    ${homeInventoryCard("🧊", "Congelador", inventoryCounts.congelador)}
+  `;
 }
 
-function cloudPayload(){
- return {
-  tasks:Array.isArray(state.tasks)?state.tasks:[],
-  expenses:Array.isArray(state.expenses)?state.expenses:[],
-  transactions:Array.isArray(state.transactions)?state.transactions:[],
-  accounts:Array.isArray(state.accounts)?state.accounts:[],
-  budgets:Array.isArray(state.budgets)?state.budgets:[],
-  events:Array.isArray(state.events)?state.events:[],
-  habits:Array.isArray(state.habits)?state.habits:[],
-  cleaning:Array.isArray(state.cleaning)?state.cleaning:[],
-  recipes:Array.isArray(state.recipes)?state.recipes:[],
-  inventory:Array.isArray(state.inventory)?state.inventory:[],
-  preparations:Array.isArray(state.preparations)?state.preparations:[],
-  shoppingChecks:state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{},
-  prepDone:state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{},
-  menu:state.menu||null,
-  menuHistory:Array.isArray(state.menuHistory)?state.menuHistory:[],
-  calendarMonth:state.calendarMonth||'',
-  settings:state.settings&&typeof state.settings==='object'?state.settings:{},
-  expenseCategories:typeof expenseCategories==='object'?expenseCategories:{},
-  schemaVersion:3
- };
+window.loadHomeDashboard = loadHomeDashboard;
+
+let currentInventoryLocation = null;
+
+function createInventoryModal() {
+  if (document.getElementById("inventory-modal")) return;
+
+  const modal = document.createElement("div");
+  modal.id = "inventory-modal";
+
+  modal.innerHTML = `
+    <div class="inventory-modal-overlay"></div>
+
+    <div class="inventory-modal-box">
+      <div class="inventory-modal-header">
+        <div>
+          <small id="inventory-modal-label">AÑADIR PRODUCTO</small>
+          <h2 id="inventory-modal-title">Nuevo producto</h2>
+        </div>
+        <button type="button" id="close-inventory-modal" class="modal-close">×</button>
+      </div>
+
+      <form id="inventory-form">
+        <label>
+          Producto
+          <input id="product-name" type="text" placeholder="Ej. Arroz" required readonly>
+        </label>
+
+        <div class="form-row">
+          <label>
+            Cantidad
+            <input id="product-quantity" type="number" step="0.01" min="0" placeholder="1">
+          </label>
+
+          <label>
+            Unidad
+            <select id="product-unit">
+              <option value="unidad">unidad / unidades</option>
+              <option value="g">g / gr</option>
+              <option value="kg">kg</option>
+              <option value="ml">ml</option>
+              <option value="l">l</option>
+              <option value="paquete">paquete</option>
+              <option value="bolsa">bolsa</option>
+              <option value="bote">bote / botes</option>
+              <option value="lata">lata / latas</option>
+              <option value="botella">botella / botellas</option>
+              <option value="sobre">sobre / sobres</option>
+              <option value="ración">ración</option>
+              <option value="otra">Otra unidad…</option>
+            </select>
+          </label>
+        </div>
+
+        <label id="custom-unit-wrap" style="display:none">
+          Otra unidad
+          <input id="product-custom-unit" type="text" maxlength="30" placeholder="Ej. bandeja, lonchas, cucharadas...">
+        </label>
+
+        <label>
+          Presentación / envase
+          <input id="product-presentation" type="text" maxlength="50" placeholder="Ej. bolsa, bote, caja...">
+          <small class="field-hint">Puedes tener el mismo ingrediente varias veces con presentaciones distintas.</small>
+        </label>
+
+        <label class="inventory-check-label" id="inventory-spice-wrap">
+          <span class="inventory-check-title">Clasificación</span>
+          <span class="inventory-check-row">
+            <input id="product-is-spice" type="checkbox">
+            <span>🌿 Es una especia</span>
+          </span>
+          <small class="field-hint">Úsalo para especias y condimentos de la despensa.</small>
+        </label>
+
+        <label>
+          Ubicación
+          <select id="product-location">
+            <option value="despensa">🥫 Despensa</option>
+            <option value="frigorifico">🥬 Frigorífico</option>
+            <option value="congelador">🧊 Congelador</option>
+          </select>
+        </label>
+
+        <label>
+          Fecha de caducidad
+          <input id="product-expiration" type="date">
+        </label>
+
+        <label>
+          Notas
+          <textarea id="product-notes" rows="3" placeholder="Opcional"></textarea>
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" id="cancel-inventory" class="secondary">Cancelar</button>
+          <button type="submit" id="inventory-save-button" class="primary">Guardar producto</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  document.getElementById("close-inventory-modal")
+    .addEventListener("click", closeInventoryModal);
+
+  document.getElementById("cancel-inventory")
+    .addEventListener("click", closeInventoryModal);
+
+  modal.querySelector(".inventory-modal-overlay")
+    .addEventListener("click", closeInventoryModal);
+
+  document.getElementById("inventory-form")
+    .addEventListener("submit", saveInventoryProduct);
+
+  document.getElementById("product-unit")
+    .addEventListener("change", toggleCustomInventoryUnit);
+
+  document.getElementById("product-location")
+    .addEventListener("change", updateInventorySpiceVisibility);
 }
 
-function normalizeStorageValue(value, fallback='pantry'){
-  const s=String(value??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[_-]+/g,' ').replace(/\s+/g,' ');
-  if(['freezer','congelador','congelados','congelado','congelador/freezer','freezer/congelador'].includes(s))return 'freezer';
-  if(['fresh','fresco','frescos','fresca','frescas'].includes(s))return 'fresh';
-  if(['pantry','despensa','despensa/pantry','pantry/despensa'].includes(s))return 'pantry';
-  return fallback;
-}
-function normalizeInventoryStorageState(){
-  state.inventory=(Array.isArray(state.inventory)?state.inventory:[]).map(x=>({...x,storage:normalizeStorageValue(x.storage,'pantry')}));
-}
-function localCacheFromState(){
-  normalizeInventoryStorageState();
- Object.keys(state).forEach(k=>{
-  if(k==='view'||k==='cloudSyncError')return;
-  if(k==='calendarMonth'){localStorage.setItem(KEY+k,String(state[k]||''));return}
-  if(Array.isArray(state[k])||k==='settings'||k==='menu'||k==='shoppingChecks'||k==='prepDone')localStorage.setItem(KEY+k,JSON.stringify(state[k]));
- });
- if(typeof expenseCategories==='object')localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));
+function toggleCustomInventoryUnit() {
+  const select = document.getElementById("product-unit");
+  const wrap = document.getElementById("custom-unit-wrap");
+  if (!select || !wrap) return;
+
+  const isCustom = select.value === "otra";
+  wrap.style.display = isCustom ? "grid" : "none";
+
+  if (!isCustom) {
+    const input = document.getElementById("product-custom-unit");
+    if (input) input.value = "";
+  }
 }
 
-async function loadAllFromCloud(){
- if(!supabaseClient||!currentUser)return false;
- const local={
-  tasks:Array.isArray(state.tasks)?state.tasks:[],expenses:Array.isArray(state.expenses)?state.expenses:[],transactions:Array.isArray(state.transactions)?state.transactions:[],accounts:Array.isArray(state.accounts)?state.accounts:[],budgets:Array.isArray(state.budgets)?state.budgets:[],events:Array.isArray(state.events)?state.events:[],habits:Array.isArray(state.habits)?state.habits:[],recipes:Array.isArray(state.recipes)?state.recipes:[],inventory:Array.isArray(state.inventory)?state.inventory:[],preparations:Array.isArray(state.preparations)?state.preparations:[],shoppingChecks:state.shoppingChecks||{},prepDone:state.prepDone||{},menu:state.menu||null,menuHistory:Array.isArray(state.menuHistory)?state.menuHistory:[],calendarMonth:state.calendarMonth||'',settings:state.settings||{},expenseCategories:typeof expenseCategories==='object'?expenseCategories:{}
- };
- const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
- if(error)throw error;
- const cloud=data?.data&&typeof data.data==='object'?data.data:{};
- const legacy=cloud.food&&typeof cloud.food==='object'?cloud.food:null;
- const isNewSchema=Number(cloud.schemaVersion||0)>=2;
- const chooseArray=(key,legacyKey=key)=>{
-  // Once a row has a modern schema, the cloud value is authoritative — including []
-  // because an empty array may be an intentional user deletion. Only brand-new legacy
-  // rows may recover populated local data.
-  if(isNewSchema && Array.isArray(cloud[key]))return cloud[key];
-  if(Array.isArray(cloud[key]) && cloud[key].length>0)return cloud[key];
-  if(legacy && Array.isArray(legacy[legacyKey]) && legacy[legacyKey].length>0)return legacy[legacyKey];
-  if(Array.isArray(local[key]) && local[key].length>0)return local[key];
-  return Array.isArray(cloud[key])?cloud[key]:local[key];
- };
- state.tasks=chooseArray('tasks');state.expenses=chooseArray('expenses');state.transactions=chooseArray('transactions');state.accounts=chooseArray('accounts');state.budgets=chooseArray('budgets');state.events=chooseArray('events');state.habits=chooseArray('habits');state.cleaning=normalizeCleaningArray(chooseArray('cleaning'));
- state.recipes=chooseArray('recipes');state.inventory=chooseArray('inventory');state.preparations=chooseArray('preparations');state.menuHistory=chooseArray('menuHistory');normalizeRecipes();
- const chooseObject=(key)=>{
-  if(cloud[key]&&typeof cloud[key]==='object' && (Object.keys(cloud[key]).length>0 || isNewSchema))return cloud[key];
-  if(legacy&&legacy[key]&&typeof legacy[key]==='object'&&Object.keys(legacy[key]).length)return legacy[key];
-  if(local[key]&&typeof local[key]==='object'&&Object.keys(local[key]).length)return local[key];
-  return cloud[key]&&typeof cloud[key]==='object'?cloud[key]:local[key];
- };
- state.shoppingChecks=chooseObject('shoppingChecks');state.prepDone=chooseObject('prepDone');
- if(cloud.menu!==undefined && (cloud.menu!==null || isNewSchema))state.menu=cloud.menu;else if(legacy&&legacy.menu!==undefined)state.menu=legacy.menu;else state.menu=local.menu;
- if(typeof cloud.calendarMonth==='string' && (cloud.calendarMonth || isNewSchema))state.calendarMonth=cloud.calendarMonth;else state.calendarMonth=local.calendarMonth;
- if(cloud.settings&&typeof cloud.settings==='object' && (Object.keys(cloud.settings).length || isNewSchema))state.settings=cloud.settings;else state.settings=local.settings;
- if(cloud.expenseCategories&&typeof cloud.expenseCategories==='object' && (Object.keys(cloud.expenseCategories).length || isNewSchema))expenseCategories=cloud.expenseCategories;
- else if(Object.keys(local.expenseCategories).length)expenseCategories=local.expenseCategories;
- localCacheFromState();
- // IMPORTANT: loading from cloud is read-only. Never write the whole local state back here.
- // This prevents an empty module on one device from overwriting populated data on another.
- cloudShadow=JSON.parse(JSON.stringify(cloud));
- // Food modules live in their own rows so menu, recipes, preparations and inventory
- // cannot overwrite one another through the monolithic app_data JSON document.
- try{await loadFoodModules();}catch(moduleErr){
-  foodModulesReady=false;foodModulesSetupError=String(moduleErr?.message||moduleErr||'Error');
-  console.warn('No se pudieron cargar los módulos independientes; se mantiene app_data.',moduleErr);
-  state.cloudSyncError='No se ha configurado la sincronización de Comidas. Ejecuta supabase-v81-food-modules.sql en Supabase.';
-  setSyncStatus('error');
- }
- return true;
-}
-function syncCloudField(key,value){
- if(!supabaseClient||!currentUser)return Promise.resolve(false);
- const writeRevision=cloudChangeRevision;
- cloudWriteChain=cloudWriteChain.then(async()=>{
-  setSyncStatus('syncing');
-  try{
-   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
-   if(error)throw error;
-   const current=data?.data&&typeof data.data==='object'?data.data:{};
-   const next={...current,[key]:value,schemaVersion:3};
-   if(key==='inventory'){if(Array.isArray(value)&&value.length===0)next.inventoryClearedAt=state.inventoryClearedAt||new Date().toISOString();else delete next.inventoryClearedAt;}
-   const {error:upsertError}=await supabaseClient.from('app_data').upsert({user_id:currentUser.id,data:next},{onConflict:'user_id'});
-   if(upsertError)throw upsertError;
-   cloudShadow=JSON.parse(JSON.stringify(next));
-   state.cloudSyncError='';
-   if(cloudChangeRevision===writeRevision)cloudLocalDirty=false;
-   setSyncStatus('ok');
-   return true;
-  }catch(err){
-   console.error('Error sincronizando '+key,err);
-   state.cloudSyncError=String(err?.message||err||'Error de sincronización');
-   setSyncStatus('error');
-   return false;
+function setInventoryUnitValue(unit) {
+  const select = document.getElementById("product-unit");
+  const customInput = document.getElementById("product-custom-unit");
+  if (!select) return;
+
+  const normalizedUnit = String(unit ?? "").trim();
+  const optionExists = Array.from(select.options).some(option => option.value === normalizedUnit);
+
+  if (optionExists) {
+    select.value = normalizedUnit || "unidad";
+    if (customInput) customInput.value = "";
+  } else if (normalizedUnit) {
+    select.value = "otra";
+    if (customInput) customInput.value = normalizedUnit;
+  } else {
+    select.value = "unidad";
+    if (customInput) customInput.value = "";
   }
- });
- return cloudWriteChain;
-}
-function queueCloudSave(){
- if(!supabaseClient||!currentUser)return;
- clearTimeout(cloudSaveTimer);
- cloudSaveTimer=setTimeout(()=>{saveAllToCloud();},350);
+
+  toggleCustomInventoryUnit();
 }
 
-function saveAllToCloud(){
- if(!supabaseClient||!currentUser)return Promise.resolve(false);
- const writeRevision=cloudChangeRevision;
- cloudWriteChain=cloudWriteChain.then(async()=>{
-  setSyncStatus('syncing');
-  const payload=cloudPayload();
-  const baseline=cloudShadow||{};
-  const menuManagedKeys=new Set(['recipes','preparations','inventory','menu','menuHistory','shoppingChecks','prepDone']);
-  const changedKeys=Object.keys(payload).filter(k=>!menuManagedKeys.has(k)&&JSON.stringify(payload[k])!==JSON.stringify(baseline[k]));
-  if(!changedKeys.length){setSyncStatus('ok');return true}
-  try{
-   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
-   if(error)throw error;
-   const current=data?.data&&typeof data.data==='object'?data.data:{};
-   const patch={};
-   changedKeys.forEach(k=>{patch[k]=payload[k]});
-   const next={...current,...patch,schemaVersion:3};
-   const {error:upsertError}=await supabaseClient.from('app_data').upsert({user_id:currentUser.id,data:next},{onConflict:'user_id'});
-   if(upsertError)throw upsertError;
-   cloudShadow=JSON.parse(JSON.stringify(next));
-   state.cloudSyncError='';
-   if(cloudChangeRevision===writeRevision)cloudLocalDirty=false;
-   setSyncStatus('ok');
-   return true;
-  }catch(err){
-   console.error('No se han podido sincronizar los datos.',err);
-   state.cloudSyncError=String(err?.message||err||'Error de sincronización');
-   setSyncStatus('error');
-   return false;
+function getInventoryUnitValue() {
+  const select = document.getElementById("product-unit");
+  const customInput = document.getElementById("product-custom-unit");
+
+  if (!select) return "unidad";
+  if (select.value === "otra") {
+    return (customInput?.value || "").trim() || "unidad";
   }
- });
- return cloudWriteChain;
+
+  return select.value;
 }
-async function syncMenuBundle(fields={menu:true,menuHistory:false,shoppingChecks:false}){
- if(!supabaseClient||!currentUser)return false;
- menuLocalDirty=true;
- const modules=[];
- if(fields.menu)modules.push('menu');
- if(fields.menuHistory)modules.push('menuHistory');
- if(fields.shoppingChecks)modules.push('shoppingChecks');
- const run=async()=>{
-  for(const module of modules){
-   const ok=await syncFoodModule(module,foodModuleValue(module));
-   if(!ok)return false;
+
+function updateInventorySpiceVisibility() {
+  const location = document.getElementById("product-location")?.value;
+  const wrap = document.getElementById("inventory-spice-wrap");
+  const checkbox = document.getElementById("product-is-spice");
+  if (!wrap || !checkbox) return;
+
+  const isPantry = location === "despensa";
+  wrap.style.display = isPantry ? "grid" : "none";
+
+  if (!isPantry) checkbox.checked = false;
+}
+
+function resetInventoryModal(mode = "add") {
+  const form = document.getElementById("inventory-form");
+  if (form) {
+    form.reset();
+    delete form.dataset.editId;
+    delete form.dataset.editLocation;
   }
-  menuLocalDirty=false;
+
+  const label = document.getElementById("inventory-modal-label");
+  const title = document.getElementById("inventory-modal-title");
+  const saveButton = document.getElementById("inventory-save-button");
+  const nameInput = document.getElementById("product-name");
+
+  if (mode === "edit") {
+    if (label) label.textContent = "EDITAR INVENTARIO";
+    if (title) title.textContent = "Editar artículo";
+    if (saveButton) saveButton.textContent = "Guardar cambios";
+    if (nameInput) nameInput.readOnly = true;
+  } else {
+    if (label) label.textContent = "AÑADIR PRODUCTO";
+    if (title) title.textContent = "Nuevo producto";
+    if (saveButton) saveButton.textContent = "Guardar producto";
+    if (nameInput) nameInput.readOnly = false;
+  }
+
+  setInventoryUnitValue("unidad");
+
+  const spiceCheckbox = document.getElementById("product-is-spice");
+  if (spiceCheckbox) spiceCheckbox.checked = false;
+  updateInventorySpiceVisibility();
+}
+
+function openInventoryModal(location = "despensa", prefillName = "") {
+  createInventoryModal();
+  resetInventoryModal("add");
+
+  document.getElementById("product-location").value = location;
+  document.getElementById("product-name").value = prefillName || "";
+  document.getElementById("inventory-modal").classList.add("open");
+  document.getElementById("product-name").focus();
+}
+
+async function editInventoryProduct(id) {
+  const { data, error } = await supabaseClient
+    .from("inventory")
+    .select(`
+      id,
+      quantity,
+      unit,
+      presentation,
+      is_spice,
+      location,
+      expiration_date,
+      notes,
+      ingredients (
+        id,
+        name
+      )
+    `)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error || !data) {
+    console.error("Error cargando producto para editar:", error);
+    alert("No se pudo cargar el artículo para editar.\n\n" + (error?.message || "Producto no encontrado."));
+    return;
+  }
+
+  // Al editar desde la lista de inventario, cerramos primero ese modal
+  // para que no quede por delante del formulario de edición.
+  document.querySelectorAll(".inventory-products-modal")
+    .forEach(modal => modal.remove());
+
+  createInventoryModal();
+  resetInventoryModal("edit");
+
+  const form = document.getElementById("inventory-form");
+  if (form) {
+    form.dataset.editId = String(data.id);
+    form.dataset.editLocation = data.location || currentInventoryLocation || "despensa";
+  }
+
+  document.getElementById("product-name").value = data.ingredients?.name || "Producto";
+  document.getElementById("product-quantity").value = data.quantity ?? "";
+  setInventoryUnitValue(data.unit || "unidad");
+  document.getElementById("product-presentation").value = data.presentation || "";
+  document.getElementById("product-is-spice").checked = Boolean(data.is_spice);
+  document.getElementById("product-location").value = data.location || "despensa";
+  updateInventorySpiceVisibility();
+  document.getElementById("product-expiration").value = data.expiration_date || "";
+  document.getElementById("product-notes").value = data.notes || "";
+
+  document.getElementById("inventory-modal").classList.add("open");
+  document.getElementById("product-quantity").focus();
+}
+
+function closeInventoryModal() {
+  const modal = document.getElementById("inventory-modal");
+  if (!modal) return;
+
+  modal.classList.remove("open");
+
+  const form = document.getElementById("inventory-form");
+  if (form) form.reset();
+
+  resetInventoryModal("add");
+}
+
+async function saveInventoryProduct(event) {
+  event.preventDefault();
+
+  const form = document.getElementById("inventory-form");
+  const editId = form?.dataset.editId || null;
+  const previousLocation = form?.dataset.editLocation || currentInventoryLocation || "despensa";
+  const quantityValue = document.getElementById("product-quantity").value;
+  const unit = getInventoryUnitValue();
+  const presentation = document.getElementById("product-presentation").value.trim();
+  const location = document.getElementById("product-location").value;
+  const isSpice = location === "despensa" && document.getElementById("product-is-spice").checked;
+  const expiration = document.getElementById("product-expiration").value;
+  const notes = document.getElementById("product-notes").value.trim();
+
+  if (!unit) {
+    alert("Indica una unidad.");
+    return;
+  }
+
+  if (editId) {
+    const { error } = await supabaseClient
+      .from("inventory")
+      .update({
+        quantity: quantityValue ? Number(quantityValue) : null,
+        unit,
+        presentation: presentation || null,
+        is_spice: isSpice,
+        location,
+        expiration_date: expiration || null,
+        notes: notes || null,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", Number(editId));
+
+    if (error) {
+      console.error("Error actualizando inventario:", error);
+      alert("No se pudo guardar el cambio.\n\n" + error.message);
+      return;
+    }
+
+    closeInventoryModal();
+    await loadInventory();
+
+    document.querySelectorAll(".inventory-products-modal")
+      .forEach(modal => modal.remove());
+
+    await viewInventoryProducts(location || previousLocation);
+    return;
+  }
+
+  const name = document.getElementById("product-name").value.trim();
+
+  if (!name) {
+    alert("Escribe el nombre del producto.");
+    return;
+  }
+
+  let { data: ingredient, error: ingredientError } = await supabaseClient
+    .from("ingredients")
+    .select("id, name")
+    .ilike("name", name)
+    .maybeSingle();
+
+  if (ingredientError) {
+    console.error("Error buscando ingrediente:", ingredientError);
+    alert("No se pudo comprobar el ingrediente.");
+    return;
+  }
+
+  if (!ingredient) {
+    const result = await supabaseClient
+      .from("ingredients")
+      .insert({
+        name,
+        default_unit: unit
+      })
+      .select()
+      .single();
+
+    ingredient = result.data;
+    ingredientError = result.error;
+
+    if (ingredientError) {
+      console.error("Error creando ingrediente:", ingredientError);
+      alert("No se pudo crear el ingrediente.");
+      return;
+    }
+  }
+
+  const { error: inventoryError } = await supabaseClient
+    .from("inventory")
+    .insert({
+      ingredient_id: ingredient.id,
+      quantity: quantityValue ? Number(quantityValue) : null,
+      unit,
+      presentation: presentation || null,
+      is_spice: isSpice,
+      location,
+      expiration_date: expiration || null,
+      notes: notes || null
+    });
+
+  if (inventoryError) {
+    console.error("Error guardando inventario:", inventoryError);
+    alert("No se pudo guardar el producto.\n\n" + inventoryError.message);
+    return;
+  }
+
+  closeInventoryModal();
+  await loadInventory();
+  alert("Producto añadido correctamente.");
+}
+
+async function loadInventory() {
+  const { data, error } = await supabaseClient
+    .from("inventory")
+    .select(`
+      id,
+      quantity,
+      unit,
+      presentation,
+      is_spice,
+      location,
+      expiration_date,
+      notes,
+      ingredients (
+        id,
+        name
+      )
+    `)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Error cargando inventario:", error);
+    return;
+  }
+
+  renderInventory(data || []);
+}
+
+function renderInventory(items) {
+  const inventoryContainer = document.querySelector(".inventory");
+  if (!inventoryContainer) return;
+
+  const locations = [
+    {
+      id: "despensa",
+      emoji: "🥫",
+      title: "Despensa",
+      description: "Productos secos, conservas y básicos."
+    },
+    {
+      id: "frigorifico",
+      emoji: "🥬",
+      title: "Frigorífico",
+      description: "Lo que tienes fresco."
+    },
+    {
+      id: "congelador",
+      emoji: "🧊",
+      title: "Congelador",
+      description: "Tus productos congelados."
+    }
+  ];
+
+  inventoryContainer.innerHTML = locations.map(location => {
+    const products = items.filter(item => item.location === location.id);
+
+    return `
+      <article class="inventory-card">
+        <div class="emoji">${location.emoji}</div>
+        <h3>${location.title}</h3>
+        <p>${location.description}</p>
+
+        <div class="inventory-count">
+          ${products.length}
+          ${products.length === 1 ? "producto" : "productos"}
+        </div>
+
+        <button
+          type="button"
+          onclick="viewInventoryProducts('${location.id}')"
+        >
+          Ver productos →
+        </button>
+      </article>
+    `;
+  }).join("");
+}
+
+async function viewInventoryProducts(location) {
+  currentInventoryLocation = location;
+
+  const { data, error } = await supabaseClient
+    .from("inventory")
+    .select(`
+      id,
+      quantity,
+      unit,
+      presentation,
+      is_spice,
+      location,
+      expiration_date,
+      notes,
+      ingredients (
+        name
+      )
+    `)
+    .eq("location", location)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Error cargando productos:", error);
+    alert("No se pudieron cargar los productos.\n\n" + error.message);
+    return;
+  }
+
+  showInventoryProducts(location, data || []);
+}
+
+function showInventoryProducts(location, products) {
+  const names = {
+    despensa: "🥫 Despensa",
+    frigorifico: "🥬 Frigorífico",
+    congelador: "🧊 Congelador"
+  };
+
+  const modal = document.createElement("div");
+  modal.className = "inventory-products-modal open";
+
+  modal.innerHTML = `
+    <div class="inventory-modal-overlay"></div>
+
+    <div class="inventory-modal-box products-box">
+      <div class="inventory-modal-header">
+        <div>
+          <small>INVENTARIO</small>
+          <h2>${names[location]}</h2>
+        </div>
+
+        <button type="button" class="modal-close">×</button>
+      </div>
+
+      <div class="products-list">
+        ${
+          products.length === 0
+            ? `
+              <div class="products-empty">
+                <div>📦</div>
+                <p>No tienes productos en esta sección.</p>
+              </div>
+            `
+            : products.map(product => {
+                const name = product.ingredients?.name || "Producto";
+                const quantity = product.quantity !== null
+                  ? `${product.quantity} ${product.unit || ""}`.trim()
+                  : "";
+                const presentation = product.presentation
+                  ? ` · ${product.presentation}`
+                  : "";
+                const spiceBadge = product.is_spice
+                  ? `<em class="product-spice-badge">🌿 Especia</em>`
+                  : "";
+
+                return `
+                  <div class="product-row">
+                    <div>
+                      <strong>${name}</strong>
+                      <span>${quantity}${presentation}</span>
+                      ${spiceBadge}
+                    </div>
+
+                    <div class="product-actions">
+                      <button
+                        type="button"
+                        class="duplicate-product"
+                        title="Añadir otra presentación de este producto"
+                        onclick="addInventoryPresentation(${product.id})"
+                      >
+                        ＋📦
+                      </button>
+                      <button
+                        type="button"
+                        class="edit-product"
+                        title="Editar artículo"
+                        onclick="editInventoryProduct(${product.id})"
+                      >
+                        ✏️
+                      </button>
+
+                      <button
+                        type="button"
+                        class="delete-product"
+                        title="Eliminar artículo"
+                        onclick="deleteInventoryProduct(${product.id})"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                `;
+              }).join("")
+        }
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="secondary close-products">
+          Cerrar
+        </button>
+
+        <button type="button" class="primary add-from-products">
+          ＋ Añadir producto
+        </button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  modal.querySelector(".modal-close")
+    .addEventListener("click", () => modal.remove());
+
+  modal.querySelector(".close-products")
+    .addEventListener("click", () => modal.remove());
+
+  modal.querySelector(".inventory-modal-overlay")
+    .addEventListener("click", () => modal.remove());
+
+  modal.querySelector(".add-from-products")
+    .addEventListener("click", () => {
+      modal.remove();
+      openInventoryModal(location);
+    });
+}
+
+async function addInventoryPresentation(id) {
+  const { data, error } = await supabaseClient
+    .from("inventory")
+    .select(`
+      id,
+      location,
+      ingredients (
+        name
+      )
+    `)
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error || !data) {
+    console.error("Error cargando producto para nueva presentación:", error);
+    alert("No se pudo preparar la nueva presentación.\n\n" + (error?.message || "Producto no encontrado."));
+    return;
+  }
+
+  document.querySelectorAll(".inventory-products-modal")
+    .forEach(modal => modal.remove());
+
+  openInventoryModal(
+    data.location || currentInventoryLocation || "despensa",
+    data.ingredients?.name || ""
+  );
+}
+
+window.addInventoryPresentation = addInventoryPresentation;
+
+async function deleteInventoryProduct(id) {
+  const confirmed = confirm(
+    "¿Quieres eliminar este producto del inventario?"
+  );
+
+  if (!confirmed) return;
+
+  const { error } = await supabaseClient
+    .from("inventory")
+    .delete()
+    .eq("id", id);
+
+  if (error) {
+    console.error("Error eliminando producto:", error);
+    alert("No se pudo eliminar el producto.\n\n" + error.message);
+    return;
+  }
+
+  document.querySelectorAll(".inventory-products-modal")
+    .forEach(modal => modal.remove());
+
+  await loadInventory();
+}
+
+function setupInventoryButtons() {
+  const inventoryPage = document.getElementById("inventario");
+  if (!inventoryPage) return;
+
+  const addButton = inventoryPage.querySelector(".page-head .primary");
+
+  if (addButton) {
+    addButton.onclick = () => openInventoryModal("despensa");
+  }
+}
+
+
+/* =========================================================
+   RECETAS
+   ========================================================= */
+
+let currentRecipeId = null;
+let currentRecipeFilter = "todas";
+
+function createRecipeModal() {
+  if (document.getElementById("recipe-modal")) return;
+
+  const modal = document.createElement("div");
+  modal.id = "recipe-modal";
+
+  modal.innerHTML = `
+    <div class="recipe-modal-overlay"></div>
+
+    <div class="recipe-modal-box">
+      <div class="inventory-modal-header">
+        <div>
+          <small id="recipe-modal-label">NUEVA RECETA</small>
+          <h2 id="recipe-modal-title">Nueva receta</h2>
+        </div>
+        <button type="button" class="modal-close" id="close-recipe-modal">×</button>
+      </div>
+
+      <form id="recipe-form">
+        <label>
+          Nombre
+          <input id="recipe-name" type="text" placeholder="Ej. Pasta con verduras" required>
+        </label>
+
+        <label>
+          Descripción
+          <textarea id="recipe-description" rows="2" placeholder="Opcional"></textarea>
+        </label>
+
+        <label>
+          Preparación
+          <textarea id="recipe-preparation" rows="7" placeholder="Pasos de la receta"></textarea>
+        </label>
+
+        <div class="form-row recipe-form-row">
+          <label>
+            Raciones
+            <input id="recipe-servings" type="number" step="0.5" min="0" placeholder="1">
+          </label>
+
+          <label>
+            Temperatura (°C)
+            <input id="recipe-temperature" type="number" step="1" min="0" placeholder="Opcional">
+          </label>
+        </div>
+
+        <div class="form-row recipe-form-row">
+          <label>
+            Tiempo preparación (min)
+            <input id="recipe-prep-time" type="number" min="0" step="1" placeholder="0">
+          </label>
+
+          <label>
+            Tiempo cocción (min)
+            <input id="recipe-cook-time" type="number" min="0" step="1" placeholder="0">
+          </label>
+        </div>
+
+        <label>
+          Imagen (URL)
+          <input id="recipe-image" type="url" placeholder="https://...">
+        </label>
+
+        <div class="recipe-checks">
+          <label class="recipe-check meal-type-check">
+            <input id="recipe-meal-comida" type="checkbox">
+            <span>🍴 Comida</span>
+          </label>
+
+          <label class="recipe-check meal-type-check">
+            <input id="recipe-meal-cena" type="checkbox">
+            <span>🌙 Cena</span>
+          </label>
+
+          <label class="recipe-check">
+            <input id="recipe-fun" type="checkbox">
+            <span>🍿 Receta divertida</span>
+          </label>
+
+          <label class="recipe-check">
+            <input id="recipe-freezable" type="checkbox">
+            <span>❄️ Se puede congelar</span>
+          </label>
+
+          <label class="recipe-check">
+            <input id="recipe-dont-suggest" type="checkbox">
+            <span>🚫 No sugerir</span>
+          </label>
+        </div>
+
+        <div class="recipe-ingredients-section">
+          <div class="recipe-form-section-head">
+            <div>
+              <strong>Ingredientes</strong>
+              <span>Añade cantidades y unidades.</span>
+            </div>
+            <button type="button" class="secondary" id="add-recipe-ingredient">＋ Añadir</button>
+          </div>
+
+          <div id="recipe-ingredients-list"></div>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="cancel-recipe">Cancelar</button>
+          <button type="submit" class="primary" id="save-recipe-button">Guardar receta</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  modal.querySelector("#close-recipe-modal")
+    .addEventListener("click", closeRecipeModal);
+
+  modal.querySelector("#cancel-recipe")
+    .addEventListener("click", closeRecipeModal);
+
+  modal.querySelector(".recipe-modal-overlay")
+    .addEventListener("click", closeRecipeModal);
+
+  modal.querySelector("#add-recipe-ingredient")
+    .addEventListener("click", () => addRecipeIngredientRow());
+
+  modal.querySelector("#recipe-form")
+    .addEventListener("submit", saveRecipe);
+
+  addRecipeIngredientRow();
+}
+
+function resetRecipeModal() {
+  currentRecipeId = null;
+
+  const form = document.getElementById("recipe-form");
+  if (form) form.reset();
+
+  document.getElementById("recipe-modal-label").textContent = "NUEVA RECETA";
+  document.getElementById("recipe-modal-title").textContent = "Nueva receta";
+  document.getElementById("save-recipe-button").textContent = "Guardar receta";
+  document.getElementById("recipe-meal-comida").checked = true;
+  document.getElementById("recipe-meal-cena").checked = true;
+
+  document.getElementById("recipe-ingredients-list").innerHTML = "";
+  addRecipeIngredientRow();
+}
+
+function addRecipeIngredientRow(values = {}) {
+  const container = document.getElementById("recipe-ingredients-list");
+  if (!container) return;
+
+  const row = document.createElement("div");
+  row.className = "recipe-ingredient-row";
+
+  row.innerHTML = `
+    <input class="recipe-ingredient-name" type="text" placeholder="Ingrediente" value="${escapeHtml(values.name || "")}">
+    <input class="recipe-ingredient-quantity" type="number" min="0" step="0.01" placeholder="Cantidad" value="${values.quantity ?? ""}">
+    <select class="recipe-ingredient-unit">
+      ${["g","kg","ml","l","unidad","cucharadita","cucharada","pizca","paquete"].map(unit =>
+        `<option value="${unit}" ${values.unit === unit ? "selected" : ""}>${unit}</option>`
+      ).join("")}
+    </select>
+    <input class="recipe-ingredient-notes" type="text" placeholder="Nota" value="${escapeHtml(values.notes || "")}">
+    <button type="button" class="remove-recipe-ingredient" title="Eliminar">×</button>
+  `;
+
+  row.querySelector(".remove-recipe-ingredient")
+    .addEventListener("click", () => {
+      const rows = container.querySelectorAll(".recipe-ingredient-row");
+      if (rows.length === 1) {
+        row.querySelectorAll("input").forEach(input => input.value = "");
+        row.querySelector(".recipe-ingredient-quantity").value = "";
+        row.querySelector(".recipe-ingredient-notes").value = "";
+        return;
+      }
+      row.remove();
+    });
+
+  container.appendChild(row);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function openRecipeModal() {
+  createRecipeModal();
+  resetRecipeModal();
+  document.getElementById("recipe-modal").classList.add("open");
+  document.getElementById("recipe-name").focus();
+}
+
+window.openRecipeModal = openRecipeModal;
+
+async function openEditRecipeModal(recipeId) {
+  createRecipeModal();
+
+  const { data: recipe, error } = await supabaseClient
+    .from("recipes")
+    .select("*")
+    .eq("id", recipeId)
+    .single();
+
+  if (error) {
+    console.error("Error cargando receta:", error);
+    alert("No se pudo cargar la receta.\n\n" + error.message);
+    return;
+  }
+
+  const { data: relations, error: relationError } = await supabaseClient
+    .from("recipe_ingredients")
+    .select(`
+      quantity,
+      unit,
+      notes,
+      ingredients (
+        name
+      )
+    `)
+    .eq("recipe_id", recipeId);
+
+  if (relationError) {
+    console.error("Error cargando ingredientes de receta:", relationError);
+    alert("No se pudieron cargar los ingredientes.\n\n" + relationError.message);
+    return;
+  }
+
+  currentRecipeId = recipeId;
+
+  document.getElementById("recipe-modal-label").textContent = "EDITAR RECETA";
+  document.getElementById("recipe-modal-title").textContent = "Editar receta";
+  document.getElementById("save-recipe-button").textContent = "Guardar cambios";
+
+  document.getElementById("recipe-name").value = recipe.name || "";
+  document.getElementById("recipe-description").value = recipe.description || "";
+  document.getElementById("recipe-preparation").value = recipe.preparation || "";
+  document.getElementById("recipe-servings").value = recipe.servings ?? "";
+  document.getElementById("recipe-prep-time").value = recipe.prep_time ?? "";
+  document.getElementById("recipe-cook-time").value = recipe.cook_time ?? "";
+  document.getElementById("recipe-temperature").value = recipe.temperature ?? "";
+  document.getElementById("recipe-image").value = recipe.image_url || "";
+
+  const recipeMealTypes = Array.isArray(recipe.meal_types) && recipe.meal_types.length
+    ? recipe.meal_types
+    : ["comida", "cena"];
+
+  document.getElementById("recipe-meal-comida").checked = recipeMealTypes.includes("comida");
+  document.getElementById("recipe-meal-cena").checked = recipeMealTypes.includes("cena");
+
+  document.getElementById("recipe-fun").checked = !!recipe.fun_recipe;
+  document.getElementById("recipe-freezable").checked = !!recipe.is_freezable;
+  document.getElementById("recipe-dont-suggest").checked = !!recipe.do_not_suggest;
+
+  const container = document.getElementById("recipe-ingredients-list");
+  container.innerHTML = "";
+
+  if (!relations?.length) {
+    addRecipeIngredientRow();
+  } else {
+    relations.forEach(item => addRecipeIngredientRow({
+      name: item.ingredients?.name || "",
+      quantity: item.quantity,
+      unit: item.unit || "unidad",
+      notes: item.notes || ""
+    }));
+  }
+
+  document.getElementById("recipe-modal").classList.add("open");
+}
+
+function closeRecipeModal() {
+  const modal = document.getElementById("recipe-modal");
+  if (!modal) return;
+
+  modal.classList.remove("open");
+  resetRecipeModal();
+}
+
+function collectRecipeIngredients() {
+  return [...document.querySelectorAll(".recipe-ingredient-row")]
+    .map(row => ({
+      name: row.querySelector(".recipe-ingredient-name").value.trim(),
+      quantity: row.querySelector(".recipe-ingredient-quantity").value,
+      unit: row.querySelector(".recipe-ingredient-unit").value,
+      notes: row.querySelector(".recipe-ingredient-notes").value.trim()
+    }))
+    .filter(item => item.name);
+}
+
+async function findOrCreateIngredient(name, unit) {
+  let { data: ingredient, error } = await supabaseClient
+    .from("ingredients")
+    .select("id, name")
+    .ilike("name", name)
+    .maybeSingle();
+
+  if (error) {
+    return { ingredient: null, error };
+  }
+
+  if (!ingredient) {
+    const result = await supabaseClient
+      .from("ingredients")
+      .insert({
+        name,
+        default_unit: unit || null
+      })
+      .select()
+      .single();
+
+    return {
+      ingredient: result.data,
+      error: result.error
+    };
+  }
+
+  return {
+    ingredient,
+    error: null
+  };
+}
+
+async function saveRecipe(event) {
+  event.preventDefault();
+
+  const name = document.getElementById("recipe-name").value.trim();
+  if (!name) {
+    alert("Escribe el nombre de la receta.");
+    return;
+  }
+
+  const mealTypes = [];
+  if (document.getElementById("recipe-meal-comida").checked) mealTypes.push("comida");
+  if (document.getElementById("recipe-meal-cena").checked) mealTypes.push("cena");
+
+  if (!mealTypes.length) {
+    alert("Marca si la receta es para comida, cena o ambas.");
+    return;
+  }
+
+  const payload = {
+    name,
+    description: document.getElementById("recipe-description").value.trim() || null,
+    preparation: document.getElementById("recipe-preparation").value.trim() || null,
+    servings: document.getElementById("recipe-servings").value
+      ? Number(document.getElementById("recipe-servings").value)
+      : null,
+    prep_time: document.getElementById("recipe-prep-time").value
+      ? Number(document.getElementById("recipe-prep-time").value)
+      : null,
+    cook_time: document.getElementById("recipe-cook-time").value
+      ? Number(document.getElementById("recipe-cook-time").value)
+      : null,
+    temperature: document.getElementById("recipe-temperature").value
+      ? Number(document.getElementById("recipe-temperature").value)
+      : null,
+    image_url: document.getElementById("recipe-image").value.trim() || null,
+    meal_types: mealTypes,
+    fun_recipe: document.getElementById("recipe-fun").checked,
+    is_freezable: document.getElementById("recipe-freezable").checked,
+    do_not_suggest: document.getElementById("recipe-dont-suggest").checked
+  };
+
+  let recipeId = currentRecipeId;
+
+  if (recipeId) {
+    const { error } = await supabaseClient
+      .from("recipes")
+      .update({
+        ...payload,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", recipeId);
+
+    if (error) {
+      console.error("Error actualizando receta:", error);
+      alert("No se pudo actualizar la receta.\n\n" + error.message);
+      return;
+    }
+
+    const { error: deleteError } = await supabaseClient
+      .from("recipe_ingredients")
+      .delete()
+      .eq("recipe_id", recipeId);
+
+    if (deleteError) {
+      console.error("Error actualizando ingredientes:", deleteError);
+      alert("La receta se actualizó, pero no se pudieron actualizar los ingredientes.\n\n" + deleteError.message);
+      return;
+    }
+  } else {
+    const { data, error } = await supabaseClient
+      .from("recipes")
+      .insert(payload)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error creando receta:", error);
+      alert("No se pudo crear la receta.\n\n" + error.message);
+      return;
+    }
+
+    recipeId = data.id;
+  }
+
+  const ingredients = collectRecipeIngredients();
+
+  for (const item of ingredients) {
+    const { ingredient, error: ingredientError } = await findOrCreateIngredient(item.name, item.unit);
+
+    if (ingredientError) {
+      console.error("Error con ingrediente de receta:", ingredientError);
+      alert("La receta se guardó, pero hubo un problema con el ingrediente " + item.name + ".\n\n" + ingredientError.message);
+      continue;
+    }
+
+    const { error: relationError } = await supabaseClient
+      .from("recipe_ingredients")
+      .insert({
+        recipe_id: recipeId,
+        ingredient_id: ingredient.id,
+        quantity: item.quantity ? Number(item.quantity) : null,
+        unit: item.unit || null,
+        notes: item.notes || null
+      });
+
+    if (relationError) {
+      console.error("Error guardando ingrediente de receta:", relationError);
+    }
+  }
+
+  closeRecipeModal();
+  await loadRecipes();
+}
+
+async function loadRecipes() {
+  const { data, error } = await supabaseClient
+    .from("recipes")
+    .select(`
+      id,
+      name,
+      description,
+      preparation,
+      servings,
+      prep_time,
+      cook_time,
+      temperature,
+      image_url,
+      meal_types,
+      fun_recipe,
+      is_freezable,
+      do_not_suggest,
+      created_at,
+      updated_at
+    `)
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    console.error("Error cargando recetas:", error);
+    renderRecipesError(error);
+    return;
+  }
+
+  renderRecipes(data || []);
+}
+
+function renderRecipesError(error) {
+  const page = document.getElementById("recetas");
+  if (!page) return;
+
+  const empty = page.querySelector(".empty");
+  if (empty) {
+    empty.innerHTML = `
+      <div class="empty-icon">!</div>
+      <h3>No se pudieron cargar las recetas</h3>
+      <p>${escapeHtml(error.message || "Error desconocido")}</p>
+    `;
+  }
+}
+
+function recipeMatchesFilter(recipe) {
+  if (currentRecipeFilter === "todas") return true;
+
+  const types = Array.isArray(recipe.meal_types) && recipe.meal_types.length
+    ? recipe.meal_types
+    : ["comida", "cena"];
+
+  if (currentRecipeFilter === "comidas") return types.includes("comida");
+  if (currentRecipeFilter === "cenas") return types.includes("cena");
+  if (currentRecipeFilter === "divertidas") return !!recipe.fun_recipe;
+  if (currentRecipeFilter === "congelables") return !!recipe.is_freezable;
+  if (currentRecipeFilter === "no-sugerir") return !!recipe.do_not_suggest;
+
   return true;
- };
- menuSyncChain=menuSyncChain.then(run);
- return menuSyncChain;
-}
-async function syncMenuChoice(){
- return syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
 }
 
-async function handleAuthSubmit(e){
- e.preventDefault();
- if(!supabaseClient){showAuthMessage('No se ha podido cargar el servicio de autenticación.','error');return}
- const email=document.querySelector('#authEmail')?.value.trim();
- const password=document.querySelector('#authPassword')?.value||'';
- if(!email||password.length<6){showAuthMessage('Introduce un email y una contraseña de al menos 6 caracteres.','error');return}
- const submit=document.querySelector('#authSubmit');
- submit.disabled=true;showAuthMessage('Conectando…');
- try{
-  let result;
-  if(authMode==='signup') result=await supabaseClient.auth.signUp({email,password,options:{emailRedirectTo:window.location.origin}});
-  else result=await supabaseClient.auth.signInWithPassword({email,password});
-  if(result.error)throw result.error;
-  if(authMode==='signup'&&!result.data.session){
-   showAuthMessage('Cuenta creada. Revisa tu email para confirmar la cuenta y después inicia sesión.','success');
-   document.querySelector('#authPassword').value='';
-  }else if(result.data.user){
-   currentUser=result.data.user;
-   await ensureCloudRow(currentUser);
-   await loadAllFromCloud();
-   await runRecipeAuditV85();
-   showApp();applyAppearance();render();checkNotifications();
+function recipeCardHtml(recipe) {
+  const meta = [];
+
+  if (recipe.prep_time) meta.push(`⏱ ${recipe.prep_time} min prep`);
+  if (recipe.cook_time) meta.push(`🔥 ${recipe.cook_time} min`);
+  if (recipe.servings) meta.push(`🍽 ${recipe.servings} ración${recipe.servings === 1 ? "" : "es"}`);
+
+  const recipeTypes = Array.isArray(recipe.meal_types) && recipe.meal_types.length
+    ? recipe.meal_types
+    : ["comida", "cena"];
+
+  if (recipeTypes.includes("comida")) meta.push("🍴 Comida");
+  if (recipeTypes.includes("cena")) meta.push("🌙 Cena");
+  if (recipe.fun_recipe) meta.push("🍿 Divertida");
+  if (recipe.is_freezable) meta.push("❄️ Congela");
+
+  const imageHtml = recipe.image_url
+    ? `<img src="${escapeHtml(recipe.image_url)}" alt="${escapeHtml(recipe.name)}">`
+    : `<div class="recipe-placeholder">🍽️</div>`;
+
+  return `
+    <article class="recipe-card">
+      <div class="recipe-image">${imageHtml}</div>
+
+      <div class="recipe-content">
+        <h3>${escapeHtml(recipe.name)}</h3>
+
+        <p>${escapeHtml(recipe.description || "Sin descripción")}</p>
+
+        <div class="recipe-meta">
+          ${meta.map(item => `<span class="tag">${escapeHtml(item)}</span>`).join("")}
+        </div>
+
+        <div class="recipe-card-actions">
+          <button type="button" class="primary recipe-view" data-id="${recipe.id}">
+            Ver receta
+          </button>
+
+          <button type="button" class="secondary recipe-edit" data-id="${recipe.id}">
+            Editar
+          </button>
+
+          <button type="button" class="recipe-delete" data-id="${recipe.id}">
+            Eliminar
+          </button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderRecipes(recipes) {
+  const page = document.getElementById("recetas");
+  if (!page) return;
+
+  const filtered = recipes.filter(recipeMatchesFilter);
+
+  let container = page.querySelector(".recipe-grid");
+  if (!container) {
+    container = document.createElement("div");
+    container.className = "recipe-grid";
+
+    const empty = page.querySelector(".empty");
+    if (empty) empty.replaceWith(container);
+    else page.appendChild(container);
   }
- }catch(err){showAuthMessage(authErrorText(err),'error')}
- finally{submit.disabled=false}
-}
-function authErrorText(err){
- const m=String(err?.message||err||'');
- if(/invalid login credentials/i.test(m))return 'Email o contraseña incorrectos.';
- if(/user already registered/i.test(m))return 'Este email ya tiene una cuenta. Inicia sesión.';
- if(/password/i.test(m)&&/6|characters|length/i.test(m))return 'La contraseña debe tener al menos 6 caracteres.';
- return m||'No se ha podido completar la operación.';
-}
-async function logout(){if(!supabaseClient)return;await supabaseClient.auth.signOut();currentUser=null;showAuth('login')}
-async function initAuth(){
- if(!supabaseClient){showAuthMessage('No se ha podido cargar Supabase. Comprueba tu conexión.','error');showAuth('login');return}
- document.querySelector('#authForm')?.addEventListener('submit',handleAuthSubmit);
- document.querySelector('#authToggle')?.addEventListener('click',()=>showAuth(authMode==='login'?'signup':'login'));
- const {data,error}=await supabaseClient.auth.getSession();
- if(error){showAuthMessage(error.message,'error');showAuth('login');return}
- if(data.session?.user){
-  currentUser=data.session.user;
-  try{await ensureCloudRow(currentUser);await loadAllFromCloud();await runRecipeAuditV85();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
-  catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
- }else showAuth('login');
-supabaseClient.auth.onAuthStateChange((_event,session)=>{
-  if(session?.user){
-   currentUser=session.user;
-   // Important: auth events can fire after the UI is already visible.
-   // Always load the cloud copy before exposing the app so a second device
-   // does not stay on an old localStorage snapshot.
-   void (async()=>{
-    try{
-     await ensureCloudRow(currentUser);
-     await loadAllFromCloud();
-     await runRecipeAuditV85();
-     showApp();applyAppearance();render();
-    }catch(err){
-     console.error('Error cargando datos tras cambio de sesión',err);
-     state.cloudSyncError=String(err?.message||err||'Error de sincronización');
-     setSyncStatus('error');
-     showApp();
+
+  if (!filtered.length) {
+    container.innerHTML = `
+      <div class="empty recipe-empty">
+        <div class="empty-icon">▤</div>
+        <h3>${recipes.length ? "No hay recetas en este filtro" : "Aún no hay recetas"}</h3>
+        <p>${recipes.length ? "Prueba otra categoría o crea una receta nueva." : "Crea tu primera receta y aparecerá aquí."}</p>
+        <button class="secondary" id="empty-recipe-add">＋ Añadir receta</button>
+      </div>
+    `;
+
+    const emptyAdd = container.querySelector("#empty-recipe-add");
+    if (emptyAdd) {
+      emptyAdd.onclick = openRecipeModal;
     }
-   })();
-  }else{currentUser=null;showAuth('login')}
+
+    return;
+  }
+
+  container.innerHTML = filtered.map(recipeCardHtml).join("");
+
+  container.querySelectorAll(".recipe-view").forEach(button => {
+    button.addEventListener("click", () => openRecipeDetail(Number(button.dataset.id)));
+  });
+
+  container.querySelectorAll(".recipe-edit").forEach(button => {
+    button.addEventListener("click", () => openEditRecipeModal(Number(button.dataset.id)));
+  });
+
+  container.querySelectorAll(".recipe-delete").forEach(button => {
+    button.addEventListener("click", () => deleteRecipe(Number(button.dataset.id)));
+  });
+}
+
+
+/* =========================================================
+   FICHA COMPLETA DE RECETA
+   ========================================================= */
+
+async function openRecipeDetail(recipeId) {
+  const { data: recipe, error } = await supabaseClient
+    .from("recipes")
+    .select("*")
+    .eq("id", recipeId)
+    .single();
+
+  if (error) {
+    console.error("Error cargando detalle de receta:", error);
+    alert("No se pudo cargar la receta.\n\n" + error.message);
+    return;
+  }
+
+  const { data: ingredients, error: ingredientsError } = await supabaseClient
+    .from("recipe_ingredients")
+    .select(`
+      quantity,
+      unit,
+      notes,
+      ingredients (
+        name
+      )
+    `)
+    .eq("recipe_id", recipeId);
+
+  if (ingredientsError) {
+    console.error("Error cargando ingredientes:", ingredientsError);
+    alert("No se pudieron cargar los ingredientes.\n\n" + ingredientsError.message);
+    return;
+  }
+
+  showRecipeDetail(recipe, ingredients || []);
+}
+
+function showRecipeDetail(recipe, ingredients) {
+  document.querySelectorAll(".recipe-detail-modal").forEach(modal => modal.remove());
+
+  const modal = document.createElement("div");
+  modal.className = "recipe-detail-modal open";
+
+  const imageHtml = recipe.image_url
+    ? `<img src="${escapeHtml(recipe.image_url)}" alt="${escapeHtml(recipe.name)}">`
+    : `<div class="recipe-detail-placeholder">🍽️</div>`;
+
+  const totalTime = (recipe.prep_time || 0) + (recipe.cook_time || 0);
+
+  const meta = [];
+  if (recipe.servings) meta.push(`🍽 ${recipe.servings} ración${recipe.servings === 1 ? "" : "es"}`);
+  if (recipe.prep_time) meta.push(`⏱ ${recipe.prep_time} min preparación`);
+  if (recipe.cook_time) meta.push(`🔥 ${recipe.cook_time} min cocción`);
+  if (totalTime) meta.push(`⌛ ${totalTime} min total`);
+  if (recipe.temperature) meta.push(`🌡️ ${recipe.temperature} °C`);
+
+  const tags = [];
+  if (recipe.fun_recipe) tags.push("🍿 Receta divertida");
+  if (recipe.is_freezable) tags.push("❄️ Se puede congelar");
+  if (recipe.do_not_suggest) tags.push("🚫 No sugerir");
+
+  modal.innerHTML = `
+    <div class="recipe-detail-overlay"></div>
+
+    <div class="recipe-detail-box">
+      <div class="recipe-detail-top">
+        <button type="button" class="recipe-detail-close" title="Cerrar">×</button>
+      </div>
+
+      <div class="recipe-detail-image">
+        ${imageHtml}
+      </div>
+
+      <div class="recipe-detail-content">
+        <small>RECETA</small>
+        <h2>${escapeHtml(recipe.name)}</h2>
+
+        ${recipe.description ? `<p class="recipe-detail-description">${escapeHtml(recipe.description)}</p>` : ""}
+
+        ${meta.length ? `
+          <div class="recipe-detail-meta">
+            ${meta.map(item => `<span class="tag">${escapeHtml(item)}</span>`).join("")}
+          </div>
+        ` : ""}
+
+        ${tags.length ? `
+          <div class="recipe-detail-tags">
+            ${tags.map(item => `<span class="recipe-detail-tag">${escapeHtml(item)}</span>`).join("")}
+          </div>
+        ` : ""}
+
+        <section class="recipe-detail-section">
+          <h3>Ingredientes</h3>
+
+          ${
+            ingredients.length
+              ? `
+                <div class="recipe-detail-ingredients">
+                  ${ingredients.map(item => `
+                    <div class="recipe-detail-ingredient">
+                      <span>${escapeHtml(item.ingredients?.name || "Ingrediente")}</span>
+                      <strong>${item.quantity !== null && item.quantity !== undefined ? escapeHtml(String(item.quantity)) : ""} ${escapeHtml(item.unit || "")}</strong>
+                      ${item.notes ? `<small>${escapeHtml(item.notes)}</small>` : ""}
+                    </div>
+                  `).join("")}
+                </div>
+              `
+              : `<p class="recipe-detail-muted">Esta receta todavía no tiene ingredientes añadidos.</p>`
+          }
+        </section>
+
+        <section class="recipe-detail-section">
+          <h3>Preparación</h3>
+
+          ${
+            recipe.preparation
+              ? `<div class="recipe-detail-preparation">${escapeHtml(recipe.preparation).replace(/\n/g, "<br>")}</div>`
+              : `<p class="recipe-detail-muted">No se ha añadido la preparación.</p>`
+          }
+        </section>
+
+        <div class="recipe-detail-actions">
+          <button type="button" class="secondary recipe-detail-edit">Editar receta</button>
+          <button type="button" class="primary recipe-detail-close-bottom">Cerrar</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+
+  modal.querySelector(".recipe-detail-close").addEventListener("click", close);
+  modal.querySelector(".recipe-detail-close-bottom").addEventListener("click", close);
+  modal.querySelector(".recipe-detail-overlay").addEventListener("click", close);
+
+  modal.querySelector(".recipe-detail-edit").addEventListener("click", () => {
+    modal.remove();
+    openEditRecipeModal(recipe.id);
+  });
+}
+
+async function deleteRecipe(id) {
+  const confirmed = confirm("¿Quieres eliminar esta receta?");
+
+  if (!confirmed) return;
+
+  const { error } = await supabaseClient
+    .from("recipes")
+    .delete()
+    .eq("id", id);
+
+  if (error) {
+    console.error("Error eliminando receta:", error);
+    alert("No se pudo eliminar la receta.\n\n" + error.message);
+    return;
+  }
+
+  await loadRecipes();
+}
+
+function setupRecipeButtons() {
+  const page = document.getElementById("recetas");
+  if (!page) return;
+
+  const addRecipeButton = page.querySelector(".page-head .primary");
+  if (addRecipeButton) {
+    addRecipeButton.onclick = openRecipeModal;
+  }
+
+  page.querySelectorAll(".chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      page.querySelectorAll(".chip").forEach(item => item.classList.remove("selected"));
+      chip.classList.add("selected");
+
+      const label = chip.textContent.trim().toLowerCase();
+
+      if (label === "todas") currentRecipeFilter = "todas";
+      else if (label === "comidas") currentRecipeFilter = "comidas";
+      else if (label === "cenas") currentRecipeFilter = "cenas";
+      else if (label === "divertidas") currentRecipeFilter = "divertidas";
+      else if (label === "congelables") currentRecipeFilter = "congelables";
+      else if (label === "no sugerir") currentRecipeFilter = "no-sugerir";
+      else currentRecipeFilter = "todas";
+
+      loadRecipes();
+    });
+  });
+}
+
+/* Reemplaza los filtros de texto iniciales por filtros que sí podemos soportar
+   con el esquema actual. */
+function normalizeRecipeFilters() {
+  const page = document.getElementById("recetas");
+  if (!page) return;
+
+  const chips = page.querySelector(".chips");
+  if (!chips) return;
+
+  chips.innerHTML = `
+    <button class="chip selected" type="button">Todas</button>
+    <button class="chip" type="button">Comidas</button>
+    <button class="chip" type="button">Cenas</button>
+    <button class="chip" type="button">Divertidas</button>
+    <button class="chip" type="button">Congelables</button>
+    <button class="chip" type="button">No sugerir</button>
+  `;
+}
+
+
+
+/* =========================================================
+   MENÚ SEMANAL
+   ========================================================= */
+
+let menuWeekStart = getMonday(new Date());
+let selectedMenuSlot = null;
+let menuRecipesCache = [];
+
+function dateToISO(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function getMonday(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d;
+}
+
+function addDays(date, amount) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + amount);
+  return d;
+}
+
+function formatWeekLabel(start) {
+  const end = addDays(start, 6);
+  const options = { day: "numeric", month: "short" };
+  return `${start.toLocaleDateString("es-ES", options)} – ${end.toLocaleDateString("es-ES", options)}`;
+}
+
+function isCurrentMenuWeek() {
+  return dateToISO(menuWeekStart) === dateToISO(getMonday(new Date()));
+}
+
+function updateMenuWeekNavigation() {
+  const label = document.getElementById("menu-week-label");
+  if (label) label.textContent = formatWeekLabel(menuWeekStart);
+
+  const currentButton = document.getElementById("menu-current-week");
+  if (currentButton) {
+    currentButton.textContent = isCurrentMenuWeek() ? "Esta semana" : "Volver a esta semana";
+    currentButton.disabled = isCurrentMenuWeek();
+  }
+}
+
+async function changeMenuWeek(amount) {
+  menuWeekStart = addDays(menuWeekStart, amount * 7);
+  updateMenuWeekNavigation();
+  await loadMenu();
+}
+
+async function goToCurrentMenuWeek() {
+  menuWeekStart = getMonday(new Date());
+  updateMenuWeekNavigation();
+  await loadMenu();
+}
+
+function formatDayName(date) {
+  return date.toLocaleDateString("es-ES", {
+    weekday: "long"
+  });
+}
+
+function getMealLabel(type) {
+  return {
+    comida: "Comida",
+    cena: "Cena"
+  }[type] || type;
+}
+
+async function loadMenu() {
+  const menuPage = document.getElementById("menu");
+  if (!menuPage) return;
+
+  const { data: plans, error: planError } = await supabaseClient
+    .from("meal_plans")
+    .select("id, week_start")
+    .eq("week_start", dateToISO(menuWeekStart))
+    .limit(1);
+
+  if (planError) {
+    console.error("Error cargando menú:", planError);
+    renderMenuError(planError);
+    return;
+  }
+
+  const plan = plans?.[0] || null;
+  let items = [];
+
+  if (plan) {
+    const result = await supabaseClient
+      .from("meal_plan_items")
+      .select(`
+        id,
+        date,
+        meal_type,
+        recipe_id,
+        is_locked,
+        is_tupper,
+        notes,
+        recipes (
+          id,
+          name
+        )
+      `)
+      .eq("meal_plan_id", plan.id)
+      .order("date")
+      .order("meal_type");
+
+    if (result.error) {
+      console.error("Error cargando comidas del menú:", result.error);
+      renderMenuError(result.error);
+      return;
+    }
+
+    items = result.data || [];
+  }
+
+  renderMenuWeek(items);
+}
+
+function renderMenuError(error) {
+  const grid = document.querySelector("#menu .week");
+  if (!grid) return;
+
+  grid.innerHTML = `
+    <div class="empty">
+      <div class="empty-icon">!</div>
+      <h3>No se pudo cargar el menú</h3>
+      <p>${escapeHtml(error.message || "Error desconocido")}</p>
+    </div>
+  `;
+}
+
+function renderMenuWeek(items) {
+  const grid = document.querySelector("#menu .week");
+  if (!grid) return;
+
+  const types = ["comida", "cena"];
+
+  grid.innerHTML = Array.from({ length: 7 }, (_, index) => {
+    const date = addDays(menuWeekStart, index);
+    const iso = dateToISO(date);
+
+    return `
+      <article class="menu-day-card">
+        <button
+          type="button"
+          class="menu-day-head"
+          data-day-detail="${iso}"
+          title="Ver detalle del día"
+        >
+          <strong>${capitalize(formatDayName(date))}</strong>
+          <span>${date.getDate()}/${date.getMonth() + 1}</span>
+        </button>
+
+        ${types.map(type => {
+          const item = items.find(row =>
+            row.date === iso && row.meal_type === type
+          );
+
+          return `
+            <button
+              type="button"
+              class="menu-meal-slot ${item?.recipe_id ? "has-recipe" : ""} ${item?.is_tupper ? "is-tupper" : ""}"
+              data-date="${iso}"
+              data-meal-type="${type}"
+            >
+              <span>${getMealLabel(type)}</span>
+              <em>${item?.recipes?.name || "+ Añadir receta"}</em>
+              <div class="menu-slot-badges">
+                ${item?.is_locked ? '<b class="menu-lock">🔒 Fija</b>' : ""}
+                ${item?.is_tupper ? '<b class="menu-tupper">🥡 Tupper</b>' : ""}
+              </div>
+            </button>
+          `;
+        }).join("")}
+      </article>
+    `;
+  }).join("");
+
+  grid.querySelectorAll(".menu-day-head").forEach(button => {
+    button.addEventListener("click", () => {
+      openMenuDayDetail(button.dataset.dayDetail);
+    });
+  });
+
+  grid.querySelectorAll(".menu-meal-slot").forEach(button => {
+    button.addEventListener("click", () => {
+      openMenuRecipePicker(
+        button.dataset.date,
+        button.dataset.mealType
+      );
+    });
+  });
+
+  updateMenuWeekNavigation();
+}
+
+function capitalize(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+async function openMenuDayDetail(date) {
+  const { data: plans, error: planError } = await supabaseClient
+    .from("meal_plans")
+    .select("id")
+    .eq("week_start", dateToISO(menuWeekStart))
+    .limit(1);
+
+  if (planError) {
+    console.error("Error buscando el menú del día:", planError);
+    alert("No se pudo cargar el detalle del día.\n\n" + planError.message);
+    return;
+  }
+
+  const plan = plans?.[0];
+  let items = [];
+
+  if (plan) {
+    const { data, error } = await supabaseClient
+      .from("meal_plan_items")
+      .select(`
+        id,
+        date,
+        meal_type,
+        recipe_id,
+        is_locked,
+        is_tupper,
+        notes,
+        recipes (
+          id,
+          name,
+          description,
+          preparation,
+          servings,
+          prep_time,
+          cook_time,
+          temperature,
+          image_url,
+          meal_types,
+          fun_recipe,
+          is_freezable,
+          do_not_suggest
+        )
+      `)
+      .eq("meal_plan_id", plan.id)
+      .eq("date", date)
+      .in("meal_type", ["comida", "cena"])
+      .order("meal_type");
+
+    if (error) {
+      console.error("Error cargando el detalle del día:", error);
+      alert("No se pudo cargar el detalle del día.\n\n" + error.message);
+      return;
+    }
+
+    items = data || [];
+  }
+
+  const recipesWithIngredients = await Promise.all(
+    items
+      .filter(item => item.recipe_id)
+      .map(async item => {
+        const { data: ingredients } = await supabaseClient
+          .from("recipe_ingredients")
+          .select(`
+            quantity,
+            unit,
+            notes,
+            ingredients (
+              name
+            )
+          `)
+          .eq("recipe_id", item.recipe_id);
+
+        return {
+          ...item,
+          ingredients: ingredients || []
+        };
+      })
+  );
+
+  const enrichedByMeal = new Map(
+    recipesWithIngredients.map(item => [item.meal_type, item])
+  );
+
+  const dateObject = new Date(`${date}T00:00:00`);
+  const prettyDate = capitalize(dateObject.toLocaleDateString("es-ES", {
+    weekday: "long",
+    day: "numeric",
+    month: "long"
+  }));
+
+  document.querySelectorAll(".menu-day-detail-modal").forEach(modal => modal.remove());
+
+  const modal = document.createElement("div");
+  modal.className = "menu-day-detail-modal open";
+
+  const mealHtml = ["comida", "cena"].map(type => {
+    const item = enrichedByMeal.get(type);
+    const recipe = item?.recipes;
+
+    if (!recipe) {
+      return `
+        <section class="menu-day-detail-meal is-empty">
+          <div class="menu-day-detail-meal-head">
+            <span>${type === "comida" ? "🍴" : "🌙"}</span>
+            <div>
+              <small>${getMealLabel(type)}</small>
+              <h3>Sin receta</h3>
+            </div>
+          </div>
+          <p>No hay ninguna receta asignada para este momento.</p>
+        </section>
+      `;
+    }
+
+    const meta = [];
+    if (recipe.servings) meta.push(`${recipe.servings} ración${recipe.servings === 1 ? "" : "es"}`);
+    if (recipe.prep_time) meta.push(`${recipe.prep_time} min preparación`);
+    if (recipe.cook_time) meta.push(`${recipe.cook_time} min cocción`);
+    if (recipe.temperature) meta.push(`${recipe.temperature} °C`);
+
+    return `
+      <section class="menu-day-detail-meal">
+        <div class="menu-day-detail-meal-head">
+          <span>${type === "comida" ? "🍴" : "🌙"}</span>
+          <div>
+            <small>${getMealLabel(type)}</small>
+            <h3>${escapeHtml(recipe.name)}</h3>
+          </div>
+          <div class="menu-day-detail-badges">
+            ${item.is_locked ? '<b class="menu-day-detail-lock">🔒 Fija</b>' : ""}
+            ${item.is_tupper ? '<b class="menu-day-detail-tupper">🥡 Tupper</b>' : ""}
+          </div>
+        </div>
+
+        ${recipe.description ? `<p class="menu-day-detail-description">${escapeHtml(recipe.description)}</p>` : ""}
+
+        ${meta.length ? `
+          <div class="menu-day-detail-meta">
+            ${meta.map(value => `<span>${escapeHtml(value)}</span>`).join("")}
+          </div>
+        ` : ""}
+
+        <div class="menu-day-detail-subsection">
+          <h4>Preparación</h4>
+          ${recipe.preparation
+            ? `<div class="menu-day-detail-preparation">${escapeHtml(recipe.preparation).replace(/\n/g, "<br>")}</div>`
+            : `<p class="menu-day-detail-muted">No hay preparación añadida.</p>`}
+        </div>
+
+        <div class="menu-day-detail-subsection">
+          <h4>Ingredientes</h4>
+          ${item.ingredients.length
+            ? `<div class="menu-day-detail-ingredients">${item.ingredients.map(ingredient => `
+                <div>
+                  <span>${escapeHtml(ingredient.ingredients?.name || "Ingrediente")}</span>
+                  <strong>${ingredient.quantity !== null && ingredient.quantity !== undefined ? escapeHtml(String(ingredient.quantity)) : ""} ${escapeHtml(ingredient.unit || "")}</strong>
+                </div>
+              `).join("")}</div>`
+            : `<p class="menu-day-detail-muted">No hay ingredientes añadidos.</p>`}
+        </div>
+
+        <div class="menu-day-detail-actions">
+          <button type="button" class="secondary menu-day-change-recipe" data-date="${date}" data-meal-type="${type}">↻ Cambiar comida</button>
+          <button type="button" class="secondary menu-day-toggle-tupper" data-date="${date}" data-meal-type="${type}">${item.is_tupper ? "✓ Es tupper" : "🥡 Marcar tupper"}</button>
+          <button type="button" class="secondary menu-day-open-recipe" data-recipe-id="${recipe.id}">Ver ficha completa</button>
+        </div>
+      </section>
+    `;
+  }).join("");
+
+  modal.innerHTML = `
+    <div class="menu-day-detail-overlay"></div>
+    <div class="menu-day-detail-box">
+      <div class="menu-day-detail-top">
+        <div>
+          <small>DETALLE DEL DÍA</small>
+          <h2>${escapeHtml(prettyDate)}</h2>
+        </div>
+        <button type="button" class="modal-close menu-day-detail-close">×</button>
+      </div>
+      <div class="menu-day-detail-grid">
+        ${mealHtml}
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary menu-day-detail-close-bottom">Cerrar</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const close = () => modal.remove();
+  modal.querySelector(".menu-day-detail-close").addEventListener("click", close);
+  modal.querySelector(".menu-day-detail-close-bottom").addEventListener("click", close);
+  modal.querySelector(".menu-day-detail-overlay").addEventListener("click", close);
+
+  modal.querySelectorAll(".menu-day-open-recipe").forEach(button => {
+    button.addEventListener("click", () => {
+      const recipeId = Number(button.dataset.recipeId);
+      close();
+      openRecipeDetail(recipeId);
+    });
+  });
+
+  modal.querySelectorAll(".menu-day-change-recipe").forEach(button => {
+    button.addEventListener("click", () => {
+      const dateValue = button.dataset.date;
+      const mealType = button.dataset.mealType;
+      close();
+      openMenuRecipePicker(dateValue, mealType);
+    });
+  });
+
+  modal.querySelectorAll(".menu-day-toggle-tupper").forEach(button => {
+    button.addEventListener("click", async () => {
+      await toggleMenuTupper(button.dataset.date, button.dataset.mealType);
+      close();
+      openMenuDayDetail(date);
+    });
+  });
+}
+
+async function getOrCreateMealPlan() {
+  const weekStart = dateToISO(menuWeekStart);
+
+  const { data: existing, error } = await supabaseClient
+    .from("meal_plans")
+    .select("id, week_start")
+    .eq("week_start", weekStart)
+    .limit(1);
+
+  if (error) return { plan: null, error };
+
+  if (existing?.[0]) {
+    return { plan: existing[0], error: null };
+  }
+
+  const { data, error: insertError } = await supabaseClient
+    .from("meal_plans")
+    .insert({ week_start: weekStart })
+    .select()
+    .single();
+
+  return { plan: data, error: insertError };
+}
+
+async function loadMenuRecipes() {
+  const { data, error } = await supabaseClient
+    .from("recipes")
+    .select("id, name, description, meal_types, do_not_suggest, fun_recipe, is_freezable")
+    .eq("do_not_suggest", false)
+    .order("name");
+
+  if (error) {
+    console.error("Error cargando recetas para menú:", error);
+    return [];
+  }
+
+  return data || [];
+}
+
+async function getCurrentMenuItem(date, mealType) {
+  const { data: plans, error: planError } = await supabaseClient
+    .from("meal_plans")
+    .select("id")
+    .eq("week_start", dateToISO(menuWeekStart))
+    .limit(1);
+
+  if (planError || !plans?.[0]) {
+    return { item: null, plan: null, error: planError };
+  }
+
+  const { data: items, error } = await supabaseClient
+    .from("meal_plan_items")
+    .select("id, recipe_id, is_locked, is_tupper")
+    .eq("meal_plan_id", plans[0].id)
+    .eq("date", date)
+    .eq("meal_type", mealType)
+    .limit(1);
+
+  return {
+    item: items?.[0] || null,
+    plan: plans[0],
+    error
+  };
+}
+
+async function openMenuRecipePicker(date, mealType) {
+  selectedMenuSlot = { date, mealType };
+
+  if (!menuRecipesCache.length) {
+    menuRecipesCache = await loadMenuRecipes();
+  }
+
+  const current = await getCurrentMenuItem(date, mealType);
+
+  if (current.error) {
+    console.error("Error leyendo el hueco del menú:", current.error);
+  }
+
+  document.querySelectorAll(".menu-picker-modal").forEach(modal => modal.remove());
+
+  const modal = document.createElement("div");
+  modal.className = "menu-picker-modal open";
+
+  const hasRecipe = !!current.item?.recipe_id;
+  const isLocked = !!current.item?.is_locked;
+
+  modal.innerHTML = `
+    <div class="menu-picker-overlay"></div>
+
+    <div class="menu-picker-box">
+      <div class="inventory-modal-header">
+        <div>
+          <small>${getMealLabel(mealType).toUpperCase()}</small>
+          <h2>Elegir receta</h2>
+          ${isLocked ? '<span class="menu-current-lock">🔒 Receta fijada</span>' : ""}
+        </div>
+        <button type="button" class="modal-close menu-picker-close">×</button>
+      </div>
+
+      <input
+        type="search"
+        class="menu-recipe-search"
+        placeholder="Buscar receta…"
+      >
+
+      <div class="menu-recipe-options"></div>
+
+      <div class="modal-actions menu-picker-actions">
+        <button type="button" class="secondary menu-remove-recipe">
+          Vaciar
+        </button>
+
+        ${
+          hasRecipe
+            ? `
+              <button type="button" class="secondary menu-lock-recipe">
+                ${isLocked ? "🔓 Desbloquear" : "🔒 Fijar receta"}
+              </button>
+            `
+            : ""
+        }
+
+        <button type="button" class="secondary menu-picker-cancel">
+          Cerrar
+        </button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const renderOptions = (query = "") => {
+    const text = query.trim().toLowerCase();
+
+    const recipes = menuRecipesCache.filter(recipe => {
+      const types = Array.isArray(recipe.meal_types) && recipe.meal_types.length
+        ? recipe.meal_types
+        : ["comida", "cena"];
+
+      const matchesMealType = types.includes(mealType);
+      const matchesSearch =
+        !text ||
+        recipe.name.toLowerCase().includes(text) ||
+        (recipe.description || "").toLowerCase().includes(text);
+
+      return matchesMealType && matchesSearch;
+    });
+
+    const container = modal.querySelector(".menu-recipe-options");
+
+    if (!recipes.length) {
+      container.innerHTML = `
+        <div class="products-empty">
+          <div>🔎</div>
+          <p>No se encontraron recetas.</p>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = recipes.map(recipe => `
+      <button
+        type="button"
+        class="menu-recipe-option"
+        data-id="${recipe.id}"
+      >
+        <strong>${escapeHtml(recipe.name)}</strong>
+        <span>${escapeHtml(recipe.description || "")}</span>
+      </button>
+    `).join("");
+
+    container.querySelectorAll(".menu-recipe-option").forEach(option => {
+      option.addEventListener("click", async () => {
+        await assignRecipeToMenu(
+          Number(option.dataset.id),
+          selectedMenuSlot.date,
+          selectedMenuSlot.mealType
+        );
+        modal.remove();
+      });
+    });
+  };
+
+  renderOptions();
+
+  modal.querySelector(".menu-recipe-search").addEventListener("input", event => {
+    renderOptions(event.target.value);
+  });
+
+  const close = () => modal.remove();
+
+  modal.querySelector(".menu-picker-close").addEventListener("click", close);
+  modal.querySelector(".menu-picker-cancel").addEventListener("click", close);
+  modal.querySelector(".menu-picker-overlay").addEventListener("click", close);
+
+  modal.querySelector(".menu-remove-recipe").addEventListener("click", async () => {
+    await removeRecipeFromMenu(
+      selectedMenuSlot.date,
+      selectedMenuSlot.mealType
+    );
+    modal.remove();
+  });
+
+  const lockButton = modal.querySelector(".menu-lock-recipe");
+  if (lockButton) {
+    lockButton.addEventListener("click", async () => {
+      await toggleMenuLock(
+        selectedMenuSlot.date,
+        selectedMenuSlot.mealType
+      );
+      modal.remove();
+    });
+  }
+}
+
+async function toggleMenuTupper(date, mealType) {
+  const current = await getCurrentMenuItem(date, mealType);
+
+  if (current.error) {
+    alert("No se pudo leer el estado del tupper.\n\n" + current.error.message);
+    return;
+  }
+
+  if (!current.item) return;
+
+  const { error } = await supabaseClient
+    .from("meal_plan_items")
+    .update({
+      is_tupper: !current.item.is_tupper
+    })
+    .eq("id", current.item.id);
+
+  if (error) {
+    console.error("Error cambiando tupper:", error);
+    alert("No se pudo cambiar el estado de tupper.\n\n" + error.message);
+    return;
+  }
+
+  await loadMenu();
+}
+
+async function toggleMenuLock(date, mealType) {
+  const current = await getCurrentMenuItem(date, mealType);
+
+  if (current.error) {
+    alert("No se pudo leer el estado de la receta.\n\n" + current.error.message);
+    return;
+  }
+
+  if (!current.item) return;
+
+  const { error } = await supabaseClient
+    .from("meal_plan_items")
+    .update({
+      is_locked: !current.item.is_locked
+    })
+    .eq("id", current.item.id);
+
+  if (error) {
+    console.error("Error cambiando bloqueo:", error);
+    alert("No se pudo cambiar el bloqueo.\n\n" + error.message);
+    return;
+  }
+
+  await loadMenu();
+}
+
+async function assignRecipeToMenu(recipeId, date, mealType) {
+  const { plan, error } = await getOrCreateMealPlan();
+
+  if (error) {
+    console.error("Error creando menú:", error);
+    alert("No se pudo preparar el menú.\n\n" + error.message);
+    return;
+  }
+
+  const { data: existing, error: existingError } = await supabaseClient
+    .from("meal_plan_items")
+    .select("id")
+    .eq("meal_plan_id", plan.id)
+    .eq("date", date)
+    .eq("meal_type", mealType)
+    .limit(1);
+
+  if (existingError) {
+    alert("No se pudo comprobar la comida.\n\n" + existingError.message);
+    return;
+  }
+
+  let saveError = null;
+
+  if (existing?.[0]) {
+    const result = await supabaseClient
+      .from("meal_plan_items")
+      .update({
+        recipe_id: recipeId
+      })
+      .eq("id", existing[0].id);
+
+    saveError = result.error;
+  } else {
+    const result = await supabaseClient
+      .from("meal_plan_items")
+      .insert({
+        meal_plan_id: plan.id,
+        date,
+        meal_type: mealType,
+        recipe_id: recipeId,
+        is_locked: true
+      });
+
+    saveError = result.error;
+  }
+
+  if (saveError) {
+    console.error("Error guardando comida:", saveError);
+    alert("No se pudo guardar la receta en el menú.\n\n" + saveError.message);
+    return;
+  }
+
+  await loadMenu();
+}
+
+async function removeRecipeFromMenu(date, mealType) {
+  const { data: plans, error: planError } = await supabaseClient
+    .from("meal_plans")
+    .select("id")
+    .eq("week_start", dateToISO(menuWeekStart))
+    .limit(1);
+
+  if (planError || !plans?.[0]) return;
+
+  const { error } = await supabaseClient
+    .from("meal_plan_items")
+    .delete()
+    .eq("meal_plan_id", plans[0].id)
+    .eq("date", date)
+    .eq("meal_type", mealType);
+
+  if (error) {
+    console.error("Error eliminando comida:", error);
+    alert("No se pudo vaciar ese hueco del menú.\n\n" + error.message);
+    return;
+  }
+
+  await loadMenu();
+}
+
+
+
+/* =========================================================
+   REPASO SEMANAL DE INVENTARIO
+   ========================================================= */
+
+function formatInventoryReviewLocation(location) {
+  return location === "congelador" ? "🧊 Congelador" : "🥫 Despensa";
+}
+
+function getInventoryReviewWeekLabel(weekStart) {
+  const end = addDays(weekStart, 6);
+  return `${weekStart.toLocaleDateString("es-ES", { day: "numeric", month: "short" })} – ${end.toLocaleDateString("es-ES", { day: "numeric", month: "short" })}`;
+}
+
+async function getInventoryUsageForWeek(weekStart) {
+  const weekISO = dateToISO(weekStart);
+
+  const { data: plans, error: planError } = await supabaseClient
+    .from("meal_plans")
+    .select("id")
+    .eq("week_start", weekISO)
+    .limit(1);
+
+  if (planError) throw planError;
+
+  const plan = plans?.[0];
+  if (!plan) return { items: [], hasMenu: false };
+
+  const { data: menuItems, error: menuError } = await supabaseClient
+    .from("meal_plan_items")
+    .select("recipe_id")
+    .eq("meal_plan_id", plan.id)
+    .in("meal_type", ["comida", "cena"])
+    .not("recipe_id", "is", null);
+
+  if (menuError) throw menuError;
+
+  const recipeIds = [...new Set((menuItems || []).map(item => item.recipe_id).filter(Boolean))];
+  if (!recipeIds.length) return { items: [], hasMenu: true };
+
+  const { data: recipeIngredients, error: recipeIngredientsError } = await supabaseClient
+    .from("recipe_ingredients")
+    .select(`
+      recipe_id,
+      quantity,
+      unit,
+      ingredients (
+        id,
+        name,
+        default_unit
+      )
+    `)
+    .in("recipe_id", recipeIds);
+
+  if (recipeIngredientsError) throw recipeIngredientsError;
+
+  const requirements = new Map();
+
+  for (const row of recipeIngredients || []) {
+    const ingredient = row.ingredients;
+    if (!ingredient?.id) continue;
+
+    const quantity = row.quantity === null || row.quantity === undefined ? null : Number(row.quantity);
+    const unit = row.unit || ingredient.default_unit || "unidad";
+    const unitInfo = shoppingUnitInfo(unit);
+    const key = `${ingredient.id}::${unitInfo.group}`;
+
+    if (!requirements.has(key)) {
+      requirements.set(key, {
+        ingredientId: ingredient.id,
+        name: ingredient.name,
+        quantity,
+        unit,
+        unitInfo,
+        unknownQuantity: quantity === null
+      });
+    } else {
+      const current = requirements.get(key);
+      if (quantity === null || current.quantity === null) {
+        current.quantity = null;
+        current.unknownQuantity = true;
+      } else {
+        current.quantity += quantity;
+      }
+    }
+  }
+
+  const { data: inventory, error: inventoryError } = await supabaseClient
+    .from("inventory")
+    .select(`
+      id,
+      ingredient_id,
+      quantity,
+      unit,
+      location,
+      notes,
+      created_at,
+      ingredients (name)
+    `)
+    .in("location", ["despensa", "congelador"])
+    .order("created_at", { ascending: true });
+
+  if (inventoryError) throw inventoryError;
+
+  const rows = [];
+
+  for (const item of inventory || []) {
+    const name = item.ingredients?.name || "Producto";
+    const unit = item.unit || "unidad";
+    const unitInfo = shoppingUnitInfo(unit);
+    const key = `${item.ingredient_id}::${unitInfo.group}`;
+    const requirement = requirements.get(key);
+    if (!requirement) continue;
+
+    const inventoryQuantity = item.quantity === null || item.quantity === undefined ? null : Number(item.quantity);
+    let usedQuantity = null;
+    let remainingQuantity = null;
+
+    if (inventoryQuantity !== null && requirement.quantity !== null) {
+      const inventoryBase = inventoryQuantity * unitInfo.factor;
+      const requiredBase = requirement.quantity * requirement.unitInfo.factor;
+      const usedBase = Math.min(inventoryBase, requiredBase);
+      usedQuantity = usedBase / unitInfo.factor;
+      remainingQuantity = Math.max(0, inventoryBase - usedBase) / unitInfo.factor;
+      requirement.quantity = Math.max(0, requirement.quantity - (usedBase / requirement.unitInfo.factor));
+    }
+
+    rows.push({
+      id: item.id,
+      name,
+      location: item.location,
+      currentQuantity: inventoryQuantity,
+      unit,
+      usedQuantity,
+      remainingQuantity,
+      unknownQuantity: requirement.unknownQuantity
+    });
+  }
+
+  return { items: rows, hasMenu: true };
+}
+
+function inventoryReviewAmount(quantity, unit) {
+  if (quantity === null || quantity === undefined) return "Cantidad no calculable";
+  return formatShoppingAmount(Number(quantity), unit);
+}
+
+function renderInventoryUsageReview(weekStart, items) {
+  document.querySelectorAll(".inventory-review-modal").forEach(modal => modal.remove());
+
+  const modal = document.createElement("div");
+  modal.className = "inventory-review-modal open";
+
+  const grouped = {
+    despensa: items.filter(item => item.location === "despensa"),
+    congelador: items.filter(item => item.location === "congelador")
+  };
+
+  const renderGroup = (location, label) => {
+    const group = grouped[location];
+    if (!group.length) {
+      return `
+        <section class="inventory-review-section">
+          <div class="inventory-review-section-head">
+            <h3>${label}</h3>
+            <span>Sin productos usados</span>
+          </div>
+          <div class="inventory-review-empty">No se han detectado productos de esta zona usados por el menú.</div>
+        </section>
+      `;
+    }
+
+    return `
+      <section class="inventory-review-section">
+        <div class="inventory-review-section-head">
+          <h3>${label}</h3>
+          <span>${group.length} ${group.length === 1 ? "entrada" : "entradas"}</span>
+        </div>
+        <div class="inventory-review-items">
+          ${group.map(item => `
+            <div class="inventory-review-item" data-inventory-id="${item.id}">
+              <div class="inventory-review-main">
+                <strong>${escapeHtml(item.name)}</strong>
+                <span>Tenías: <b>${escapeHtml(inventoryReviewAmount(item.currentQuantity, item.unit))}</b></span>
+                <span>Uso estimado: <b>${item.usedQuantity === null ? "según receta" : escapeHtml(inventoryReviewAmount(item.usedQuantity, item.unit))}</b></span>
+                ${item.usedQuantity !== null && item.remainingQuantity !== null
+                  ? `<span>Resto estimado: <b>${escapeHtml(inventoryReviewAmount(item.remainingQuantity, item.unit))}</b></span>`
+                  : ""}
+              </div>
+              <div class="inventory-review-actions">
+                <button type="button" class="secondary inventory-review-ignore" data-id="${item.id}">Aún queda</button>
+                <button type="button" class="primary inventory-review-finish" data-id="${item.id}">✓ Marcar terminado</button>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      </section>
+    `;
+  };
+
+  modal.innerHTML = `
+    <div class="inventory-review-overlay"></div>
+    <div class="inventory-review-box">
+      <div class="inventory-modal-header">
+        <div>
+          <small>REPASO SEMANAL</small>
+          <h2>¿Qué se ha terminado?</h2>
+          <p class="inventory-review-week">Semana ${escapeHtml(getInventoryReviewWeekLabel(weekStart))}</p>
+        </div>
+        <button type="button" class="modal-close inventory-review-close">×</button>
+      </div>
+      <div class="inventory-review-help">
+        ARA cruza las recetas del menú con tu despensa y congelador. La cantidad usada es una estimación según las cantidades de las recetas. Pulsa <strong>✓ Marcar terminado</strong> solo en aquello que realmente se haya acabado. “Aún queda” deja la entrada sin cambios.
+      </div>
+      <div class="inventory-review-content">
+        ${renderGroup("despensa", "🥫 Despensa")}
+        ${renderGroup("congelador", "🧊 Congelador")}
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary inventory-review-close-button">Cerrar</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  const close = () => modal.remove();
+  modal.querySelector(".inventory-review-overlay").addEventListener("click", close);
+  modal.querySelector(".inventory-review-close").addEventListener("click", close);
+  modal.querySelector(".inventory-review-close-button").addEventListener("click", close);
+
+  modal.querySelectorAll(".inventory-review-ignore").forEach(button => {
+    button.addEventListener("click", () => {
+      const row = modal.querySelector(`.inventory-review-item[data-inventory-id="${button.dataset.id}"]`);
+      if (row) {
+        row.classList.add("is-kept");
+        button.disabled = true;
+        button.textContent = "✓ Se mantiene";
+      }
+    });
+  });
+
+  modal.querySelectorAll(".inventory-review-finish").forEach(button => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "Eliminando…";
+
+      const { error } = await supabaseClient
+        .from("inventory")
+        .delete()
+        .eq("id", Number(button.dataset.id));
+
+      if (error) {
+        console.error("Error marcando inventario como terminado:", error);
+        button.disabled = false;
+        button.textContent = "✓ Marcar terminado";
+        alert("No se pudo marcar como terminado.\n\n" + error.message);
+        return;
+      }
+
+      const row = modal.querySelector(`.inventory-review-item[data-inventory-id="${button.dataset.id}"]`);
+      if (row) {
+        const name = row.querySelector(".inventory-review-main strong")?.textContent || "Producto";
+        row.classList.add("is-finished");
+        row.innerHTML = `<div class="inventory-review-finished">✅ <strong>${escapeHtml(name)}</strong> marcado como terminado y eliminado del inventario.</div>`;
+      }
+
+      if (typeof loadInventory === "function") await loadInventory();
+      if (typeof loadHomeDashboard === "function") await loadHomeDashboard();
+    });
+  });
+}
+
+async function openInventoryUsageReview(weekStart = menuWeekStart) {
+  const button = document.querySelector("#menu .menu-inventory-review-button");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Cargando…";
+  }
+
+  try {
+    const result = await getInventoryUsageForWeek(weekStart);
+    if (!result.hasMenu) {
+      alert("No hay menú guardado para esa semana.");
+      return;
+    }
+    if (!result.items.length) {
+      alert("No he encontrado productos de despensa o congelador usados por el menú de esa semana.");
+      return;
+    }
+    renderInventoryUsageReview(weekStart, result.items);
+  } catch (error) {
+    console.error("Error preparando el repaso de inventario:", error);
+    alert("No se pudo preparar el repaso de inventario.\n\n" + (error.message || "Error desconocido"));
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "📦 Repasar inventario";
+    }
+  }
+}
+
+function setupInventoryReviewPrompt() {
+  const prompt = document.getElementById("inventory-review-prompt");
+  const button = document.getElementById("menu-review-inventory-button");
+  if (!prompt || !button) return;
+
+  const day = new Date().getDay();
+  if (day !== 0 && day !== 1) {
+    prompt.hidden = true;
+    return;
+  }
+
+  const previousWeek = addDays(getMonday(new Date()), -7);
+  prompt.hidden = false;
+  button.onclick = () => openInventoryUsageReview(previousWeek);
+}
+
+window.openInventoryUsageReview = openInventoryUsageReview;
+
+
+/* =========================================================
+   GENERADOR AUTOMÁTICO DE MENÚ
+   ========================================================= */
+
+async function generateWeeklyMenu() {
+  const button = document.querySelector("#menu .page-head .primary");
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Generando…";
+  }
+
+  try {
+    const { plan, error: planError } = await getOrCreateMealPlan();
+
+    if (planError) {
+      throw planError;
+    }
+
+    const { data: existingItems, error: itemsError } = await supabaseClient
+      .from("meal_plan_items")
+      .select(`
+        id,
+        date,
+        meal_type,
+        recipe_id,
+        is_locked,
+        is_tupper,
+        recipes (
+          id,
+          name,
+          meal_types,
+          do_not_suggest,
+          fun_recipe
+        )
+      `)
+      .eq("meal_plan_id", plan.id);
+
+    if (itemsError) {
+      throw itemsError;
+    }
+
+    const { data: recipes, error: recipesError } = await supabaseClient
+      .from("recipes")
+      .select(`
+        id,
+        name,
+        meal_types,
+        do_not_suggest,
+        fun_recipe
+      `)
+      .eq("do_not_suggest", false)
+      .order("name");
+
+    if (recipesError) {
+      throw recipesError;
+    }
+
+    const allRecipes = recipes || [];
+    const items = existingItems || [];
+
+    const usedRecipeIds = new Set(
+      items
+        .filter(item => item.recipe_id && item.is_locked)
+        .map(item => item.recipe_id)
+    );
+
+    const slots = [];
+
+    for (let dayIndex = 0; dayIndex < 7; dayIndex++) {
+      const date = dateToISO(addDays(menuWeekStart, dayIndex));
+
+      for (const mealType of ["comida", "cena"]) {
+        const existing = items.find(item =>
+          item.date === date && item.meal_type === mealType
+        );
+
+        if (existing?.is_locked) continue;
+
+        slots.push({
+          date,
+          mealType,
+          existingId: existing?.id || null,
+          dayIndex
+        });
+      }
+    }
+
+    if (!slots.length) {
+      alert("Todas las comidas de esta semana están fijadas 🔒.");
+      return;
+    }
+
+    // Rellenamos primero las cenas de miércoles y viernes para dar
+    // prioridad a las recetas marcadas como "divertidas".
+    slots.sort((a, b) => {
+      const score = slot => (
+        slot.mealType === "cena" && (slot.dayIndex === 2 || slot.dayIndex === 4)
+          ? 0
+          : 1
+      );
+
+      return score(a) - score(b);
+    });
+
+    const selected = [];
+
+    for (const slot of slots) {
+      const compatible = allRecipes.filter(recipe => {
+        const mealTypes = Array.isArray(recipe.meal_types) && recipe.meal_types.length
+          ? recipe.meal_types
+          : ["comida", "cena"];
+
+        return mealTypes.includes(slot.mealType)
+          && !usedRecipeIds.has(recipe.id);
+      });
+
+      let candidates = compatible;
+
+      const isFunDinner =
+        slot.mealType === "cena" &&
+        (slot.dayIndex === 2 || slot.dayIndex === 4);
+
+      if (isFunDinner) {
+        const funCandidates = compatible.filter(recipe => recipe.fun_recipe);
+
+        if (funCandidates.length) {
+          candidates = funCandidates;
+        }
+      }
+
+      if (!candidates.length) {
+        // Si ya no quedan recetas distintas, permitimos repetir solo entre
+        // recetas compatibles para poder completar el menú.
+        candidates = allRecipes.filter(recipe => {
+          const mealTypes = Array.isArray(recipe.meal_types) && recipe.meal_types.length
+            ? recipe.meal_types
+            : ["comida", "cena"];
+
+          return mealTypes.includes(slot.mealType);
+        });
+      }
+
+      if (!candidates.length) continue;
+
+      // Evitar repetir dentro de la misma ejecución siempre que haya opciones.
+      const notSelectedThisRun = candidates.filter(
+        recipe => !selected.some(item => item.id === recipe.id)
+      );
+
+      const pool = notSelectedThisRun.length ? notSelectedThisRun : candidates;
+      const chosen = pool[Math.floor(Math.random() * pool.length)];
+
+      usedRecipeIds.add(chosen.id);
+      selected.push(chosen);
+
+      if (slot.existingId) {
+        const { error } = await supabaseClient
+          .from("meal_plan_items")
+          .update({
+            recipe_id: chosen.id,
+            is_locked: false
+          })
+          .eq("id", slot.existingId);
+
+        if (error) throw error;
+      } else {
+        const { error } = await supabaseClient
+          .from("meal_plan_items")
+          .insert({
+            meal_plan_id: plan.id,
+            date: slot.date,
+            meal_type: slot.mealType,
+            recipe_id: chosen.id,
+            is_locked: false,
+            is_tupper: false
+          });
+
+        if (error) throw error;
+      }
+    }
+
+    await loadMenu();
+  } catch (error) {
+    console.error("Error generando menú:", error);
+    alert("No se pudo generar el menú.\n\n" + (error.message || "Error desconocido"));
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "✦ Generar menú";
+    }
+  }
+}
+
+function setupMenuControls() {
+  const menuPage = document.getElementById("menu");
+  if (!menuPage) return;
+
+  setupInventoryReviewPrompt();
+
+  const generateButton = menuPage.querySelector(".menu-generate-button");
+  if (generateButton) {
+    generateButton.textContent = "✦ Generar menú";
+    generateButton.onclick = generateWeeklyMenu;
+  }
+
+  const previousButton = document.getElementById("menu-prev-week");
+  if (previousButton) previousButton.onclick = () => changeMenuWeek(-1);
+
+  const nextButton = document.getElementById("menu-next-week");
+  if (nextButton) nextButton.onclick = () => changeMenuWeek(1);
+
+  const currentButton = document.getElementById("menu-current-week");
+  if (currentButton) currentButton.onclick = goToCurrentMenuWeek;
+
+  updateMenuWeekNavigation();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  setupMenuControls();
+  loadMenu();
 });
 
-// When the PWA is resumed on mobile (or the tab regains focus), refresh from
-// Supabase. Wait for pending writes first, then read the latest cloud state.
-let cloudRefreshBusy=false;
-async function refreshCloudOnResume(){
- if(!supabaseClient||!currentUser||cloudRefreshBusy||cloudLocalDirty||menuLocalDirty)return;
- cloudRefreshBusy=true;
- try{
-  await cloudWriteChain;
-  await loadAllFromCloud();
-  applyAppearance();render();
- }catch(err){
-  console.error('Error actualizando desde la nube',err);
-  state.cloudSyncError=String(err?.message||err||'Error de sincronización');
-  setSyncStatus('error');
- }finally{cloudRefreshBusy=false}
-}
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshCloudOnResume()});
-window.addEventListener('focus',()=>void refreshCloudOnResume());
-window.addEventListener('pageshow',()=>void refreshCloudOnResume());
+/* =========================================================
+   LISTA DE COMPRA
+   ========================================================= */
 
-// Cross-device sync: when both devices remain open, refresh periodically.
-// It is deliberately gentle and NEVER reads while there are local changes pending.
-let cloudPollingStarted=false;
-function startCloudPolling(){
- if(cloudPollingStarted)return;
- cloudPollingStarted=true;
- setInterval(()=>{
-  if(document.hidden||cloudLocalDirty||menuLocalDirty||cloudRefreshBusy||!currentUser)return;
-  void refreshCloudOnResume();
- },15000);
+const SHOPPING_GENERATED_PREFIX = "__ARA_GENERATED__:";
+
+function getShoppingGeneratedNote() {
+  return SHOPPING_GENERATED_PREFIX + dateToISO(menuWeekStart);
 }
 
-// Keep the current device connected to changes made on another device.
-// This is intentionally 15s rather than the old 5s polling.
-startCloudPolling();
+function shoppingUnitInfo(unit) {
+  const raw = String(unit || "").trim().toLowerCase();
 
-}
-const KEY='mis_cosas_';
-function normalizeCleaningArray(value){
- if(!Array.isArray(value))return [];
- return value.filter(x=>x&&typeof x==='object'&&String(x.name||'').trim()).map(x=>({...x,completed:x.completed&&typeof x.completed==='object'?x.completed:{}}));
-}
-const state={
- view:'home',
- tasks:JSON.parse(localStorage.getItem(KEY+'tasks')||'[]'),
- expenses:JSON.parse(localStorage.getItem(KEY+'expenses')||'[]'),
- transactions:JSON.parse(localStorage.getItem(KEY+'transactions')||'[]'),
- accounts:JSON.parse(localStorage.getItem(KEY+'accounts')||'null')||null,
- budgets:JSON.parse(localStorage.getItem(KEY+'budgets')||'[]'),
- events:JSON.parse(localStorage.getItem(KEY+'events')||'[]'),
- habits:JSON.parse(localStorage.getItem(KEY+'habits')||'[]'),
- cleaning:normalizeCleaningArray(JSON.parse(localStorage.getItem(KEY+'cleaning')||'[]')),
- recipes:JSON.parse(localStorage.getItem(KEY+'recipes')||'[]'),
- inventory:JSON.parse(localStorage.getItem(KEY+'inventory')||'[]'),
- preparations:JSON.parse(localStorage.getItem(KEY+'preparations')||'[]'),
- shoppingChecks:JSON.parse(localStorage.getItem(KEY+'shoppingChecks')||'{}'),
- prepDone:JSON.parse(localStorage.getItem(KEY+'prepDone')||'{}'),
- menu:JSON.parse(localStorage.getItem(KEY+'menu')||'null')||null,
- menuHistory:JSON.parse(localStorage.getItem(KEY+'menuHistory')||'[]'),
- calendarMonth:localStorage.getItem(KEY+'calendarMonth')||`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`
-};
-const cats={Casa:'#ab858f',Cumpleaños:'#a0acb9',Familia:'#9ebdb8',Médico:'#b3ad8c','Médicos familia':'#67a48b',Otros:'#7f9a7d',Social:'#9998b1',Vacaciones:'#cbafab',Viajes:'#9cabc8'};
-const habitColors=['#7F9A7D','#9CABC8','#A0ACB9','#9EBDB8','#B3AD8C','#CBAFAB','#9998B1','#8F9E92'];
-const foodTypes=['Comida','Cena','Desayuno','Merienda','Dulce','Pan','Preparación'];
-function recipeTypes(r){
- const raw=Array.isArray(r?.types)?r.types:(r?.type?[r.type]:[]);
- return raw.map(x=>({Comidas:'Comida',Cenas:'Cena',Dulces:'Dulce',Preparaciones:'Preparación'}[x]||x)).filter(Boolean);
-}
-function hasRecipeType(r,type){return recipeTypes(r).includes(type)}
-function currentFoodSeason(){const m=new Date().getMonth()+1;if(m>=6&&m<=9)return 'Verano';if(m===12||m<=2)return 'Invierno';return 'Intermedio'}
-function recipeInCurrentSeason(r){const seasons=Array.isArray(r?.seasons)?r.seasons:[];if(!seasons.length||seasons.includes('Todo el año'))return true;const current=currentFoodSeason();if(current==='Intermedio')return true;return seasons.includes(current)}
-function recipeTypeLabel(r){return recipeTypes(r).join(' · ')||'Receta'}
-function normalizeRecipes(){state.recipes=state.recipes.map(r=>{const types=recipeTypes(r);const seasons=Array.isArray(r.seasons)?r.seasons:[];const preparationIds=Array.isArray(r.preparationIds)?r.preparationIds.map(String):[];return {...r,types,seasons,preparationIds}});linkRecipePreparations()}
-function prepNorm(s=''){return normalizeIngredient(String(s||'')).replace(/\bcasera?\b/g,'').replace(/\bpara monsieur cuisine\b/g,'').replace(/\bmonsieur cuisine\b/g,'').replace(/\s+/g,' ').trim()}
-function recipePreparationText(r){return [r?.name,r?.description,r?.steps,r?.pairs,r?.ingredientsText,Array.isArray(r?.ingredients)?r.ingredients.map(i=>i?.ingredient).join(' '):''].filter(Boolean).join(' ')}
-function autoPreparationIdsForRecipe(r){
- const text=prepNorm(recipePreparationText(r)); if(!text||!state.preparations?.length)return []; const ids=[];
- state.preparations.forEach(p=>{
-  const pn=prepNorm(p.name);
-  if(pn&&text.includes(pn)) ids.push(String(p.id));
-  const uses=String(p.use||'').toLowerCase().split(',').map(x=>normalizeIngredient(x).trim()).filter(x=>x.length>=4);
-  if(uses.some(u=>normalizeIngredient(r?.name||'').includes(u))) ids.push(String(p.id));
- });
- return [...new Set(ids)];
-}
-function linkRecipePreparations(){
- state.recipes=state.recipes.map(r=>{
-  const explicit=Array.isArray(r.preparationIds)?r.preparationIds.map(String).filter(id=>state.preparations.some(p=>String(p.id)===id)):[];
-  return {...r,preparationIds:[...new Set(explicit)]};
- });
+  if (!raw) return { group: "unknown", factor: 1, label: "" };
+
+  const aliases = {
+    "g": { group: "weight", factor: 1, label: "g" },
+    "gramo": { group: "weight", factor: 1, label: "g" },
+    "gramos": { group: "weight", factor: 1, label: "g" },
+    "kg": { group: "weight", factor: 1000, label: "g" },
+    "kilo": { group: "weight", factor: 1000, label: "g" },
+    "kilos": { group: "weight", factor: 1000, label: "g" },
+    "ml": { group: "volume", factor: 1, label: "ml" },
+    "mililitro": { group: "volume", factor: 1, label: "ml" },
+    "mililitros": { group: "volume", factor: 1, label: "ml" },
+    "l": { group: "volume", factor: 1000, label: "ml" },
+    "litro": { group: "volume", factor: 1000, label: "ml" },
+    "litros": { group: "volume", factor: 1000, label: "ml" },
+    "unidad": { group: "count", factor: 1, label: "unidad" },
+    "unidades": { group: "count", factor: 1, label: "unidad" },
+    "ud": { group: "count", factor: 1, label: "unidad" },
+    "uds": { group: "count", factor: 1, label: "unidad" },
+    "u": { group: "count", factor: 1, label: "unidad" },
+    "cucharadita": { group: "teaspoon", factor: 1, label: "cucharadita" },
+    "cucharaditas": { group: "teaspoon", factor: 1, label: "cucharadita" },
+    "cucharada": { group: "tablespoon", factor: 1, label: "cucharada" },
+    "cucharadas": { group: "tablespoon", factor: 1, label: "cucharada" },
+    "pizca": { group: "pinch", factor: 1, label: "pizca" },
+    "pizcas": { group: "pinch", factor: 1, label: "pizca" },
+    "paquete": { group: "package", factor: 1, label: "paquete" },
+    "paquetes": { group: "package", factor: 1, label: "paquete" },
+    "bote": { group: "jar", factor: 1, label: "bote" },
+    "botes": { group: "jar", factor: 1, label: "bote" },
+    "lata": { group: "can", factor: 1, label: "lata" },
+    "latas": { group: "can", factor: 1, label: "lata" },
+    "ración": { group: "portion", factor: 1, label: "ración" },
+    "raciones": { group: "portion", factor: 1, label: "ración" }
+  };
+
+  return aliases[raw] || { group: raw, factor: 1, label: unit };
 }
 
+function formatShoppingNumber(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "";
+  const number = Number(value);
 
+  if (Number.isInteger(number)) return String(number);
 
-// V83 recipe/preparation audit.
-// The catalog below is a correction layer for the recipes previously supplied in Mis cosas.
-// It updates only recipes with a known stable ID, preserving user-specific flags such as
-// favorites and "receta divertida". Preparation IDs are also repaired by canonical name so
-// an older preparation dataset cannot make a recipe point to the wrong preparation.
-function normalizeAuditName(s=''){
- return normalizeIngredient(String(s||'')).replace(/\b(casero|casera|basico|basica|suave|individual|para bowls y wraps|en monsieur cuisine)\b/g,'').replace(/\s+/g,' ').trim();
+  return number
+    .toFixed(2)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "")
+    .replace(".", ",");
 }
-function auditPrepCanonicalize(){
- const catalog=Array.isArray(window.MIS_COSAS_CANONICAL_PREPARATIONS_V83)?window.MIS_COSAS_CANONICAL_PREPARATIONS_V83:[];
- if(!catalog.length)return false;
- let changed=false;
- const byName=new Map(state.preparations.map(p=>[normalizeIngredient(p?.name||''),p]));
- const usedIds=new Set(state.preparations.map(p=>String(p.id)));
- const idRemap=new Map();
- const next=[];
- // First align known preparations by name. If a canonical ID is occupied by a different
- // custom preparation, move that custom item to a UUID rather than overwriting it.
- for(const canonical of catalog){
-  const key=normalizeIngredient(canonical.name||'');
-  let existing=byName.get(key);
-  if(existing){
-   const oldId=String(existing.id), newId=String(canonical.id);
-   if(oldId!==newId){
-    if(usedIds.has(newId)){
-     const occupant=state.preparations.find(p=>String(p.id)===newId && p!==existing);
-     if(occupant && !catalog.some(c=>String(c.id)===String(occupant.id) && normalizeIngredient(c.name||'')===normalizeIngredient(occupant.name||''))){
-      occupant.id=crypto.randomUUID();
-      usedIds.delete(newId); usedIds.add(String(occupant.id)); changed=true;
-     }
+
+function formatShoppingAmount(quantity, unit) {
+  if (quantity === null || quantity === undefined) return "";
+
+  const unitInfo = shoppingUnitInfo(unit);
+  let displayQuantity = Number(quantity);
+  let displayUnit = unit || unitInfo.label || "";
+
+  if (unitInfo.group === "weight" && unitInfo.label === "g") {
+    if (displayQuantity >= 1000) {
+      displayQuantity /= 1000;
+      displayUnit = "kg";
+    } else {
+      displayUnit = "g";
     }
-    idRemap.set(oldId,newId); existing.id=newId; changed=true;
-   }
-   // Restore missing canonical recipe/preparation detail without overwriting edits the user made.
-   ['quantity','use','freezable','ingredients','ingredientsText','steps','description'].forEach(k=>{
-    if((existing[k]===undefined||existing[k]===null||existing[k]==='') && canonical[k]!==undefined){existing[k]=canonical[k];changed=true;}
-   });
-  }else{
-   const copy=JSON.parse(JSON.stringify(canonical));
-   if(usedIds.has(String(copy.id)))copy.id=crypto.randomUUID();
-   state.preparations.push(copy);usedIds.add(String(copy.id));byName.set(key,copy);changed=true;
   }
- }
- // Rewrite prepDone keys if an old ID was remapped.
- if(idRemap.size){
-  const done={};
-  Object.entries(state.prepDone||{}).forEach(([id,v])=>{done[idRemap.get(String(id))||String(id)]=v});
-  state.prepDone=done;
-  state.recipes=state.recipes.map(r=>({...r,preparationIds:(Array.isArray(r.preparationIds)?r.preparationIds:[]).map(id=>idRemap.get(String(id))||String(id))}));
- }
- return changed;
-}
-function auditRecipeCorrections(){
- const catalog=Array.isArray(window.MIS_COSAS_RECIPE_AUDIT_V83)?window.MIS_COSAS_RECIPE_AUDIT_V83:[];
- if(!catalog.length)return false;
- const byId=new Map(catalog.map(r=>[String(r.id),r]));
- let changed=false;
- state.recipes=state.recipes.map(r=>{
-  const c=byId.get(String(r.id)); if(!c)return r;
-  const next={...r};
-  ['name','types','seasons','time','servings','ingredients','ingredientsText','steps','description','pairs','preparationIds','method'].forEach(k=>{
-   if(c[k]!==undefined && JSON.stringify(next[k])!==JSON.stringify(c[k])){next[k]=JSON.parse(JSON.stringify(c[k]));changed=true;}
-  });
-  // Preserve user-controlled flags.
-  return next;
- });
- return changed;
-}
-async function runRecipeAuditV83(){
- if(localStorage.getItem(KEY+'recipeAuditVersion')==='84')return false;
- const prepChanged=auditPrepCanonicalize();
- const recipeChanged=auditRecipeCorrections();
- normalizeRecipes();
- localCacheFromState();
- localStorage.setItem(KEY+'recipeAuditVersion','84');
- if((prepChanged||recipeChanged)&&supabaseClient&&currentUser&&foodModulesReady){
-  try{
-   if(prepChanged)await syncFoodModule('preparations',state.preparations);
-   if(recipeChanged||prepChanged)await syncFoodModule('recipes',state.recipes);
-   if(prepChanged)await syncFoodModule('prepDone',state.prepDone);
-  }catch(err){console.error('Error guardando auditoría V83',err)}
- }
- return prepChanged||recipeChanged;
-}
-const fmt=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(n||0);
-const todayKey=()=>{const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};
-const today=new Date();
-let habitSelectedDate=todayKey();
-function save(){cloudChangeRevision++;cloudLocalDirty=true;localCacheFromState();queueCloudSave()}
-function go(v){state.view=v;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));render()}
-function render(){
- const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],cleaning:['Limpieza','Rutinas diarias, semanales y periódicas'],settings:['Ajustes','Configura la aplicación']};
- document.querySelector('#pageTitle').textContent=names[state.view][0];document.querySelector('#pageSubtitle').textContent=names[state.view][1];
- const viewFn={home,tasks,expenses,food,calendar,habits,cleaning,settings}[state.view]||home;viewFn(document.querySelector('#content'));
-}
-function home(c){
- const d=today.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'}),pending=state.tasks.filter(x=>!x.done).length;
- const spent=state.transactions.filter(x=>x.type==='expense'&&sameMonth(x.date)).reduce((a,x)=>a+Number(x.amount||0),0);
- c.innerHTML=`<div class="grid">
- <div class="card span-12 home-calendar-card"><div class="home-calendar-wrap"></div></div>
- <div class="card span-4"><div class="row"><h3>Ahora</h3><span class="badge">${pending}</span></div><div class="list compact"><div class="item"><b>${pending}</b> tareas pendientes</div>${homePendingTasks()}<div class="item">${todayHabitsSummary()}</div></div><button class="primary" onclick="go('tasks')">Ver tareas</button></div>
- <div class="card span-4"><h3>Tareas</h3><div class="metric">${pending}</div><span class="muted">pendientes</span></div>
- <div class="card span-4"><h3>Gastos este mes</h3><div class="metric">${fmt(spent)}</div><span class="muted">de momento</span></div>
- <div class="card span-8 home-food-card"><div class="row"><div><h3>Comidas</h3><span class="muted">Tu menú y tus recetas, a mano.</span></div><button class="secondary small" onclick="go('food')">Ver Comidas</button></div><div class="home-food-content">${homeTodayMeal()}${homeRecipes()}</div></div>
- <div class="card span-4 home-sweet-card"><div class="row"><div><h3>🍰 Dulce de la semana</h3><span class="muted">Una vez esta semana</span></div><button class="secondary small" onclick="go('food')">Comidas</button></div>${state.menu?.sweet?menuRecipeTitle(state.menu.sweet,'home-menu-recipe-title',state.menu.sweetId):'<span class="muted">Genera un menú para elegirlo.</span>'}</div><div class="card span-4 home-prep-card"><div class="row"><div><h3>Preparar esta semana</h3><span class="muted">${state.menu?`${menuPreparations().filter(x=>!state.prepDone[x.id]).length} pendientes`:'Según el menú'}</span></div><button class="secondary small" onclick="go('food')">Comidas</button></div>${homePreparations()}</div>
- <div class="card span-12"><div class="row"><div><h3>Hábitos de hoy</h3><span class="muted">Toca el botón para marcar cada hábito.</span></div><button class="secondary" onclick="go('habits')">Gestionar hábitos</button></div><div class="habit-home-grid">${habitButtons()}</div></div>
- </div>`;
- renderHomeCalendar(c.querySelector('.home-calendar-wrap'));
-}
-function homeTodayMeal(){
- const menu=state.menu?.days;
- if(!menu)return '<div class="home-food-empty">Todavía no tienes un menú semanal. <button class="text-button" onclick="go(\'food\')">Ir a Comidas →</button></div>';
- const i=(today.getDay()+6)%7, day=menu[i];
- if(!day)return '<div class="home-food-empty">Todavía no hay menú para hoy.</div>';
- return `<div class="home-today-meal"><div class="eyebrow">Hoy</div><div><span>Comida</span>${day.lunch?menuRecipeTitle(day.lunch,'home-menu-recipe-title',day.lunchId):(state.menu?.outsideSlots?.[`${i}:lunch`]?'<strong class="home-menu-recipe-title home-menu-outside">🍴 Comer fuera</strong>':'<strong class="home-menu-recipe-title">Sin planificar</strong>')}</div><div><span>Cena</span>${day.dinner?menuRecipeTitle(day.dinner,'home-menu-recipe-title',day.dinnerId):(state.menu?.outsideSlots?.[`${i}:dinner`]?'<strong class="home-menu-recipe-title home-menu-outside">🍴 Comer fuera</strong>':'<strong class="home-menu-recipe-title">Sin planificar</strong>')}</div>${day.tupper?'<span class="pill home-tupper">Tupper</span>':''}</div>`;
-}
-function homeRecipes(){
- const recipes=[...state.recipes].sort((a,b)=>(b.favorite?1:0)-(a.favorite?1:0)).slice(0,4);
- if(!recipes.length)return '<div class="home-recipes-empty"><span>Aún no tienes recetas guardadas.</span><button class="text-button" onclick="go(\'food\')">Añadir una →</button></div>';
- return `<div class="home-recipes"><div class="home-section-title"><b>Mis recetas</b><button class="text-button" onclick="go(\'food\')">Ver todas →</button></div>${recipes.map(r=>`<button class="home-recipe-row" onclick="viewRecipe(\'${r.id}\')"><span class="home-recipe-type">${esc(recipeTypeLabel(r))}</span><span class="home-recipe-name">${esc(r.name)}</span>${r.favorite?'<span class="favorite-mark">★</span>':''}</button>`).join('')}</div>`;
-}
-function homePreparations(){
- const pending=menuPreparations().filter(x=>!state.prepDone[x.id]).slice(0,3);
- if(!pending.length)return '<div class="home-prep-empty">Todo preparado. 🎉</div>';
- return `<div class="home-prep-list">${pending.map(x=>`<div class="home-prep-row"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')" aria-label="Marcar preparación"></button><button class="home-prep-content" onclick="viewPreparation('${x.id}')"><span>${esc(x.name)}</span><small>${esc(x.quantity||'')} ${x.freezable?'· Congelable':''}</small></button></div>`).join('')}</div>${state.preparations.length>3?'<button class="text-button" onclick="go(\'food\')">Ver todas →</button>':''}`;
-}
-function homePendingTasks(){const list=state.tasks.filter(x=>!x.done).sort(taskSort).slice(0,3);if(!list.length)return '<div class="item muted">No hay tareas pendientes.</div>';return list.map(t=>`<button class="home-task" onclick="go('tasks')"><span>${esc(t.title)}</span>${isOverdue(t)?'<span class="overdue-label">Atrasada</span>':''}</button>`).join('')}
-function todayHabitsSummary(){const n=state.habits.length;if(!n)return 'Aún no tienes hábitos';const done=state.habits.filter(h=>isHabitDone(h,todayKey())).length;return `${done} de ${n} hábitos completados`}
-function habitButtons(){if(!state.habits.length)return `<div class="empty-state"><span>No hay hábitos todavía.</span><button class="secondary" onclick="openModal('Nuevo hábito',habitForm())">+ Añadir hábito</button></div>`;return state.habits.map(h=>habitButton(h,true)).join('')}
-function habitButton(h,home=false,dateKey=todayKey()){const done=isHabitDone(h,dateKey);return `<button class="habit-button ${done?'done':''}" style="--habit-color:${h.color||habitColors[0]}" onclick="toggleHabit('${h.id}','${dateKey}')" aria-label="${esc(h.name)} ${done?'completado':'pendiente'}"><span class="habit-check">${done?'✓':''}</span><span class="habit-name">${esc(h.name)}</span>${h.reminder?`<span class="habit-reminder">${h.reminderTime||''}</span>`:''}<span class="habit-frequency">${frequencyLabel(h)}</span></button>`}
-function habitDateLabel(key){const d=new Date(`${key}T12:00:00`);return d.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'});}
-function habitHistoryDays(){return Array.from({length:7},(_,i)=>dateKeyOffset(-i));}
-function habits(c){
- const selected=habitSelectedDate||todayKey();
- const done=state.habits.filter(h=>isHabitDone(h,selected)).length;
- const total=state.habits.length;
- const isToday=selected===todayKey();
- const history=habitHistoryDays().map(k=>{const d=new Date(`${k}T12:00:00`);const label=k===todayKey()?'Hoy':d.toLocaleDateString('es-ES',{weekday:'short'}).replace('.','');const count=state.habits.filter(h=>isHabitDone(h,k)).length;return `<button type="button" class="habit-history-day ${k===selected?'selected':''}" onclick="selectHabitDate('${k}')"><b>${label}</b><span>${count}/${total||0}</span><small>${d.getDate()}</small></button>`}).join('');
- c.innerHTML=`<div class="grid">
- <div class="card span-12"><div class="row"><div><div class="eyebrow">${isToday?'Hoy':'Editar historial'}</div><h2>${done}/${total} hábitos completados</h2><span class="muted">${isToday?'Toca cada botón para marcarlo.':'Editando '+habitDateLabel(selected)+'. Puedes corregir un día anterior aunque se te olvidara registrarlo.'}</span></div><div class="actions"><button class="secondary small" onclick="selectHabitDate('${todayKey()}')">Ir a hoy</button><button class="primary" onclick="openModal('Nuevo hábito',habitForm())">+ Añadir hábito</button></div></div><div class="habit-history-picker"><label>Seleccionar día<input type="date" value="${selected}" max="${todayKey()}" onchange="selectHabitDate(this.value)"></label><div class="habit-history-days">${history}</div></div><div class="habit-grid">${total?state.habits.map(h=>habitButton(h,false,selected)).join(''):'<div class="empty-state"><span>Crea tu primer hábito.</span></div>'}</div></div>
- <div class="card span-8"><div class="row"><div><h3>Mi progreso</h3><span class="muted">Resumen de los últimos 7 días.</span></div></div><div class="habit-progress-grid">${state.habits.map(h=>{const count=habitLastDaysCount(h,7);const pct=Math.round(count/7*100);return `<div class="habit-progress-row"><div class="habit-progress-head"><b>${esc(h.name)}</b><span>${count}/7</span></div><div class="progress"><i style="width:${pct}%;background:${h.color||habitColors[0]}"></i></div><span class="muted small-text">${habitStreak(h)} racha actual</span></div>`}).join('')||'<div class="muted">Cuando tengas hábitos aparecerá aquí su progreso.</div>'}</div></div>
- <div class="card span-4"><h3>Recordatorios</h3><p class="muted">${notificationStatusText()}</p><button class="secondary" onclick="requestNotificationPermission()">Activar notificaciones</button></div>
- <div class="card span-12"><h3>Mis hábitos</h3><div class="list">${state.habits.map(h=>`<div class="habit-row"><span class="color-dot" style="background:${h.color||habitColors[0]}"></span><div class="habit-row-main"><b>${esc(h.name)}</b><span class="muted">${frequencyLabel(h)}${h.reminder?' · Recordatorio '+(h.reminderTime||''):''}</span><span class="muted small-text">${habitStreak(h)} días seguidos · ${habitLastDaysCount(h,7)}/7 esta semana</span></div><button class="secondary small" onclick="editHabit('${h.id}')">Editar</button></div>`).join('')||'<div class="muted">Aquí aparecerán tus hábitos.</div>'}</div></div></div>`;
-}
-function selectHabitDate(key){const max=todayKey();if(!/^\d{4}-\d{2}-\d{2}$/.test(key)||key>max)return;habitSelectedDate=key;render()}
-function dateKeyOffset(days){const d=new Date();d.setHours(12,0,0,0);d.setDate(d.getDate()+days);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
-function habitLastDaysCount(h,n=7){let count=0;for(let i=0;i<n;i++)if(isHabitDone(h,dateKeyOffset(-i)))count++;return count}
-function habitStreak(h){let streak=0;for(let i=0;i<365;i++){if(isHabitDone(h,dateKeyOffset(-i)))streak++;else break}return streak}
-function notificationStatusText(){if(!('Notification' in window))return 'Este navegador no permite notificaciones.';if(Notification.permission==='granted')return 'Notificaciones activadas. Los recordatorios se comprobarán cuando la app esté abierta.';if(Notification.permission==='denied')return 'Las notificaciones están bloqueadas en el navegador. Puedes reactivarlas desde los permisos del sitio.';return 'Activa los permisos para recibir recordatorios.'}
-async function requestNotificationPermission(){if(!('Notification' in window)){alert('Este navegador no permite notificaciones.');return}try{const permission=await Notification.requestPermission();state.settings.notifications=state.settings.notifications||{};state.settings.notifications.browserPermission=permission;save();render();if(permission==='granted')checkNotifications(true)}catch(e){alert('No se ha podido solicitar el permiso de notificaciones.')}}
-function notify(title,body,tag){if(!('Notification' in window)||Notification.permission!=='granted')return;if(navigator.serviceWorker?.controller){navigator.serviceWorker.controller.postMessage({type:'NOTIFY',title,body,tag});}else{try{new Notification(title,{body,tag})}catch(e){}}}
-function notificationOnce(id,title,body){state.settings.notificationLog=state.settings.notificationLog||{};const todayKeyValue=todayKey();if(state.settings.notificationLog[id]===todayKeyValue)return;state.settings.notificationLog[id]=todayKeyValue;save();notify(title,body,id)}
-function checkNotifications(force=false){const now=new Date();const n=state.settings.notifications||{};if(!('Notification' in window)||Notification.permission!=='granted')return;
- if(n.tasks!==false){state.tasks.filter(t=>!t.done&&t.date).forEach(t=>{const when=new Date(`${t.date}T${t.reminderTime||'09:00'}`);if(t.reminder==='1h')when.setHours(when.getHours()-1);else if(t.reminder==='1d')when.setDate(when.getDate()-1);if(when<=now&&now-when<70*60*1000)notificationOnce('task-'+t.id,'Tarea: '+t.title,'Tienes una tarea pendiente.')});}
- if(n.calendar!==false){state.events.filter(e=>(e.startDate||e.date)&&e.reminder).forEach(e=>{const when=new Date(`${e.startDate||e.date}T${e.startTime||'09:00'}`);when.setMinutes(when.getMinutes()-Number(e.reminderLead||0));if(when<=now&&now-when<70*60*1000)notificationOnce('event-'+e.id,'Calendario: '+e.title,'Tienes un evento programado.')});}
- if(n.food!==false){state.inventory.filter(x=>x.expiry).forEach(x=>{const exp=new Date(`${x.expiry}T12:00`);const diff=(exp-now)/(86400000);if(diff>=0&&diff<=1)notificationOnce('food-exp-'+x.id,'Comidas: '+(x.name||'Producto'),'Caduca hoy o mañana.')});}
- state.habits.filter(h=>h.reminder&&h.reminderTime&&!isHabitDone(h,todayKey())).forEach(h=>{const [hh,mm]=h.reminderTime.split(':').map(Number);const when=new Date();when.setHours(hh,mm,0,0);if(when<=now&&now-when<70*60*1000)notificationOnce('habit-'+h.id,'Hábito: '+h.name,'Es hora de hacerlo.')});
-}
-function frequencyLabel(h){if(h.frequency==='daily')return 'Todos los días';return `${h.daysPerWeek||5} días/semana`}
-function isHabitDone(h,key){return Array.isArray(h.completed)&&h.completed.includes(key)}
-async function toggleHabit(id,dateKey=todayKey()){const h=state.habits.find(x=>x.id===id);if(!h)return;const k=dateKey||todayKey();if(k>todayKey())return;h.completed=Array.isArray(h.completed)?h.completed:[];const i=h.completed.indexOf(k);if(i>=0)h.completed.splice(i,1);else h.completed.push(k);localCacheFromState();render();if(supabaseClient&&currentUser){await syncCloudField('habits',state.habits)}}
-function habitForm(h=null){const color=h?.color||habitColors[0];return `<div class="form"><label>Nombre del hábito<input id="fHabitName" value="${esc(h?.name||'')}" placeholder="Ej. Beber agua"></label><label>Frecuencia<select id="fHabitFreq"><option value="daily" ${h?.frequency==='daily'?'selected':''}>Todos los días</option><option value="weekly" ${h?.frequency!=='daily'?'selected':''}>Días por semana</option></select></label><label id="daysLabel">¿Cuántos días a la semana?<select id="fHabitDays">${[1,2,3,4,5,6].map(n=>`<option value="${n}" ${Number(h?.daysPerWeek||5)===n?'selected':''}>${n} días</option>`).join('')}</select></label><label class="checkline"><input id="fHabitReminder" type="checkbox" ${h?.reminder?'checked':''}> Quiero un recordatorio</label><label id="timeLabel">Hora del recordatorio<input id="fHabitTime" type="time" value="${h?.reminderTime||'09:00'}"></label><div><div class="field-title">Color del botón</div><div class="color-picker">${habitColors.map(col=>`<button type="button" class="color-choice ${color===col?'selected':''}" style="background:${col}" onclick="selectHabitColor('${col}')" data-color="${col}" aria-label="Color"></button>`).join('')}</div><input type="hidden" id="fHabitColor" value="${color}"></div><button class="primary" onclick="saveHabit('${h?.id||''}')">Guardar hábito</button>${h?`<button class="danger-button" onclick="deleteHabit('${h.id}')">Eliminar hábito</button>`:''}</div>`}
-function selectHabitColor(col){document.querySelector('#fHabitColor').value=col;document.querySelectorAll('.color-choice').forEach(b=>b.classList.toggle('selected',b.dataset.color===col))}
-async function saveHabit(id){const name=document.querySelector('#fHabitName').value.trim();if(!name)return;const existing=id&&state.habits.find(x=>x.id===id);const h=existing||{id:crypto.randomUUID(),completed:[]};h.name=name;h.frequency=document.querySelector('#fHabitFreq').value;h.daysPerWeek=h.frequency==='daily'?7:Number(document.querySelector('#fHabitDays').value);h.reminder=document.querySelector('#fHabitReminder').checked;h.reminderTime=h.reminder?document.querySelector('#fHabitTime').value:'';h.color=document.querySelector('#fHabitColor').value;if(!existing)state.habits.push(h);localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncCloudField('habits',state.habits)}}
-function editHabit(id){const h=state.habits.find(x=>x.id===id);if(h)openModal('Editar hábito',habitForm(h))}
-async function deleteHabit(id){state.habits=state.habits.filter(x=>x.id!==id);localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncCloudField('habits',state.habits)}}
-function renderHomeCalendar(el){
- const base=calendarMonthDate();const y=base.getFullYear(),m=base.getMonth();
- const monthLabel=base.toLocaleDateString('es-ES',{month:'long',year:'numeric'});
- const first=(new Date(y,m,1).getDay()+6)%7,days=new Date(y,m+1,0).getDate();
- const monthEvents=monthEventsFor(y,m);
- let grid=['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('');
- for(let i=0;i<first;i++)grid+='<div class="day empty-day"></div>';
- for(let d=1;d<=days;d++){
-   const date=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-   const evs=eventsForDate(date);
-   const bars=evs.slice(0,4).map(e=>calendarBar(e,date,monthEvents)).join('');
-   grid+=`<button class="day calendar-day ${date===todayKey()?'today':''} ${evs.length?'has-events':''}" onclick="openNewEventForDate('${date}')"><b>${d}</b><div class="calendar-event-lanes">${bars}</div></button>`;
- }
- el.innerHTML=`<div class="home-calendar-header"><div><h2>${cap(monthLabel)}</h2><span class="muted">Planifica eventos, cumpleaños y recordatorios.</span></div><div class="calendar-actions"><button class="secondary month-arrow" onclick="changeCalendarMonth(-1)" aria-label="Mes anterior">‹</button><button class="secondary" onclick="goCalendarToday()">Hoy</button><button class="secondary month-arrow" onclick="changeCalendarMonth(1)" aria-label="Mes siguiente">›</button><button class="primary" onclick="openModal('Nuevo evento',eventForm())">+ Evento</button></div></div><section class="calendar-card home-calendar-inner"><div class="calendar-grid">${grid}</div></section>`;
-}
 
-const taskCategories={
-  Casas:["Mi casa","Casa mamá","Casa Suances","Casa pueblo","Casa Ara"],
-  Coches:["Mercedes","Peugeot"],
-  Personal:["Personal"]
-};
-const taskCategoryLabels=["Casas","Coches","Personal"];
-
-function normalizeTask(t){
-  if(!Array.isArray(t.categories)){
-    t.categories=t.category?[t.category]:[];
+  if (unitInfo.group === "volume" && unitInfo.label === "ml") {
+    if (displayQuantity >= 1000) {
+      displayQuantity /= 1000;
+      displayUnit = "l";
+    } else {
+      displayUnit = "ml";
+    }
   }
-  t.subtasks=Array.isArray(t.subtasks)?t.subtasks:[];
-  t.attachments=Array.isArray(t.attachments)?t.attachments:[];
-  t.priority=t.priority||"Normal";
-  t.status=t.done?"done":"pending";
-  return t;
-}
-state.tasks=state.tasks.map(normalizeTask);
 
-function isOverdue(t){
-  if(t.done || !t.date)return false;
-  const end=new Date(t.date+"T"+(t.time||"23:59"));
-  return end < new Date();
+  return `${formatShoppingNumber(displayQuantity)} ${displayUnit}`.trim();
 }
-function taskSort(a,b){
-  const rank=t=>t.done?4:(isOverdue(t)?0:(t.date===todayKey()?1:(t.date?2:3)));
-  return rank(a)-rank(b) || ((a.date||"9999")+(a.time||"")).localeCompare((b.date||"9999")+(b.time||""));
+
+async function loadShoppingList() {
+  const page = document.getElementById("compra");
+  if (!page) return;
+
+  const { data, error } = await supabaseClient
+    .from("shopping_items")
+    .select(`
+      id,
+      quantity,
+      unit,
+      checked,
+      notes,
+      created_at,
+      ingredients (
+        id,
+        name
+      )
+    `)
+    .order("checked", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("Error cargando lista de compra:", error);
+    renderShoppingError(error);
+    return;
+  }
+
+  renderShoppingList(data || []);
 }
-function taskCategoryPills(t){
-  return (t.categories||[]).map(x=>`<span class="pill task-cat">${esc(x)}</span>`).join("");
+
+function renderShoppingError(error) {
+  const container = document.getElementById("shopping-list-content");
+  if (!container) return;
+
+  container.innerHTML = `
+    <div class="empty shopping-empty">
+      <div class="empty-icon">!</div>
+      <h3>No se pudo cargar la lista</h3>
+      <p>${escapeHtml(error.message || "Error desconocido")}</p>
+    </div>
+  `;
 }
-function taskProgress(t){
-  const total=t.subtasks?.length||0;
-  if(!total)return "";
-  const done=t.subtasks.filter(s=>s.done).length;
-  return `<div class="subprogress"><span>${done}/${total} subtareas</span><div><i style="width:${done/total*100}%"></i></div></div>`;
+
+function isGeneratedShoppingItem(item) {
+  return String(item.notes || "").startsWith(SHOPPING_GENERATED_PREFIX);
 }
-function tasks(c){
-  const all=state.tasks.map(normalizeTask);
-  const pending=all.filter(t=>!t.done).sort(taskSort);
-  const overdue=pending.filter(isOverdue).length;
-  const todayCount=pending.filter(t=>t.date===todayKey()&&!isOverdue(t)).length;
-  c.innerHTML=`<div class="grid">
-    <div class="card span-12">
-      <div class="row task-toolbar">
-        <div><h3>Mis tareas</h3><span class="muted">${pending.length} pendientes${overdue?` · ${overdue} atrasadas`:''}</span></div>
-        <button class="primary" onclick="openModal('Nueva tarea',taskForm())">+ Nueva tarea</button>
+
+function renderShoppingItem(item) {
+  const name = item.ingredients?.name || "Producto";
+  const amount = formatShoppingAmount(item.quantity, item.unit);
+  const manualNote = !isGeneratedShoppingItem(item) ? (item.notes || "") : "";
+
+  return `
+    <div class="shopping-item ${item.checked ? "is-checked" : ""}">
+      <label class="shopping-check-wrap">
+        <input
+          type="checkbox"
+          ${item.checked ? "checked" : ""}
+          onchange="toggleShoppingItem(${item.id}, this.checked)"
+        >
+        <span class="shopping-check"></span>
+      </label>
+
+      <div class="shopping-item-main">
+        <strong>${escapeHtml(name)}</strong>
+        ${amount ? `<span class="shopping-item-amount">${escapeHtml(amount)}</span>` : ""}
+        ${isGeneratedShoppingItem(item) ? '<span class="shopping-item-source">De menú</span>' : ""}
+        ${manualNote ? `<span class="shopping-item-note">${escapeHtml(manualNote)}</span>` : ""}
       </div>
-      <div class="task-filters">
-        <button class="filter active" onclick="filterTasks('all',this)">Todas <span>${pending.length}</span></button>
-        <button class="filter" onclick="filterTasks('today',this)">Hoy <span>${todayCount}</span></button>
-        <button class="filter" onclick="filterTasks('upcoming',this)">Próximas</button>
-        <button class="filter" onclick="filterTasks('overdue',this)">Atrasadas <span>${overdue}</span></button>
-        <button class="filter" onclick="filterTasks('nodate',this)">Sin fecha</button>
+
+      <button type="button" class="shopping-delete" title="Eliminar" onclick="deleteShoppingItem(${item.id})">×</button>
+    </div>
+  `;
+}
+
+function renderShoppingList(items) {
+  const container = document.getElementById("shopping-list-content");
+  if (!container) return;
+
+  const pending = items.filter(item => !item.checked);
+  const checked = items.filter(item => item.checked);
+
+  container.innerHTML = `
+    <div class="shopping-summary">
+      <div>
+        <strong>${pending.length}</strong>
+        <span>por comprar</span>
       </div>
-      <div id="taskList" class="list task-list">${pending.length?pending.map(taskCard).join(""):'<div class="empty-state"><span>No tienes tareas pendientes.</span><button class="secondary" onclick="newTaskFromEmpty()">+ Añadir tarea</button></div>'}</div>
-      <details class="completed-tasks"><summary>Tareas completadas (${all.filter(t=>t.done).length})</summary><div class="list">${all.filter(t=>t.done).sort((a,b)=>(b.completedAt||"").localeCompare(a.completedAt||"")).slice(0,20).map(t=>`<div class="completed-task-row"><span class="completed-mark">✓</span><span>${esc(t.title)}</span><button class="secondary small" onclick="restoreTask('${t.id}')">Reabrir</button></div>`).join("")||'<div class="muted">Todavía no hay tareas completadas.</div>'}</div></details>
-    </div>
-    <div class="card span-12">
-      <div class="row"><div><h3>Categorías</h3><span class="muted">Una tarea puede pertenecer a varias.</span></div></div>
-      <div class="task-category-groups">${taskCategoryLabels.map(g=>`<div><b>${g}</b><div class="actions">${taskCategories[g].map(x=>`<span class="pill">${x}</span>`).join("")}</div></div>`).join("")}</div>
-    </div>
-  </div>`;
-}
-function taskCard(t){
-  const date=t.date?new Date(t.date+"T12:00").toLocaleDateString("es-ES",{day:"numeric",month:"short"}):"Sin fecha";
-  const meta=[date,t.time||"",t.priority||"Normal"].filter(Boolean).join(" · ");
-  const subs=(t.subtasks||[]).filter(s=>s.title);
-  return `<div class="item task-card ${isOverdue(t)?"overdue":""}">
-    <div class="task-main">
-      <label class="task-check" title="Marcar como completada"><input type="checkbox" onchange="completeTask('${t.id}')"><span></span></label>
-      <div class="task-body">
-        <button class="task-title" onclick="editTask('${t.id}')">${esc(t.title)}</button>
-        <div class="task-meta">${taskCategoryPills(t)}<span>${esc(meta)}</span>${t.reminder?`<span class="reminder-tag">Recordatorio${t.reminderTime?" · "+t.reminderTime:""}</span>`:""}${t.repeat?`<span class="repeat-tag">↻ ${esc(t.repeat.label||"Repite")}</span>`:""}</div>
-        ${t.notes?`<div class="muted task-notes">${esc(t.notes)}</div>`:""}
-        ${subs.length?`<div class="subtask-list">${subs.map(s=>`<label class="subtask-row"><input type="checkbox" ${s.done?'checked':''} onchange="toggleSubtask('${t.id}','${s.id}')"><span class="subtask-box"></span><span class="subtask-title ${s.done?'completed':''}">${esc(s.title)}</span></label>`).join("")}</div>`:""}
-        ${taskProgress(t)}
-        ${t.attachments?.length?`<div class="attachment-count">📎 ${t.attachments.length} ${t.attachments.length===1?"archivo":"archivos"}</div>`:""}
+      <div>
+        <strong>${checked.length}</strong>
+        <span>comprado${checked.length === 1 ? "" : "s"}</span>
       </div>
-      <button class="icon-button" onclick="editTask('${t.id}')" aria-label="Editar">⋯</button>
+      <button type="button" class="secondary shopping-clear-checked" ${checked.length ? "" : "disabled"}>
+        Borrar comprados
+      </button>
     </div>
-  </div>`;
-}
-function filterTasks(kind,btn){
-  document.querySelectorAll(".task-filters .filter").forEach(x=>x.classList.remove("active"));
-  if(btn)btn.classList.add("active");
-  let list=state.tasks.map(normalizeTask).filter(t=>!t.done);
-  if(kind==="today")list=list.filter(t=>t.date===todayKey()&&!isOverdue(t));
-  if(kind==="upcoming")list=list.filter(t=>t.date&&t.date>todayKey());
-  if(kind==="overdue")list=list.filter(isOverdue);
-  if(kind==="nodate")list=list.filter(t=>!t.date);
-  list.sort(taskSort);
-  document.querySelector("#taskList").innerHTML=list.length?list.map(taskCard).join(""):'<div class="empty-state"><span>No hay tareas en este filtro.</span></div>';
-}
-function taskCategoryOptions(selected=[]){
-  return taskCategoryLabels.map(g=>`<div class="category-group"><div class="muted category-group-title">${g}</div>${taskCategories[g].map(x=>`<label class="checkline category-option"><input type="checkbox" class="task-category" value="${esc(x)}" ${selected.includes(x)?"checked":""}> ${esc(x)}</label>`).join("")}</div>`).join("");
-}
-function taskSubtasksHtml(items=[]){
-  return `<div id="subtaskEditor" class="subtask-editor">${items.map((s,i)=>`<div class="subtask-input"><input data-subtask-index="${i}" value="${esc(s.title||"")}"><button type="button" onclick="this.parentElement.remove()">×</button></div>`).join("")}</div>
-  <button type="button" class="secondary small" onclick="addSubtaskInput()">+ Añadir subtarea</button>`;
-}
-function addSubtaskInput(){
-  const box=document.querySelector("#subtaskEditor");
-  const i=box.children.length;
-  const row=document.createElement("div");
-  row.className="subtask-input";
-  row.innerHTML=`<input data-subtask-index="${i}" placeholder="Nueva subtarea"><button type="button" onclick="this.parentElement.remove()">×</button>`;
-  box.appendChild(row);
-}
-function taskForm(t=null){
-  const selected=t?.categories||[];
-  const repeat=t?.repeat?.type||"none";
-  return `<div class="form task-form">
-    <label>Título<input id="fTaskTitle" required value="${esc(t?.title||"")}" placeholder="Ej. Llevar el coche al taller"></label>
-    <div class="form-two">
-      <label>Fecha<input id="fTaskDate" type="date" value="${t?.date||""}"></label>
-      <label>Hora<input id="fTaskTime" type="time" value="${t?.time||""}"></label>
+
+    <div class="shopping-section">
+      <div class="shopping-section-head">
+        <h3>Por comprar</h3>
+        <span>${pending.length} ${pending.length === 1 ? "producto" : "productos"}</span>
+      </div>
+
+      ${pending.length
+        ? `<div class="shopping-items">${pending.map(renderShoppingItem).join("")}</div>`
+        : `
+          <div class="shopping-list-empty">
+            <div>🛒</div>
+            <strong>No hay nada pendiente</strong>
+            <p>Añade productos manualmente o genera la lista desde tu menú.</p>
+          </div>
+        `}
     </div>
-    <label>Prioridad<select id="fTaskPriority">${["Normal","Importante","Urgente"].map(x=>`<option ${t?.priority===x?"selected":""}>${x}</option>`).join("")}</select></label>
-    <div><div class="field-title">Categorías</div><div class="category-picker">${taskCategoryOptions(selected)}</div></div>
-    <div><div class="field-title">Subtareas</div>${taskSubtasksHtml(t?.subtasks||[])}</div>
-    <label>Recordatorio<select id="fTaskReminder"><option value="">Sin recordatorio</option><option value="at_time" ${t?.reminder==="at_time"?"selected":""}>A la hora de la tarea</option><option value="1h" ${t?.reminder==="1h"?"selected":""}>1 hora antes</option><option value="1d" ${t?.reminder==="1d"?"selected":""}>1 día antes</option></select></label>
-    <div class="form-two">
-      <label>Repetir<select id="fTaskRepeat">${[
-        ["none","No repetir"],["daily","Cada día"],["weekly","Cada semana"],["monthly","Cada mes"],["yearly","Cada año"],["custom","Cada X días"]
-      ].map(x=>`<option value="${x[0]}" ${repeat===x[0]?"selected":""}>${x[1]}</option>`).join("")}</select></label>
-      <label id="customRepeatLabel" class="${repeat==="custom"?"":"hidden"}">Cada cuántos días<input id="fTaskRepeatDays" type="number" min="1" value="${t?.repeat?.days||2}"></label>
-    </div>
-    <label>Notas<textarea id="fTaskNotes" placeholder="Detalles, instrucciones...">${esc(t?.notes||"")}</textarea></label>
-    <label>Fotos / archivos<input id="fTaskFiles" type="file" accept="image/*" multiple></label>
-    ${t?.attachments?.length?`<div class="attachment-preview">${t.attachments.map((a,i)=>`<div>📎 ${esc(a.name||"Foto")} <button type="button" onclick="removeTaskAttachment('${t.id}',${i})">×</button></div>`).join("")}</div>`:""}
-    <button class="primary" onclick="saveTask('${t?.id||""}')">Guardar tarea</button>
-    ${t?`<button class="danger-button" onclick="deleteTask('${t.id}')">Eliminar tarea</button>`:""}
-  </div>`;
-}
-async function saveTask(id){
-  const title=document.querySelector("#fTaskTitle").value.trim();
-  if(!title)return;
-  const existing=id&&state.tasks.find(x=>x.id===id);
-  const t=existing||{id:crypto.randomUUID(),done:false,created:new Date().toISOString(),subtasks:[],attachments:[]};
-  t.title=title;
-  t.date=document.querySelector("#fTaskDate").value;
-  t.time=document.querySelector("#fTaskTime").value;
-  t.priority=document.querySelector("#fTaskPriority").value;
-  t.categories=[...document.querySelectorAll(".task-category:checked")].map(x=>x.value);t.category=t.categories[0]||'';
-  t.notes=document.querySelector("#fTaskNotes").value.trim();
-  t.reminder=document.querySelector("#fTaskReminder").value;
-  const rt=document.querySelector("#fTaskRepeat").value;
-  t.repeat=rt==="none"?null:{type:rt,label:rt==="custom"?`Cada ${document.querySelector("#fTaskRepeatDays").value} días`:({daily:"Cada día",weekly:"Cada semana",monthly:"Cada mes",yearly:"Cada año"}[rt]||"Repite"),days:rt==="custom"?Number(document.querySelector("#fTaskRepeatDays").value):null};
-  const subInputs=[...document.querySelectorAll("#subtaskEditor input")];
-  const old=t.subtasks||[];
-  t.subtasks=subInputs.map((el,i)=>({id:old[i]?.id||crypto.randomUUID(),title:el.value.trim(),done:old[i]?.done||false})).filter(x=>x.title);
-  const files=[...document.querySelector("#fTaskFiles").files];
-  if(files.length){
-    const added=await Promise.all(files.map(fileToData));
-    t.attachments=[...(t.attachments||[]),...added];
+
+    ${checked.length
+      ? `
+        <div class="shopping-section shopping-done-section">
+          <div class="shopping-section-head">
+            <h3>Comprado</h3>
+            <span>${checked.length}</span>
+          </div>
+          <div class="shopping-items">${checked.map(renderShoppingItem).join("")}</div>
+        </div>
+      `
+      : ""}
+  `;
+
+  const clearButton = container.querySelector(".shopping-clear-checked");
+  if (clearButton) clearButton.addEventListener("click", clearCheckedShoppingItems);
+
+  const note = document.getElementById("shopping-week-note");
+  if (note) {
+    const end = addDays(menuWeekStart, 6);
+    note.textContent = `Semana ${menuWeekStart.getDate()}/${String(menuWeekStart.getMonth() + 1).padStart(2, "0")} – ${end.getDate()}/${String(end.getMonth() + 1).padStart(2, "0")}. Genera la compra desde el menú y la app descontará el inventario disponible.`;
   }
-  t.status=t.done?"done":"pending";
-  if(!existing)state.tasks.push(t);
-  save();closeModal();render();
 }
-function fileToData(file){
-  return new Promise(resolve=>{const r=new FileReader();r.onload=()=>resolve({name:file.name,type:file.type,data:r.result});r.readAsDataURL(file);});
-}
-function editTask(id){const t=state.tasks.find(x=>x.id===id);if(t)openModal("Editar tarea",taskForm(t));}
-function removeTaskAttachment(id,index){const t=state.tasks.find(x=>x.id===id);if(!t)return;t.attachments.splice(index,1);save();openModal("Editar tarea",taskForm(t));}
-function toggleSubtask(taskId,subtaskId){
-  const t=state.tasks.find(x=>x.id===taskId);if(!t)return;
-  const sub=(t.subtasks||[]).find(x=>x.id===subtaskId);if(!sub)return;
-  sub.done=!sub.done;
-  save();render();
-}
-function deleteTask(id){state.tasks=state.tasks.filter(x=>x.id!==id);save();closeModal();render();}
-function restoreTask(id){const t=state.tasks.find(x=>x.id===id);if(!t)return;t.done=false;t.status='pending';t.completedAt=null;save();render()}
-function nextTaskDate(date,type,days){
-  const d=new Date(date+"T12:00");
-  if(type==="daily")d.setDate(d.getDate()+1);
-  if(type==="weekly")d.setDate(d.getDate()+7);
-  if(type==="monthly")d.setMonth(d.getMonth()+1);
-  if(type==="yearly")d.setFullYear(d.getFullYear()+1);
-  if(type==="custom")d.setDate(d.getDate()+days);
-  return d.toISOString().slice(0,10);
-}
-function completeTask(id){
-  const t=state.tasks.find(x=>x.id===id);if(!t)return;
-  t.done=true;t.status="done";t.completedAt=new Date().toISOString();
-  if(t.repeat&&t.date){
-    const next={...t,id:crypto.randomUUID(),date:nextTaskDate(t.date,t.repeat.type,t.repeat.days),done:false,status:"pending",completedAt:null,created:new Date().toISOString(),subtasks:(t.subtasks||[]).map(s=>({...s,id:crypto.randomUUID(),done:false})),attachments:[]};
-    state.tasks.push(next);
+
+async function toggleShoppingItem(id, checked) {
+  const { error } = await supabaseClient
+    .from("shopping_items")
+    .update({ checked })
+    .eq("id", id);
+
+  if (error) {
+    console.error("Error actualizando compra:", error);
+    alert("No se pudo actualizar el producto.\n\n" + error.message);
+    return;
   }
-  save();render();
+
+  await loadShoppingList();
 }
 
-function newTaskFromEmpty(){openModal('Nueva tarea',taskForm())}
-let expenseCategories=JSON.parse(localStorage.getItem(KEY+'expenseCategories')||'null')||{"Gastos fijos":["Alquiler","Seguro"],"Suministros":["Agua","Luz","Aerotermia","Móvil","Internet"],"Suscripciones":["Spotify","Podomo","ACNUR"],"Otros gastos":["Comida","Paga","Transporte","Otros gastos"],"Ingresos":["Nómina","Otros ingresos"]};
-// Compatibilidad con la categoría original de la V7.
-if(expenseCategories.Suscripciones?.includes('Podomo') && !expenseCategories.Suscripciones.includes('Podimo')){expenseCategories.Suscripciones=expenseCategories.Suscripciones.map(x=>x==='Podomo'?'Podimo':x);localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));}
-const defaultAccounts=["Cuenta de gastos","Cuenta nómina","Cuenta ahorro","Revolut"];
-if(!Array.isArray(state.accounts))state.accounts=defaultAccounts.map(name=>({id:crypto.randomUUID(),name,startingBalance:0,active:true}));
-if(!Array.isArray(state.transactions))state.transactions=[];
-normalizeExpenseReferences();
-if(!Array.isArray(state.budgets))state.budgets=[];
-if(!state.settings || typeof state.settings!=='object')state.settings={};
-state.settings.notifications=state.settings.notifications||{tasks:true,calendar:true,expenses:true,food:true};
-state.settings.notifications.notificationLog=state.settings.notifications.notificationLog||{};
-state.settings.food=state.settings.food||{cookingDays:4,weekdayMinutes:30,useInventory:true,quickMeals:true,vegetables:true,twoTuppers:true,fridayFun:true,snacks:true,sweet:false,bread:false,breakfast:'Café con leche + tostada con aceite y tomate'};
-state.recipes.forEach(r=>{if(typeof r.ingredients==='string'){r.ingredientsText=r.ingredients;r.ingredients=parseIngredients(r.ingredients)}});
+async function deleteShoppingItem(id) {
+  if (!confirm("¿Quieres eliminar este producto de la lista?")) return;
 
-// Migración de gastos de versiones anteriores: conserva los datos y los integra en Movimientos.
-(function migrateLegacyExpenses(){
- if(!Array.isArray(state.expenses)||!state.expenses.length)return;
- const accountByName=Object.fromEntries(state.accounts.map(a=>[a.name,a.id]));
- let changed=false;
- state.expenses.forEach(old=>{
-   const exists=state.transactions.some(t=>t.legacyId===old.id);
-   if(exists)return;
-   state.transactions.push({id:crypto.randomUUID(),legacyId:old.id,type:'expense',amount:Number(old.amount)||0,category:old.category||'Otros gastos',concept:old.concept||'',date:(old.date||todayKey()).slice(0,10),account:accountByName[old.account]||state.accounts[0].id,notes:old.notes||'',ticket:old.ticket||''});
-   changed=true;
- });
- if(changed)save();
-})();
+  const { error } = await supabaseClient
+    .from("shopping_items")
+    .delete()
+    .eq("id", id);
 
-function ensureRecurringTransactions(){
- const key=state.expenseMonth||monthKey();
- let changed=false;
- const templates=state.transactions.filter(t=>t.recurring && !t.recurringFrom);
- templates.forEach(t=>{
-   if(!t.recurringMonths||!Array.isArray(t.recurringMonths))t.recurringMonths=[];
-   const templateMonth=monthKey(new Date((t.date||todayKey())+'T12:00'));
-   // Nunca generar una recurrencia antes de la fecha en la que se creó/inició.
-   if(key<templateMonth)return;
-   if(templateMonth===key){if(!t.recurringMonths.includes(key))t.recurringMonths.push(key);return;}
-   if(t.recurringMonths.includes(key))return;
-   const day=Math.min(Number(t.recurringDay||String(t.date||todayKey()).slice(8,10))||1,new Date(Number(key.slice(0,4)),Number(key.slice(5,7)),0).getDate());
-   const copy={...t,id:crypto.randomUUID(),date:`${key}-${String(day).padStart(2,'0')}`,recurring:false,recurringFrom:t.id,recurringMonths:undefined};
-   delete copy.recurringMonths;
-   state.transactions.push(copy);
-   t.recurringMonths.push(key);
-   changed=true;
- });
- if(changed)save();
+  if (error) {
+    console.error("Error eliminando producto de compra:", error);
+    alert("No se pudo eliminar el producto.\n\n" + error.message);
+    return;
+  }
+
+  await loadShoppingList();
 }
-function resolveAccountRef(ref){
- const accounts=state.accounts||[];
- if(ref==null)return null;
- const raw=String(ref);
- let a=accounts.find(x=>String(x.id)===raw);
- if(a)return a.id;
- a=accounts.find(x=>String(x.name).trim().toLowerCase()===raw.trim().toLowerCase());
- return a?a.id:null;
+
+async function clearCheckedShoppingItems() {
+  const { error } = await supabaseClient
+    .from("shopping_items")
+    .delete()
+    .eq("checked", true);
+
+  if (error) {
+    console.error("Error borrando comprados:", error);
+    alert("No se pudieron borrar los productos comprados.\n\n" + error.message);
+    return;
+  }
+
+  await loadShoppingList();
 }
-function normalizeExpenseReferences(){
- let changed=false;
- const seen=new Set();
- state.transactions.forEach(t=>{
-   if(!t.id){t.id=crypto.randomUUID();changed=true}
-   if(seen.has(t.id)){t.id=crypto.randomUUID();changed=true}
-   seen.add(t.id);
-   if(t.type==='transfer'){
-     const from=t.from??t.fromAccount??t.sourceAccount??t.origin??t.source;
-     const to=t.to??t.toAccount??t.destinationAccount??t.destination??t.target;
-     const rf=resolveAccountRef(from), rt=resolveAccountRef(to);
-     if(rf && t.from!==rf){t.from=rf;changed=true}
-     if(rt && t.to!==rt){t.to=rt;changed=true}
-     const amount=Number(t.amount);
-     if(Number.isFinite(amount) && amount<0){t.amount=Math.abs(amount);changed=true}
-   }else if(t.account){
-     const ra=resolveAccountRef(t.account);
-     if(ra && t.account!==ra){t.account=ra;changed=true}
-   }
- });
- if(changed)save();
+
+function createShoppingManualModal() {
+  if (document.getElementById("shopping-manual-modal")) return;
+
+  const modal = document.createElement("div");
+  modal.id = "shopping-manual-modal";
+
+  modal.innerHTML = `
+    <div class="shopping-manual-overlay"></div>
+
+    <div class="shopping-manual-box">
+      <div class="inventory-modal-header">
+        <div>
+          <small>LISTA DE COMPRA</small>
+          <h2>Añadir producto</h2>
+        </div>
+        <button type="button" class="modal-close" id="close-shopping-manual">×</button>
+      </div>
+
+      <form id="shopping-manual-form">
+        <label>
+          Producto
+          <input id="shopping-manual-name" type="text" placeholder="Ej. Leche" required>
+        </label>
+
+        <div class="form-row">
+          <label>
+            Cantidad
+            <input id="shopping-manual-quantity" type="number" min="0" step="0.01" placeholder="1">
+          </label>
+
+          <label>
+            Unidad
+            <select id="shopping-manual-unit">
+              <option value="unidad">unidad</option>
+              <option value="g">g</option>
+              <option value="kg">kg</option>
+              <option value="ml">ml</option>
+              <option value="l">l</option>
+              <option value="paquete">paquete</option>
+              <option value="bote">bote</option>
+              <option value="lata">lata</option>
+              <option value="ración">ración</option>
+            </select>
+          </label>
+        </div>
+
+        <label>
+          Notas
+          <textarea id="shopping-manual-notes" rows="3" placeholder="Opcional"></textarea>
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="cancel-shopping-manual">Cancelar</button>
+          <button type="submit" class="primary">Añadir a la lista</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const close = () => {
+    modal.classList.remove("open");
+    document.getElementById("shopping-manual-form")?.reset();
+  };
+
+  modal.querySelector("#close-shopping-manual").addEventListener("click", close);
+  modal.querySelector("#cancel-shopping-manual").addEventListener("click", close);
+  modal.querySelector(".shopping-manual-overlay").addEventListener("click", close);
+  modal.querySelector("#shopping-manual-form").addEventListener("submit", saveShoppingManualItem);
 }
-function expenseReconciliation(){
- const accounts=state.accounts||[], ids=new Set(accounts.map(a=>a.id)), tx=state.transactions||[];
- let income=0,expense=0,transferIn=0,transferOut=0,invalid=0,invalidTransfer=0,nonPositive=0;
- const issues=[];
- const seen=new Set();
- tx.forEach(t=>{
-   const amount=Number(t.amount);
-   if(!Number.isFinite(amount)||amount<=0){nonPositive++;issues.push({t,reason:'Importe no válido o igual a 0'});return}
-   if(seen.has(t.id)){issues.push({t,reason:'ID duplicado'});}else seen.add(t.id);
-   if(t.type==='transfer'){
-     if(!ids.has(t.from)||!ids.has(t.to)||t.from===t.to){invalidTransfer++;issues.push({t,reason:'Transferencia con cuenta de origen/destino no válida'});return}
-     transferOut+=amount;transferIn+=amount;
-   }else if(t.type==='income'){
-     if(!ids.has(t.account)){invalid++;issues.push({t,reason:'Ingreso asociado a una cuenta que no existe'});return}
-     income+=amount;
-   }else if(t.type==='expense'){
-     if(!ids.has(t.account)){invalid++;issues.push({t,reason:'Gasto asociado a una cuenta que no existe'});return}
-     expense+=amount;
-   }
- });
- const starting=accounts.reduce((s,a)=>s+Number(a.startingBalance||0),0);
- const totalBalances=accounts.reduce((s,a)=>s+accountBalance(a),0);
- const expected=starting+income-expense+transferIn-transferOut;
- const difference=totalBalances-expected;
- return {starting,income,expense,transferIn,transferOut,totalBalances,expected,difference,invalid,invalidTransfer,nonPositive,issues,ok:Math.abs(difference)<0.005&&invalid===0&&invalidTransfer===0&&nonPositive===0};
+
+function addShoppingManual() {
+  createShoppingManualModal();
+  const modal = document.getElementById("shopping-manual-modal");
+  modal.classList.add("open");
+  document.getElementById("shopping-manual-name").focus();
 }
-function reconciliationForm(){
- const r=expenseReconciliation();
- const status=r.ok?'<div class="reconcile-ok"><b>✓ Las cuentas cuadran</b><span>Los saldos actuales son coherentes con los saldos iniciales y todos los movimientos registrados.</span></div>':'<div class="reconcile-warn"><b>⚠ Hay algo que revisar</b><span>La diferencia calculada es '+money(r.difference)+' o hay movimientos con referencias inválidas.</span></div>';
- const issues=r.issues.slice(0,20).map(x=>`<div class="reconcile-issue"><b>${esc(x.t.concept||x.t.category||x.t.type||'Movimiento')}</b><span>${esc(x.reason)} · ${money(x.t.amount||0)} · ${esc(x.t.date||'Sin fecha')}</span></div>`).join('');
- return `<div class="form reconciliation-form">${status}<div class="reconcile-grid"><div><span>Saldo inicial total</span><b>${money(r.starting)}</b></div><div><span>Ingresos</span><b>${money(r.income)}</b></div><div><span>Gastos</span><b>${money(r.expense)}</b></div><div><span>Transferencias salientes</span><b>${money(r.transferOut)}</b></div><div><span>Transferencias entrantes</span><b>${money(r.transferIn)}</b></div><div><span>Saldos actuales</span><b>${money(r.totalBalances)}</b></div></div><p class="muted">El saldo inicial debe ser el saldo de la cuenta justo antes del primer movimiento que tienes registrado. Si introdujiste el saldo actual como “saldo inicial”, los movimientos históricos se volverán a sumar/restar y el saldo no cuadrará.</p>${issues?`<div class="reconcile-issues"><h4>Movimientos que revisar</h4>${issues}</div>`:''}<button class="secondary" onclick="closeModal();openModal('Configurar cuentas',accountsForm())">Revisar saldos iniciales</button></div>`;
+
+async function saveShoppingManualItem(event) {
+  event.preventDefault();
+
+  const name = document.getElementById("shopping-manual-name").value.trim();
+  const quantityValue = document.getElementById("shopping-manual-quantity").value;
+  const unit = document.getElementById("shopping-manual-unit").value;
+  const notes = document.getElementById("shopping-manual-notes").value.trim();
+
+  if (!name) {
+    alert("Escribe el nombre del producto.");
+    return;
+  }
+
+  const { ingredient, error: ingredientError } = await findOrCreateIngredient(name, unit);
+
+  if (ingredientError) {
+    console.error("Error creando ingrediente para compra:", ingredientError);
+    alert("No se pudo crear el ingrediente.\n\n" + ingredientError.message);
+    return;
+  }
+
+  const { error } = await supabaseClient
+    .from("shopping_items")
+    .insert({
+      ingredient_id: ingredient.id,
+      quantity: quantityValue ? Number(quantityValue) : null,
+      unit: unit || null,
+      checked: false,
+      notes: notes || null
+    });
+
+  if (error) {
+    console.error("Error añadiendo compra manual:", error);
+    alert("No se pudo añadir el producto.\n\n" + error.message);
+    return;
+  }
+
+  document.getElementById("shopping-manual-modal").classList.remove("open");
+  document.getElementById("shopping-manual-form")?.reset();
+  await loadShoppingList();
 }
-function monthKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
-function weekKey(d=new Date()){const x=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));const day=x.getUTCDay()||7;x.setUTCDate(x.getUTCDate()+4-day);const y=x.getUTCFullYear();const yearStart=new Date(Date.UTC(y,0,1));const w=Math.ceil((((x-yearStart)/86400000)+1)/7);return `${y}-W${String(w).padStart(2,'0')}`}
-function money(n){return new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(Number(n)||0)}
-function accountOptions(sel){return state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}</option>`).join('')}
-function accountBalance(a){return Number(a.startingBalance||0)+state.transactions.reduce((s,t)=>{if(t.type==='transfer'){if(t.from===a.id)s-=+t.amount;if(t.to===a.id)s+=+t.amount}else if(t.account===a.id)s+=(t.type==='income'?1:-1)*(+t.amount);return s},0)}
-function expenses(c){
- ensureRecurringTransactions();
- const key=state.expenseMonth||monthKey(), tx=state.transactions.filter(t=>(t.date||'').startsWith(key));
- const income=tx.filter(t=>t.type==='income').reduce((s,t)=>s+ +t.amount,0), spent=tx.filter(t=>t.type==='expense').reduce((s,t)=>s+ +t.amount,0);
- const transfers=tx.filter(t=>t.type==='transfer').length;
- const budgets=state.budgets.filter(b=>b.month===key), totalBudget=budgets.reduce((s,b)=>s+ +b.amount,0);
- const byCat={};tx.filter(t=>t.type==='expense').forEach(t=>byCat[t.category]=(byCat[t.category]||0)+ +t.amount);
- const budgetCategories=new Set(budgets.map(b=>b.category));
- const budgetedSpent=[...budgetCategories].reduce((s,cat)=>s+(byCat[cat]||0),0);
- const title=new Date(key+'-01T12:00').toLocaleDateString('es-ES',{month:'long',year:'numeric'});
- c.innerHTML=`<div class="expenses-page">
-  <section class="expense-header">
-   <div><span class="eyebrow">Finanzas</span><h2>Gastos</h2><p>Controla tus cuentas, movimientos y presupuesto sin complicarte.</p></div>
-   <div class="actions"><button class="secondary" onclick="openModal('Nueva transferencia',transferForm())">Transferir</button><button class="primary" onclick="openModal('Nuevo gasto',expenseForm())">+ Nuevo movimiento</button></div>
-  </section>
-  <section class="expense-monthbar"><button class="month-arrow" onclick="changeExpenseMonth(-1)">‹</button><div><span>Mes seleccionado</span><strong>${title}</strong></div><button class="month-arrow" onclick="changeExpenseMonth(1)">›</button></section>
-  <section class="expense-kpis"><div><span>Ingresos</span><strong>${money(income)}</strong></div><div><span>Gastos</span><strong>${money(spent)}</strong></div><div><span>Balance</span><strong>${money(income-spent)}</strong></div><div><span>Presupuesto disponible</span><strong>${totalBudget?money(totalBudget-budgetedSpent):'—'}</strong><small>${totalBudget?money(totalBudget)+' presupuestados':'Sin presupuestos este mes'}</small></div></section>
-  <div class="expense-layout">
-   <section class="expense-panel movements-panel"><div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos en ${title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
-    <div class="movement-list">${tx.sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos este mes.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
-   </section>
-   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button></div></div><div class="account-cards">${state.accounts.map(a=>`<div class="account-card"><div><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div><strong>${money(accountBalance(a))}</strong></div>`).join('')}</div></section>
-    <section class="expense-panel"><div class="panel-heading"><div><h3>Por categoría</h3><span>Gasto real del mes</span></div></div><div class="category-totals">${Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div><span>${esc(k)}</span><b>${money(v)}</b></div>`).join('')||'<span class="muted">Todavía no hay gastos.</span>'}</div></section></aside>
-  </div>
-  <div class="expense-bottom"><section class="expense-panel"><div class="panel-heading"><div><h3>Presupuestos</h3><span>Límite mensual por categoría</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100),over=s>b.amount;return `<div class="budget-item"><div class="row"><div><b>${esc(b.category)}</b><small>${money(s)} de ${money(b.amount)}</small></div><div class="budget-actions"><strong class="${over?'over-budget':''}">${over?'Excedido':money(b.amount-s)+' disponible'}</strong><button class="icon-button" onclick="openModal('Editar presupuesto',budgetForm(${JSON.stringify(b).replace(/"/g,'&quot;')}))">⋯</button></div></div><div class="budget-bar"><i class="${over?'over':''}" style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No tienes presupuestos configurados.</div>'}</div></section>
-   <section class="expense-panel recurring-panel"><div class="panel-heading"><div><h3>Recurrentes</h3><span>Se generan automáticamente cada mes</span></div><button class="secondary small" onclick="openModal('Nuevo gasto recurrente',expenseForm())">+ Añadir</button></div><div class="recurring-list">${state.transactions.filter(t=>t.recurring&&!t.recurringFrom).map(t=>`<div class="recurring-row"><div><b>${esc(t.concept||t.category||'Movimiento')}</b><span>${t.type==='transfer'?`${esc(state.accounts.find(a=>a.id===t.from)?.name||'')} → ${esc(state.accounts.find(a=>a.id===t.to)?.name||'')}`:esc(t.category||'')} · día ${t.recurringDay||'—'}</span></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="${t.type==='transfer'?`editTransfer('${t.id}')`:`editExpense('${t.id}')`}">Editar</button></div>`).join('')||'<div class="muted">Todavía no hay movimientos recurrentes.</div>'}</div></section>
-  </div>
- </div>`;
+
+async function generateShoppingList() {
+  const button = document.getElementById("generate-shopping-button");
+
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Calculando…";
+  }
+
+  try {
+    const weekStart = dateToISO(menuWeekStart);
+
+    const { data: plans, error: planError } = await supabaseClient
+      .from("meal_plans")
+      .select("id")
+      .eq("week_start", weekStart)
+      .limit(1);
+
+    if (planError) throw planError;
+
+    const plan = plans?.[0];
+    if (!plan) {
+      alert("Primero crea o genera el menú de esta semana.");
+      return;
+    }
+
+    const { data: menuItems, error: menuError } = await supabaseClient
+      .from("meal_plan_items")
+      .select("recipe_id")
+      .eq("meal_plan_id", plan.id)
+      .in("meal_type", ["comida", "cena"])
+      .not("recipe_id", "is", null);
+
+    if (menuError) throw menuError;
+
+    const recipeIds = [...new Set((menuItems || []).map(item => item.recipe_id).filter(Boolean))];
+
+    if (!recipeIds.length) {
+      alert("El menú de esta semana todavía no tiene recetas.");
+      return;
+    }
+
+    const { data: recipeIngredients, error: ingredientError } = await supabaseClient
+      .from("recipe_ingredients")
+      .select(`
+        recipe_id,
+        quantity,
+        unit,
+        ingredients (
+          id,
+          name,
+          default_unit
+        )
+      `)
+      .in("recipe_id", recipeIds);
+
+    if (ingredientError) throw ingredientError;
+
+    const requirements = new Map();
+
+    for (const row of recipeIngredients || []) {
+      const ingredient = row.ingredients;
+      if (!ingredient?.id) continue;
+
+      const quantity = row.quantity === null || row.quantity === undefined ? null : Number(row.quantity);
+      const unit = row.unit || ingredient.default_unit || "unidad";
+      const unitInfo = shoppingUnitInfo(unit);
+      const key = `${ingredient.id}::${unitInfo.group}`;
+
+      if (!requirements.has(key)) {
+        requirements.set(key, {
+          ingredientId: ingredient.id,
+          name: ingredient.name,
+          quantity,
+          unit,
+          unitInfo
+        });
+      } else {
+        const current = requirements.get(key);
+        if (quantity === null || current.quantity === null) {
+          current.quantity = null;
+        } else {
+          current.quantity += quantity;
+        }
+      }
+    }
+
+    const ingredientIds = [...new Set([...requirements.values()].map(item => item.ingredientId))];
+
+    const { data: inventory, error: inventoryError } = await supabaseClient
+      .from("inventory")
+      .select("ingredient_id, quantity, unit")
+      .in("ingredient_id", ingredientIds);
+
+    if (inventoryError) throw inventoryError;
+
+    const inventoryByKey = new Map();
+
+    for (const item of inventory || []) {
+      if (item.quantity === null || item.quantity === undefined) continue;
+
+      const quantity = Number(item.quantity);
+      const unitInfo = shoppingUnitInfo(item.unit || "unidad");
+      const key = `${item.ingredient_id}::${unitInfo.group}`;
+
+      if (!inventoryByKey.has(key)) {
+        inventoryByKey.set(key, { quantity: quantity * unitInfo.factor });
+      } else {
+        inventoryByKey.get(key).quantity += quantity * unitInfo.factor;
+      }
+    }
+
+    const generatedItems = [];
+
+    for (const requirement of requirements.values()) {
+      const inventoryKey = `${requirement.ingredientId}::${requirement.unitInfo.group}`;
+      const available = inventoryByKey.get(inventoryKey)?.quantity || 0;
+
+      if (requirement.quantity === null) {
+        if (available > 0) continue;
+
+        generatedItems.push({
+          ingredient_id: requirement.ingredientId,
+          quantity: null,
+          unit: requirement.unit,
+          checked: false,
+          notes: getShoppingGeneratedNote()
+        });
+        continue;
+      }
+
+      const requiredBase = requirement.quantity * requirement.unitInfo.factor;
+      const missingBase = Math.max(0, requiredBase - available);
+
+      if (missingBase <= 0) continue;
+
+      generatedItems.push({
+        ingredient_id: requirement.ingredientId,
+        quantity: Number((missingBase / requirement.unitInfo.factor).toFixed(3)),
+        unit: requirement.unit,
+        checked: false,
+        notes: getShoppingGeneratedNote()
+      });
+    }
+
+    const generatedNote = getShoppingGeneratedNote();
+
+    const { error: deleteGeneratedError } = await supabaseClient
+      .from("shopping_items")
+      .delete()
+      .eq("notes", generatedNote);
+
+    if (deleteGeneratedError) throw deleteGeneratedError;
+
+    if (generatedItems.length) {
+      const { error: insertError } = await supabaseClient
+        .from("shopping_items")
+        .insert(generatedItems);
+
+      if (insertError) throw insertError;
+    }
+
+    await loadShoppingList();
+
+    alert(
+      generatedItems.length
+        ? `Lista generada: ${generatedItems.length} ${generatedItems.length === 1 ? "producto pendiente" : "productos pendientes"}.`
+        : "No falta ningún ingrediente del menú teniendo en cuenta tu inventario."
+    );
+  } catch (error) {
+    console.error("Error generando lista de compra:", error);
+    alert("No se pudo generar la lista de compra.\n\n" + (error.message || "Error desconocido"));
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "✦ Generar desde menú";
+    }
+  }
 }
-function expenseRow(t){
- if(t.type==='transfer')return `<div class="movement-row transfer"><div class="movement-icon">↔</div><div class="movement-main"><b>${esc(t.concept||'Transferencia')}</b><span>${esc(state.accounts.find(a=>a.id===t.from)?.name||'')} → ${esc(state.accounts.find(a=>a.id===t.to)?.name||'')} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}</span></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="editTransfer('${t.id}')">Editar</button></div>`;
- const income=t.type==='income';
- return `<div class="movement-row ${income?'income':'expense'}"><div class="movement-icon">${income?'↓':'−'}</div><div class="movement-main"><b>${esc(t.concept||t.category)}</b><span>${esc(t.category||'')} · ${esc(state.accounts.find(a=>a.id===t.account)?.name||'')} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}${t.ticket?' · Ticket':''}</span></div><strong>${income?'+':'−'}${money(t.amount)}</strong><button class="secondary small" onclick="editExpense('${t.id}')">Editar</button></div>`;
+
+function setupShoppingControls() {
+  const page = document.getElementById("compra");
+  if (!page) return;
+
+  const addButton = page.querySelector(".shopping-header-actions .secondary");
+  if (addButton) addButton.onclick = addShoppingManual;
+
+  const generateButton = document.getElementById("generate-shopping-button");
+  if (generateButton) generateButton.onclick = generateShoppingList;
 }
-function expenseForm(t=null){const cat=t?.category||'Comida';return `<div class="form"><label>Tipo<select id="fExpenseType"><option value="expense" ${t?.type!=='income'?'selected':''}>Gasto</option><option value="income" ${t?.type==='income'?'selected':''}>Ingreso</option></select></label><label>Importe<input id="fExpenseAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Categoría<select id="fExpenseCategory">${categoryOptions(cat)}</select></label><label>Concepto<input id="fExpenseConcept" value="${esc(t?.concept||'')}" placeholder="Ej. Compra semanal"></label><div class="form-two"><label>Fecha<input id="fExpenseDate" type="date" value="${t?.date||todayKey()}"></label><label>Cuenta<select id="fExpenseAccount">${accountOptions(t?.account)}</select></label></div><label>Notas<textarea id="fExpenseNotes">${esc(t?.notes||'')}</textarea></label><label>Foto del ticket<input id="fExpenseTicket" type="file" accept="image/*">${t?.ticket?'<small>Ya hay un ticket guardado. Si eliges otro, lo sustituirá.</small>':''}</label><label class="checkline"><input id="fExpenseRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label>Día del mes<input id="fExpenseRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveExpense('${t?.id||''}')">${t?'Guardar cambios':'Guardar movimiento'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
-function categoryOptions(sel=''){return Object.entries(expenseCategories).map(([g,arr])=>`<optgroup label="${g}">${arr.map(x=>`<option value="${esc(x)}" ${x===sel?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}
-async function saveExpense(id){const amount=+document.querySelector('#fExpenseAmount').value;if(!amount)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type=document.querySelector('#fExpenseType').value;t.amount=amount;t.category=document.querySelector('#fExpenseCategory').value;t.concept=document.querySelector('#fExpenseConcept').value.trim();t.date=document.querySelector('#fExpenseDate').value;t.account=document.querySelector('#fExpenseAccount').value;t.notes=document.querySelector('#fExpenseNotes').value.trim();const f=document.querySelector('#fExpenseTicket').files[0];if(f)t.ticket=await fileToData(f);t.recurring=document.querySelector('#fExpenseRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fExpenseRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
-function editExpense(id){const t=state.transactions.find(x=>x.id===id);if(t)openModal(t.type==='income'?'Editar ingreso':'Editar gasto',expenseForm(t))}
-function deleteTransaction(id){state.transactions=state.transactions.filter(x=>x.id!==id);save();closeModal();render()}
-function transferForm(t=null){return `<div class="form"><label>De<select id="fTransferFrom">${accountOptions(t?.from)}</select></label><label>A<select id="fTransferTo">${accountOptions(t?.to)}</select></label><label>Importe<input id="fTransferAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Fecha<input id="fTransferDate" type="date" value="${t?.date||todayKey()}"></label><label>Concepto<input id="fTransferConcept" value="${esc(t?.concept||'')}"></label><label class="checkline"><input id="fTransferRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label>Día del mes<input id="fTransferRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveTransfer('${t?.id||''}')">${t?'Guardar cambios':'Guardar transferencia'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
-function saveTransfer(id=''){const from=document.querySelector('#fTransferFrom').value,to=document.querySelector('#fTransferTo').value,amount=+document.querySelector('#fTransferAmount').value;if(!amount||from===to)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type='transfer';t.from=from;t.to=to;t.amount=amount;t.date=document.querySelector('#fTransferDate').value;t.concept=document.querySelector('#fTransferConcept').value.trim()||'Transferencia';t.recurring=document.querySelector('#fTransferRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fTransferRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
-function editTransfer(id){const t=state.transactions.find(x=>x.id===id);if(t)openModal('Editar transferencia',transferForm(t))}
-function budgetForm(b=null){return `<div class="form"><label>Categoría<select id="fBudgetCategory">${Object.entries(expenseCategories).filter(([g])=>g!=='Ingresos').map(([g,a])=>`<optgroup label="${g}">${a.map(x=>`<option value="${esc(x)}" ${x===b?.category?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}</select></label><label>Importe mensual<input id="fBudgetAmount" type="number" step="0.01" value="${b?.amount??''}"></label><button class="primary" onclick="saveBudget('${b?.id||''}')">${b?'Guardar cambios':'Guardar presupuesto'}</button>${b?`<button class="danger-button" onclick="deleteBudget('${b.id}')">Eliminar</button>`:''}</div>`}
-function saveBudget(id=''){let category=document.querySelector('#fBudgetCategory').value,amount=+document.querySelector('#fBudgetAmount').value,key=state.expenseMonth||monthKey();if(!amount)return;let b=id?state.budgets.find(x=>x.id===id):state.budgets.find(x=>x.month===key&&x.category===category);if(b){b.category=category;b.amount=amount;b.month=key}else state.budgets.push({id:crypto.randomUUID(),month:key,category,amount});save();closeModal();render()}
-function deleteBudget(id){state.budgets=state.budgets.filter(x=>x.id!==id);save();closeModal();render()}
-function accountsForm(){return `<div class="form accounts-form">${state.accounts.map(a=>`<div class="account-edit"><div><b>${esc(a.name)}</b><span>Saldo inicial</span></div><input id="acc-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></div>`).join('')}<button class="primary" onclick="saveAccounts()">Guardar saldos</button></div>`}
-function saveAccounts(){state.accounts.forEach(a=>{const el=document.querySelector('#acc-'+a.id);if(el)a.startingBalance=Number(el.value)||0});save();closeModal();render()}
-function expiringInventory(){
- const limit=new Date(); limit.setHours(23,59,59,999); limit.setDate(limit.getDate()+7);
- return state.inventory.filter(x=>x.expiry&&new Date(x.expiry+'T12:00:00')<=limit&&new Date(x.expiry+'T12:00:00')>=new Date(todayKey()+'T00:00:00')).sort((a,b)=>String(a.expiry).localeCompare(String(b.expiry)));
-}
-function menuRecipeTitle(name,extraClass='',recipeId=null){
- const recipe=(recipeId?state.recipes.find(r=>String(r.id)===String(recipeId)):null)||state.recipes.find(r=>r.name===name);
- if(!recipe)return `<strong class="${extraClass}">${esc(name||'Sin planificar')}</strong>`;
- if(extraClass.includes('home-menu-recipe-title')) return `<strong class="${extraClass} home-menu-recipe-click" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</strong>`;
- return `<button class="menu-recipe-link ${extraClass}" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</button>`;
-}
-function food(c){
- const inv=state.inventory, prep=state.preparations, menu=state.menu;
- const counts={freezer:inv.filter(x=>x.storage==='freezer').length,pantry:inv.filter(x=>x.storage==='pantry').length,fresh:inv.filter(x=>x.storage==='fresh').length};
- const days=['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo']; const slots=menu?.days||{}; const f=state.settings.food||{};
- const shopping=shoppingItems(), weeklyPrep=menuPreparations(), pendingShop=shopping.filter(x=>!state.shoppingChecks[x.key]).length, pendingPrep=weeklyPrep.filter(x=>!state.prepDone[x.id]).length;
- c.innerHTML=`<div class="food-page">
- <section class="food-hero"><div><span class="eyebrow">Organización de comidas</span><h2>Comidas</h2><p>Planifica la semana aprovechando lo que ya tienes, sin obligarte a usarlo todo.</p></div><div class="actions"><button class="secondary" onclick="openModal('Añadir a Comidas',foodQuickForm())">+ Añadir</button><button class="primary" onclick="generateMenu()">Generar propuesta</button></div></section>
- <section class="food-preferences"><button class="pref-chip ${f.useInventory!==false?'active':''}" onclick="toggleFoodPref('useInventory')">Aprovechar lo que tengo</button><button class="pref-chip ${f.quickMeals!==false?'active':''}" onclick="toggleFoodPref('quickMeals')">Comidas rápidas</button><button class="pref-chip ${f.vegetables!==false?'active':''}" onclick="toggleFoodPref('vegetables')">Más verduras</button><button class="pref-chip ${f.twoTuppers!==false?'active':''}" onclick="toggleFoodPref('twoTuppers')">2 tuppers</button><button class="pref-chip ${f.sweet?'active':''}" onclick="toggleFoodPref('sweet')">Incluir dulce</button><button class="pref-chip ${f.bread?'active':''}" onclick="toggleFoodPref('bread')">Hacer pan</button></section>
- <section class="food-stats"><div><span>Congelador</span><strong>${counts.freezer}</strong><small>productos</small></div><div><span>Despensa</span><strong>${counts.pantry}</strong><small>productos</small></div><div><span>Frescos</span><strong>${counts.fresh}</strong><small>productos</small></div><div><span>Recetas</span><strong>${state.recipes.length}</strong><small>guardadas</small></div></section>
- <div class="food-layout"><section class="food-panel menu-panel"><div class="panel-heading"><div><h3>Menú semanal</h3><span>${menu?.status==='accepted'?'Menú aceptado':'Propuesta pendiente de revisar'}</span></div>${menu?`<div class="actions"><button class="secondary small" onclick="generateMenu()">Regenerar</button><button class="primary small" onclick="acceptMenu()">Aceptar menú</button></div>`:''}</div>
- <div class="weekly-menu">${days.map((d,i)=>{const x=slots[i]||{};const manualLunch=!!state.menu?.manualSlots?.[`${i}:lunch`];const manualDinner=!!state.menu?.manualSlots?.[`${i}:dinner`];const outsideLunch=!!state.menu?.outsideSlots?.[`${i}:lunch`];const outsideDinner=!!state.menu?.outsideSlots?.[`${i}:dinner`];return `<div class="menu-day"><div class="menu-day-head"><b>${d}</b><div class="menu-day-actions"><button class="menu-day-action ${manualLunch?'selected':''}" onclick="openMenuRecipePicker(${i},'lunch')" title="Elegir o cambiar la comida">Comida${manualLunch?' ✓':' ↻'}</button><button class="menu-day-action ${manualDinner?'selected':''}" onclick="openMenuRecipePicker(${i},'dinner')" title="Elegir o cambiar la cena">Cena${manualDinner?' ✓':' ↻'}</button></div>${x.tupper?'<span class="pill">Tupper</span>':''}</div><div class="meal-line"><span>Comida</span>${outsideLunch?'<span class="menu-outside">🍴 Comer fuera</span>':menuRecipeTitle(x.lunch,'menu-meal-title',x.lunchId)}</div><div class="meal-line"><span>Cena</span>${outsideDinner?'<span class="menu-outside">🍴 Comer fuera</span>':menuRecipeTitle(x.dinner,'menu-meal-title',x.dinnerId)}</div><div class="meal-line breakfast"><span>Desayuno</span>${menuRecipeTitle(x.breakfast,'menu-meal-title',x.breakfastId)}</div></div>`}).join('')||'<div class="empty-state">Genera una propuesta para empezar.</div>'}</div>
- <section class="food-panel weekly-sweet-card"><div class="panel-heading"><div><h3>🍰 Dulce de la semana</h3><span>Una vez a la semana, sin merienda diaria</span></div>${menu?.sweet?`<button class="secondary small" onclick="changeWeeklySweet()">Cambiar dulce</button>`:''}</div>${menu?.sweet?menuRecipeTitle(menu.sweet,'menu-sweet-title'):'<span class="muted">Activa “Incluir dulce” y genera un menú.</span>'}</section>
- ${menu?.status==='proposal'?'<div class="menu-hint">Revisa el menú y usa los botones <b>Comida</b> y <b>Cena</b> de cada día para elegir o cambiar una receta. Las elecciones manuales se mantienen mientras revisas este menú, pero al regenerarlo se crea una propuesta nueva. Cuando te guste, pulsa <b>Aceptar menú</b>.</div>':''}<div class="menu-history-inline"><div><b>Historial de menús</b><span>${(state.menuHistory||[]).length} guardados</span></div>${(state.menuHistory||[]).length?`<button class="text-button" onclick="openModal('Historial de menús',menuHistoryForm())">Ver historial →</button>`:'<span class="muted">Al aceptar un menú se guardará aquí.</span>'}</div></section>
- <aside class="food-side"><section class="food-panel"><div class="panel-heading"><div><h3>Inventario</h3><span>Lo que tienes ahora</span></div><div class="actions"><button class="secondary small" onclick="document.querySelector('#inventoryImportInput').click()">Importar</button><input id="inventoryImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importInventory(this)"><button class="secondary small" onclick="openModal('Nuevo producto',inventoryForm())">+ Añadir</button></div></div><div class="inventory-mini"><div><b>Congelador</b><span>${counts.freezer}</span></div><div><b>Despensa</b><span>${counts.pantry}</span></div><div><b>Frescos</b><span>${counts.fresh}</span></div></div>${expiringInventory().length?`<div class="food-alert"><b>Próximo a caducar</b><span>${expiringInventory().map(x=>esc(x.name)).join(', ')}</span></div>`:''}<button class="text-button" onclick="openModal('Inventario',inventoryListForm())">Ver y gestionar inventario →</button></section>
- <section class="food-panel"><div class="panel-heading"><div><h3>Preparar esta semana</h3><span>${state.menu?`${pendingPrep} pendientes`:'Según el menú semanal'}</span></div><div class="actions"><button class="secondary small" onclick="openModal('Nueva preparación',preparationForm())">+ Añadir</button>${state.preparations.length?'<button class="secondary small" onclick="openModal(\'Preparaciones\',preparationsListForm())">Gestionar</button>':''}</div></div><div class="prep-list">${weeklyPrep.slice(0,6).map(x=>`<div class="prep-row ${state.prepDone[x.id]?'done':''}"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')" aria-label="Marcar preparación">${state.prepDone[x.id]?'✓':''}</button><button class="prep-content" onclick="viewPreparation('${x.id}')"><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${x.freezable?'Congelable':'Para consumir'}</small></button></div>`).join('')||(state.menu?'<div class="muted">Este menú no necesita ninguna preparación guardada.</div>':'<div class="muted">Genera un menú para ver solo las preparaciones que realmente necesitan tus recetas.</div>')}</div>${weeklyPrep.length>6?`<button class="text-button" onclick="openModal('Preparaciones del menú',preparationsListForm(weeklyPrep))">Ver todas →</button>`:''}</section></aside></div>
- <section class="food-panel shopping-panel"><div class="panel-heading"><div><h3>Lista de la compra</h3><span>${pendingShop} pendientes · ${shopping.length} en total</span></div><button class="secondary small" onclick="openModal('Lista de la compra',shoppingForm())">Ver lista</button></div><div class="shopping-progress"><div><span style="width:${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}%"></span></div><small>${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}% completada</small></div><div class="shopping-preview">${shopping.slice(0,8).map(x=>`<button class="shopping-item ${state.shoppingChecks[x.key]?'done':''}" onclick="toggleShopping('${x.key}')"><span>${state.shoppingChecks[x.key]?'✓':'○'}</span>${esc(x.name)}</button>`).join('')||'<span class="muted">Se calculará al aceptar un menú.</span>'}</div></section>
- ${menu?.status==='accepted'?`<section class="food-panel consumption-panel"><div class="panel-heading"><div><h3>Consumo del menú</h3><span>Revisa antes de descontar el inventario</span></div><button class="secondary small" onclick="openModal('Consumo del menú',menuConsumptionForm())">${menu.consumptionRegistered?'Consumo registrado':'Revisar consumo'}</button></div><p class="muted">${menu.consumptionRegistered?'Este menú ya se ha descontado del inventario.':'Tus productos no se descuentan automáticamente; tú decides cuándo hacerlo.'}</p></section>`:''}
- <section class="food-panel recipes-panel"><div class="panel-heading"><div><h3>Mis recetas</h3><span>${state.recipes.length} guardadas</span></div><div class="actions"><button class="secondary small" onclick="document.querySelector('#recipeImportInput').click()">Importar recetas</button><input id="recipeImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importRecipes(this)"><button class="primary small" onclick="openModal('Añadir receta',recipeForm())">+ Añadir receta</button></div></div><div class="recipe-grid">${state.recipes.map(r=>`<article class="recipe-card"><div class="recipe-card-top"><span class="pill">${esc(recipeTypeLabel(r))}</span><div class="recipe-card-marks">${r.funRecipe?'<span class="recipe-mark fun" title="Receta divertida" aria-label="Receta divertida">🎉</span>':''}${r.freezable?'<span class="recipe-mark freeze" title="Se puede congelar" aria-label="Se puede congelar">❄️</span>':''}${r.favorite?'<span class="favorite-mark" title="Favorita">★</span>':''}</div></div><h4>${esc(r.name)}</h4><p>${esc(r.description||'Sin descripción')}</p><div class="recipe-meta"><span>${r.servings||1} raciones</span><span>${esc(r.time||'Tiempo no indicado')}</span>${r.freezable?'<span>Congelable</span>':''}</div><div class="actions"><button class="secondary small" onclick="viewRecipe('${r.id}')">Ver</button><button class="secondary small" onclick="editRecipe('${r.id}')">Editar</button></div></article>`).join('')||'<div class="empty-state">Todavía no tienes recetas. Añade la primera.</div>'}</div></section></div>`;
-}
-function foodQuickForm(){return `<div class="actions food-quick"><button class="primary" onclick="closeModal();openModal('Nuevo producto',inventoryForm())">Producto de inventario</button><button class="secondary" onclick="closeModal();openModal('Añadir receta',recipeForm())">Receta</button><button class="secondary" onclick="closeModal();openModal('Nueva preparación',preparationForm())">Preparación</button></div>`}
-function toggleFoodPref(key){state.settings.food=state.settings.food||{};state.settings.food[key]=!state.settings.food[key];save();render()}
-function normalizeInventoryImportName(n){return String(n||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ')}
-async function importInventory(input){
- const file=input.files?.[0];if(!file)return;
- try{
-  const text=await file.text();let incoming=[];
-  if(file.name.toLowerCase().endsWith('.csv')){
-   const lines=text.split(/\r?\n/).filter(Boolean);const headers=lines.shift().split(',').map(x=>x.trim().replace(/^"|"$/g,''));
-   incoming=lines.map(line=>{const cols=line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(x=>x.trim().replace(/^"|"$/g,''));const o={};headers.forEach((h,i)=>o[h]=cols[i]??'');return o})
-  }else{incoming=JSON.parse(text)}
-  if(!Array.isArray(incoming))throw new Error('El archivo debe contener una lista de productos.');
-  const filename=file.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-  const forcedStorage=filename.includes('congelador')||filename.includes('freezer')?'freezer':(filename.includes('despensa')||filename.includes('pantry')?'pantry':null);
-  const valid=incoming.map(x=>({
-    id:x.id||crypto.randomUUID(),
-    name:String(x.name||'').trim(),
-    quantity:String(x.quantity??'').trim(),
-    storage:forcedStorage||normalizeStorageValue(x.storage,'pantry'),
-    expiry:String(x.expiry||'').trim(),
-    notes:String(x.notes||'').trim()
-  })).filter(x=>x.name);
-  if(!valid.length){input.value='';alert('No se han encontrado productos válidos.');return}
-  const byId=new Map(state.inventory.map(x=>[String(x.id||''),x]));
-  const byNameStorage=new Map(state.inventory.map(x=>[normalizeInventoryImportName(x.name)+'|'+normalizeStorageValue(x.storage,'pantry'),x]));
-  let updated=0;
-  const incomingIds=new Set();
-  valid.forEach(x=>{
-    // Prefer ID, but also match by product name + destination storage.
-    // This fixes old imports where freezer products were incorrectly saved as pantry.
-    const key=normalizeInventoryImportName(x.name)+'|'+x.storage;
-    const existing=byId.get(String(x.id))||byNameStorage.get(key);
-    if(existing){
-      Object.assign(existing,x);
-      updated++;
-      incomingIds.add(String(existing.id));
-      byNameStorage.set(key,existing);
+
+
+/* =========================================================
+   IMPORTACIÓN DE RECETAS
+   ========================================================= */
+
+function openRecipeImportModal() {
+  document.querySelectorAll(".recipe-import-modal").forEach(modal => modal.remove());
+
+  const modal = document.createElement("div");
+  modal.className = "recipe-import-modal open";
+
+  modal.innerHTML = `
+    <div class="recipe-import-overlay"></div>
+
+    <div class="recipe-import-box">
+      <div class="inventory-modal-header">
+        <div>
+          <small>IMPORTAR RECETAS</small>
+          <h2>Importar desde archivo</h2>
+        </div>
+        <button type="button" class="modal-close recipe-import-close">×</button>
+      </div>
+
+      <div class="recipe-import-help">
+        <p><strong>Formatos admitidos:</strong> JSON y CSV.</p>
+        <p>Se pueden importar varias recetas de una vez. Los ingredientes se crean automáticamente si todavía no existen.</p>
+        <p class="recipe-import-note">Los campos reconocidos incluyen nombre, descripción, preparación, raciones, tiempos, temperatura, imagen, receta divertida, congelable, no sugerir e ingredientes.</p>
+      </div>
+
+      <label class="recipe-import-file">
+        Archivo
+        <input id="recipe-import-file" type="file" accept=".json,.csv,application/json,text/csv">
+      </label>
+
+      <div id="recipe-import-preview" class="recipe-import-preview">
+        Selecciona un archivo para ver una vista previa.
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="secondary recipe-import-cancel">Cancelar</button>
+        <button type="button" class="primary recipe-import-submit" disabled>Importar recetas</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  const fileInput = modal.querySelector("#recipe-import-file");
+  const preview = modal.querySelector("#recipe-import-preview");
+  const submit = modal.querySelector(".recipe-import-submit");
+
+  let parsedRecipes = [];
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files?.[0];
+    parsedRecipes = [];
+    submit.disabled = true;
+
+    if (!file) {
+      preview.textContent = "Selecciona un archivo para ver una vista previa.";
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      parsedRecipes = parseRecipeImportFile(file.name, text);
+
+      if (!parsedRecipes.length) {
+        preview.innerHTML = "<strong>No se encontraron recetas válidas.</strong>";
+        return;
+      }
+
+      submit.disabled = false;
+      preview.innerHTML = `
+        <strong>${parsedRecipes.length} ${parsedRecipes.length === 1 ? "receta encontrada" : "recetas encontradas"}</strong>
+        <div class="recipe-import-preview-list">
+          ${parsedRecipes.slice(0, 8).map(recipe => `
+            <div>
+              <strong>${escapeHtml(recipe.name)}</strong>
+              <span>${recipe.ingredients?.length || 0} ingrediente${recipe.ingredients?.length === 1 ? "" : "s"}</span>
+            </div>
+          `).join("")}
+          ${parsedRecipes.length > 8 ? `<small>… y ${parsedRecipes.length - 8} más</small>` : ""}
+        </div>
+      `;
+    } catch (error) {
+      console.error("Error leyendo importación:", error);
+      preview.innerHTML = `<strong>No se pudo leer el archivo.</strong><br>${escapeHtml(error.message)}`;
     }
   });
-  const keys=new Set(state.inventory.map(x=>normalizeInventoryImportName(x.name)+'|'+(x.storage||'pantry')));
-  const additions=valid.filter(x=>{
-    if(incomingIds.has(String(x.id)))return false;
-    const key=normalizeInventoryImportName(x.name)+'|'+x.storage;
-    if(keys.has(key))return false;
-    keys.add(key);return true;
+
+  modal.querySelector(".recipe-import-close").addEventListener("click", () => modal.remove());
+  modal.querySelector(".recipe-import-cancel").addEventListener("click", () => modal.remove());
+  modal.querySelector(".recipe-import-overlay").addEventListener("click", () => modal.remove());
+
+  submit.addEventListener("click", async () => {
+    submit.disabled = true;
+    submit.textContent = "Importando…";
+
+    const result = await importRecipes(parsedRecipes);
+
+    if (result.success) {
+      modal.remove();
+      await loadRecipes();
+      alert(`${result.count} ${result.count === 1 ? "receta importada" : "recetas importadas"} correctamente.`);
+      return;
+    }
+
+    submit.disabled = false;
+    submit.textContent = "Importar recetas";
+    preview.innerHTML = `
+      <strong>La importación terminó con avisos.</strong>
+      <p>${escapeHtml(result.message)}</p>
+    `;
   });
-  const skipped=valid.length-additions.length-updated;
-  if(!updated&&!additions.length){input.value='';alert(`No se ha añadido ningún producto. ${skipped} ya estaban en ese almacenamiento.`);return}
-  const locations={freezer:'Congelador',pantry:'Despensa',fresh:'Frescos'};
-  const summary=[...new Set(valid.map(x=>locations[x.storage]))].join(', ');
-  if(!confirm(`Se van a importar ${valid.length} productos (${summary}).\n\nNuevos: ${additions.length} · Actualizados: ${updated} · Sin cambios: ${Math.max(0,skipped)}.\n\n¿Continuar?`)){input.value='';return}
-  state.inventory.push(...additions);delete state.inventoryClearedAt;localCacheFromState();render();await syncFoodModule('inventory',state.inventory);input.value='';
-  alert(`Importación completada: ${additions.length} añadidos, ${updated} actualizados y ${Math.max(0,skipped)} sin cambios.`)
- }catch(err){input.value='';alert('No se ha podido importar el inventario. Revisa que el JSON o CSV tenga un formato válido.')}
-}
-function inventoryForm(item=null){return `<div class="form"><label>Producto<input id="fInvName" value="${esc(item?.name||'')}" placeholder="Ej. pechuga de pollo"></label><div class="form-two"><label>Cantidad<input id="fInvQty" value="${esc(item?.quantity||'')}" placeholder="Ej. 2 unidades"></label><label>Ubicación<select id="fInvStorage"><option value="freezer" ${item?.storage==='freezer'?'selected':''}>Congelador</option><option value="pantry" ${item?.storage==='pantry'?'selected':''}>Despensa</option><option value="fresh" ${item?.storage==='fresh'?'selected':''}>Frescos</option></select></label></div><label>Fecha de caducidad / consumo preferente<input id="fInvExpiry" type="date" value="${item?.expiry||''}"></label><label>Notas<textarea id="fInvNotes">${esc(item?.notes||'')}</textarea></label><button class="primary" onclick="saveInventory('${item?.id||''}')">${item?'Guardar cambios':'Añadir producto'}</button>${item?`<button class="danger-button" onclick="deleteInventory('${item.id}')">Eliminar</button>`:''}</div>`}
-async function clearAllInventory(){
- if(!confirm('Vas a borrar TODO el inventario: Congelador, Despensa y Frescos.\n\nNo se borrarán recetas, preparaciones, menús, gastos, tareas ni calendario.\n\n¿Quieres continuar?'))return;
- state.inventory=[];state.inventoryClearedAt=new Date().toISOString();localCacheFromState();render();
- if(supabaseClient&&currentUser){
-  await syncFoodModule('inventory',[]);
-  alert('Inventario borrado correctamente en este dispositivo y en la nube.');
- }else alert('Inventario borrado de este dispositivo.');
 }
 
-function saveInventory(id=''){const name=document.querySelector('#fInvName')?.value.trim();if(!name)return;let x=id?state.inventory.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.inventory.push(x)}x.name=name;x.quantity=document.querySelector('#fInvQty')?.value.trim()||'';x.storage=document.querySelector('#fInvStorage')?.value||'fresh';x.expiry=document.querySelector('#fInvExpiry')?.value||'';x.notes=document.querySelector('#fInvNotes')?.value.trim()||'';delete state.inventoryClearedAt;localCacheFromState();closeModal();render();void syncFoodModule('inventory',state.inventory)}
-function deleteInventory(id){state.inventory=state.inventory.filter(x=>x.id!==id);if(!state.inventory.length)state.inventoryClearedAt=new Date().toISOString();localCacheFromState();closeModal();render();void syncFoodModule('inventory',state.inventory)}
-function inventoryListForm(){return `<div class="inventory-full-list">${state.inventory.map(x=>`<div class="inventory-row"><div><b>${esc(x.name)}</b><span>${esc(x.quantity||'')} · ${x.storage==='freezer'?'Congelador':x.storage==='pantry'?'Despensa':'Frescos'}${x.expiry?' · '+new Date(x.expiry+'T12:00').toLocaleDateString('es-ES'):''}</span></div><button class="secondary small" onclick="openModal('Editar producto',inventoryForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button></div>`).join('')||'<div class="muted">Inventario vacío.</div>'}</div>`}
-function preparationForm(item=null){return `<div class="form"><label>Preparación<input id="fPrepName" value="${esc(item?.name||'')}" placeholder="Ej. sofrito casero"></label><label>Cantidad<input id="fPrepQty" value="${esc(item?.quantity||'')}" placeholder="Ej. 3 raciones"></label><label>Uso previsto<input id="fPrepUse" value="${esc(item?.use||'')}" placeholder="Ej. arroz, pasta, guisos"></label><label class="checkline"><input id="fPrepFreeze" type="checkbox" ${item?.freezable?'checked':''}> Se puede congelar</label><button class="primary" onclick="savePreparation('${item?.id||''}')">${item?'Guardar cambios':'Guardar preparación'}</button>${item?`<button class="danger-button" onclick="deletePreparation('${item.id}')">Eliminar</button>`:''}</div>`}
-async function savePreparation(id=''){const name=document.querySelector('#fPrepName')?.value.trim();if(!name)return;let x=id?state.preparations.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.preparations.push(x)}x.name=name;x.quantity=document.querySelector('#fPrepQty')?.value.trim()||'';x.use=document.querySelector('#fPrepUse')?.value.trim()||'';x.freezable=!!document.querySelector('#fPrepFreeze')?.checked;const snapshot=JSON.parse(JSON.stringify(x));linkRecipePreparations();localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){const ok=await syncPreparationMutation('upsert',snapshot);if(ok)render();await syncFoodModule('recipes',state.recipes)}else save()}
-async function deletePreparation(id){if(!confirm('¿Eliminar esta preparación?'))return;state.preparations=state.preparations.filter(x=>String(x.id)!==String(id));delete state.prepDone[id];state.recipes=state.recipes.map(r=>({...r,preparationIds:(Array.isArray(r.preparationIds)?r.preparationIds:[]).filter(pid=>String(pid)!==String(id))}));localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){const ok=await syncPreparationMutation('delete',id);if(ok)await syncFoodModule('prepDone',state.prepDone);await syncFoodModule('recipes',state.recipes)}else save()}
-function recipeForm(r=null){const selectedTypes=recipeTypes(r);const selectedSeasons=Array.isArray(r?.seasons)?r.seasons:[];return `<div class="form"><label>Nombre de la receta<input id="fRecipeName" value="${esc(r?.name||'')}" placeholder="Ej. Pollo al horno"></label><div><div class="field-title">¿Cuándo puedo tomarla?</div><div class="recipe-check-grid">${foodTypes.map(x=>`<label class="checkline"><input class="fRecipeType" type="checkbox" value="${x}" ${selectedTypes.includes(x)?'checked':''}> ${x}</label>`).join('')}</div><small class="muted">Puedes marcar varias opciones. Así el menú sabrá qué recetas sirven para comida, cena, desayuno, etc.</small></div><div><div class="field-title">Temporada</div><div class="recipe-check-grid"><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Verano" ${selectedSeasons.includes('Verano')?'checked':''}> Verano</label><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Invierno" ${selectedSeasons.includes('Invierno')?'checked':''}> Invierno</label><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Todo el año" ${selectedSeasons.includes('Todo el año')?'checked':''}> Todo el año</label></div><small class="muted">Si no marcas ninguna, se considera válida todo el año.</small></div><div class="form-two"><label>Raciones<input id="fRecipeServings" type="number" min="1" value="${r?.servings||2}"></label><label>Tiempo<input id="fRecipeTime" value="${esc(r?.time||'')}" placeholder="30 min"></label></div><label>Ingredientes <small>uno por línea: ingrediente | cantidad | unidad</small><textarea id="fRecipeIngredients" placeholder="Tomate | 150 | g\nArroz | 80 | g\nAceite de oliva | 10 | ml">${esc(r?.ingredientsText||'')}</textarea><label>Preparación<textarea id="fRecipeSteps" placeholder="Pasos de elaboración">${esc(r?.steps||'')}</textarea></label><label>Descripción<textarea id="fRecipeDesc" placeholder="Cómo es y cuándo te gusta prepararla">${esc(r?.description||'')}</textarea></label><label>Combina con<input id="fRecipePairs" value="${esc(r?.pairs||'')}" placeholder="Ej. ensalada verde"></label><div><div class="field-title">Preparaciones que utiliza</div><div class="recipe-check-grid prep-link-grid">${state.preparations.map(p=>{const ids=Array.isArray(r?.preparationIds)?r.preparationIds.map(String):[];return `<label class="checkline"><input class="fRecipePrep" type="checkbox" value="${esc(p.id)}" ${ids.includes(String(p.id))?'checked':''}> ${esc(p.name)}</label>`}).join('')||'<small class="muted">Aún no tienes preparaciones.</small>'}</div><small class="muted">Solo aparecerán en “Preparar esta semana” las preparaciones vinculadas a las recetas del menú.</small></div><label class="checkline"><input id="fRecipeFav" type="checkbox" ${r?.favorite?'checked':''}> Marcar como favorita</label><label class="checkline"><input id="fRecipeFreezable" type="checkbox" ${r?.freezable?'checked':''}> Se puede congelar</label><label class="checkline"><input id="fRecipeFun" type="checkbox" ${r?.funRecipe?'checked':''}> 🎉 Receta divertida</label><button class="primary" onclick="saveRecipe('${r?.id||''}')">${r?'Guardar cambios':'Guardar receta'}</button>${r?`<button class="danger-button" onclick="deleteRecipe('${r.id}')">Eliminar receta</button>`:''}</div>`}
-function parseIngredients(text=''){return text.split(/\n+/).map(line=>line.trim()).filter(Boolean).map(line=>{const p=line.split('|').map(x=>x.trim());return {ingredient:p[0],quantity:p[1]||'',unit:p[2]||''}})}
-function normalizeRecipeImportName(name=''){return String(name).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()}
-function parseImportedIngredients(text=''){
- const raw=String(text||'').trim();
- if(!raw)return [];
- const lines=raw.split(/\r?\n+/).map(x=>x.trim()).filter(Boolean);
- if(lines.length>1)return parseIngredients(raw);
- const parts=raw.split('|').map(x=>x.trim()).filter((x,i)=>i%3!==0||x!=='');
- const out=[];
- for(let i=0;i<parts.length;i+=3){if(parts[i])out.push({ingredient:parts[i],quantity:parts[i+1]||'',unit:parts[i+2]||''})}
- return out.length?out:parseIngredients(raw);
+function normalizeRecipeImportObject(item) {
+  const sourceIngredients = Array.isArray(item.ingredients)
+    ? item.ingredients
+    : Array.isArray(item.ingredientes)
+      ? item.ingredientes
+      : [];
+
+  const ingredients = sourceIngredients.map(raw => {
+    if (typeof raw === "string") {
+      return {
+        name: raw.trim(),
+        quantity: null,
+        unit: null,
+        notes: null
+      };
+    }
+
+    return {
+      name: String(raw.name ?? raw.nombre ?? "").trim(),
+      quantity: raw.quantity ?? raw.cantidad ?? null,
+      unit: raw.unit ?? raw.unidad ?? null,
+      notes: raw.notes ?? raw.notas ?? null
+    };
+  }).filter(item => item.name);
+
+  return {
+    name: String(item.name ?? item.nombre ?? "").trim(),
+    description: item.description ?? item.descripcion ?? null,
+    preparation: item.preparation ?? item.preparacion ?? item.steps ?? item.pasos ?? null,
+    servings: item.servings ?? item.raciones ?? null,
+    prep_time: item.prep_time ?? item.tiempo_preparacion ?? null,
+    cook_time: item.cook_time ?? item.tiempo_coccion ?? null,
+    temperature: item.temperature ?? item.temperatura ?? null,
+    image_url: item.image_url ?? item.imagen ?? item.image ?? null,
+    meal_types: normalizeMealTypes(item.meal_types ?? item.tipos_comida ?? item.tipo_comida ?? item.meal_type ?? item.tipo),
+    fun_recipe: Boolean(item.fun_recipe ?? item.receta_divertida ?? false),
+    is_freezable: Boolean(item.is_freezable ?? item.congelable ?? item.se_puede_congelar ?? false),
+    do_not_suggest: Boolean(item.do_not_suggest ?? item.no_sugerir ?? false),
+    ingredients
+  };
 }
-function importedIngredientText(ingredients,text=''){
- if(Array.isArray(ingredients)&&ingredients.length)return ingredients.map(i=>[i.ingredient||'',i.quantity||'',i.unit||''].join(' | ')).join('\n');
- const parsed=parseImportedIngredients(text);return parsed.map(i=>[i.ingredient||'',i.quantity||'',i.unit||''].join(' | ')).join('\n');
-}
-function normalizeImportedRecipe(raw={}){
- const types=Array.isArray(raw.types)?raw.types:(typeof raw.types==='string'?raw.types.split(/[;,]/).map(x=>x.trim()).filter(Boolean):[]);
- const seasons=Array.isArray(raw.seasons)?raw.seasons:(typeof raw.seasons==='string'?raw.seasons.split(/[;,]/).map(x=>x.trim()).filter(Boolean):[]);
- const ingredients=Array.isArray(raw.ingredients)?raw.ingredients:parseImportedIngredients(raw.ingredientsText||raw.ingredients||'');
- const typeMap={Comidas:'Comida',Cenas:'Cena',Dulces:'Dulce',Preparaciones:'Preparación'};
- const cleanTypes=[...new Set(types.map(x=>typeMap[x]||x).filter(x=>foodTypes.includes(x)))];
- const cleanSeasons=[...new Set(seasons.filter(x=>['Verano','Invierno','Todo el año'].includes(x)))];
- const name=String(raw.name||'').trim();
- if(!name)throw new Error('Hay una receta sin nombre.');
- return {id:String(raw.id||crypto.randomUUID()),name,types:cleanTypes.length?cleanTypes:['Comida'],type:(cleanTypes[0]||'Comida'),seasons:cleanSeasons,servings:Number(raw.servings)||1,time:String(raw.time||'').trim(),ingredients,ingredientsText:importedIngredientText(ingredients,raw.ingredientsText),steps:String(raw.steps||'').trim(),description:String(raw.description||'').trim(),pairs:String(raw.pairs||'').trim(),favorite:Boolean(raw.favorite),freezable:Boolean(raw.freezable),preparationIds:Array.isArray(raw.preparationIds)?raw.preparationIds.map(String):[]};
-}
-function parseRecipeCsv(text=''){
- const rows=[];let row=[],cell='',quoted=false;
- for(let i=0;i<text.length;i++){const ch=text[i];if(ch==='"'){if(quoted&&text[i+1]==='"'){cell+='"';i++;}else quoted=!quoted}else if(ch===','&&!quoted){row.push(cell);cell=''}else if((ch==='\n'||ch==='\r')&&!quoted){if(ch==='\r'&&text[i+1]==='\n')i++;row.push(cell);cell='';if(row.some(x=>String(x).trim()))rows.push(row);row=[]}else cell+=ch}
- if(cell||row.length){row.push(cell);rows.push(row)}
- if(!rows.length)return [];
- const headers=rows.shift().map(x=>String(x).trim());
- return rows.map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??''])));
-}
-async function importRecipes(input){
- const file=input.files?.[0];if(!file)return;
- try{
-  const text=await file.text();let raw;
-  if(file.name.toLowerCase().endsWith('.csv'))raw=parseRecipeCsv(text);else raw=JSON.parse(text);
-  if(!Array.isArray(raw))throw new Error('El archivo no contiene una lista de recetas.');
-  const incoming=raw.map(normalizeImportedRecipe);
-  const existingIds=new Map(state.recipes.map(r=>[String(r.id),r]));
-  const existingNames=new Map(state.recipes.map(r=>[normalizeRecipeImportName(r.name),r]));
-  const additions=[];const updates=[];
-  for(const incomingRecipe of incoming){
-   const nameKey=normalizeRecipeImportName(incomingRecipe.name);
-   const current=existingIds.get(String(incomingRecipe.id))||existingNames.get(nameKey);
-   if(current){
-    const favorite=current.favorite;
-    const localId=current.id;
-    Object.assign(current,incomingRecipe,{id:localId,favorite});
-    updates.push(current);
-   }else{
-    additions.push(incomingRecipe);
-    existingIds.set(String(incomingRecipe.id),incomingRecipe);
-    existingNames.set(nameKey,incomingRecipe);
-   }
+
+function normalizeMealTypes(value) {
+  if (Array.isArray(value)) {
+    const normalized = value
+      .map(item => String(item).trim().toLowerCase())
+      .flatMap(item => item === "ambas" ? ["comida", "cena"] : [item])
+      .filter(item => item === "comida" || item === "cena");
+
+    return [...new Set(normalized)];
   }
-  if(!additions.length&&!updates.length){input.value='';alert('No hay recetas que importar.');return}
-  if(!confirm(`Se van a añadir ${additions.length} recetas nuevas y actualizar ${updates.length} recetas existentes con sus preparaciones detalladas. No se borrará ninguna otra receta. ¿Continuar?`)){input.value='';return}
-  state.recipes.push(...additions);normalizeRecipes();localCacheFromState();render();
-  if(supabaseClient&&currentUser)await syncFoodModule('recipes',state.recipes);
-  input.value='';alert(`Importación completada: ${additions.length} nuevas y ${updates.length} actualizadas.`);
- }catch(e){input.value='';console.error('Error importando recetas',e);alert('No se han podido importar las recetas. Comprueba que sea un JSON/CSV de recetas válido.');}
-}
-async function saveRecipe(id=''){const name=document.querySelector('#fRecipeName')?.value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}const types=[...document.querySelectorAll('.fRecipeType:checked')].map(x=>x.value);const seasons=[...document.querySelectorAll('.fRecipeSeason:checked')].map(x=>x.value);r.name=name;r.types=types.length?types:['Comida'];r.type=r.types[0];r.seasons=seasons;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.preparationIds=[...document.querySelectorAll('.fRecipePrep:checked')].map(x=>String(x.value));r.freezable=document.querySelector('#fRecipeFreezable').checked;r.funRecipe=document.querySelector('#fRecipeFun')?.checked||false;localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncFoodModule('recipes',state.recipes)}}
-function editRecipe(id){const r=state.recipes.find(x=>x.id===id);if(r)openModal('Editar receta',recipeForm(r))}
-function deleteRecipe(id){state.recipes=state.recipes.filter(x=>x.id!==id);localCacheFromState();closeModal();render();void syncFoodModule('recipes',state.recipes)}
-function cookRecipe(id,stepIndex=0){
- const r=state.recipes.find(x=>x.id===id);if(!r)return;
- const steps=String(r.steps||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
- const index=Math.max(0,Math.min(stepIndex,Math.max(0,steps.length-1)));
- const step=steps[index]||'Revisa los ingredientes y prepara todo.';
- const next=index<steps.length-1?`<button class="primary" onclick="cookRecipe('${r.id}',${index+1})">Siguiente →</button>`:'<button class="primary" onclick="closeModal()">Terminar</button>';
- const prev=index>0?`<button class="secondary" onclick="cookRecipe('${r.id}',${index-1})">← Anterior</button>`:'';
- const detail=String(step).replace(/^\d+\.\s*/,'');
- openModal('Cocinando: '+r.name,`<div class="cook-mode"><div class="cook-progress"><span>Paso ${index+1} de ${steps.length}</span><div><i style="width:${steps.length?Math.round((index+1)/steps.length*100):100}%"></i></div></div><p class="cook-step">${esc(detail)}</p><div class="cook-actions">${prev}${next}</div></div>`);
-}
-function viewRecipe(id){
- const r=state.recipes.find(x=>x.id===id);if(!r)return;
- const excluded=recipeIsExcluded(r);
- const ingredients=r.ingredients||parseIngredients(r.ingredientsText||'');
- openModal(r.name,`<div class="recipe-detail"><div class="recipe-detail-actions"><button class="primary" onclick="cookRecipe('${r.id}')">🍳 Cocinar</button><button class="secondary" onclick="toggleRecipeSuggestion('${r.id}');closeModal()">${excluded?'✓ Volver a sugerir':'🚫 No sugerir'}</button></div><div class="recipe-detail-marks">${r.funRecipe?'<span class="recipe-badge fun">🎉 Receta divertida</span>':''}${r.freezable?'<span class="recipe-badge freeze">❄️ Se puede congelar</span>':''}</div><p>${esc(r.description||'')}</p><h4>Ingredientes</h4><ul>${ingredients.map(x=>`<li>${esc(x.ingredient)} · ${esc(x.quantity)} ${esc(x.unit)}</li>`).join('')}</ul><h4>Preparación</h4><p class="recipe-steps">${esc(r.steps||'')}</p>${recipePreparations(r).length?`<h4>Preparaciones que utiliza</h4><div class="recipe-linked-preps">${recipePreparations(r).map(p=>`<button class="secondary small" onclick="viewPreparation('${p.id}')">${esc(p.name)}</button>`).join('')}</div>`:''}${r.pairs?`<h4>Combina con</h4><p>${esc(r.pairs)}</p>`:''}</div>`)
-}
 
-function normalizeIngredient(s=''){return String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()}
-function recipeScore(r,used=[]){const f=state.settings.food||{},inv=state.inventory.map(x=>normalizeIngredient(x.name));let score=0;(r.ingredients||parseIngredients(r.ingredientsText||'')).forEach(i=>{const n=normalizeIngredient(i.ingredient);if(f.useInventory!==false&&n&&inv.some(x=>x===n||x.includes(n)||n.includes(x)))score+=5});if(r.favorite)score+=3;if(f.quickMeals!==false&&r.time){const m=parseInt(String(r.time));if(!isNaN(m)&&m<=Number(f.weekdayMinutes||30))score+=2}if(used.includes(r.id))score-=8;if(f.vegetables!==false&&/(verdura|calabacin|berenjena|brocoli|espinaca|pimiento|tomate|ensalada|zanahoria|calabaza)/i.test((r.name||'')+' '+(r.description||'')))score+=2;return score}
-function recipeIsExcluded(r){return Array.isArray(state.settings?.food?.excludedRecipes)&&state.settings.food.excludedRecipes.includes(String(r.id))}
-function toggleRecipeSuggestion(id){
- state.settings.food=state.settings.food||{};
- const list=new Set(Array.isArray(state.settings.food.excludedRecipes)?state.settings.food.excludedRecipes:[]);
- const key=String(id);
- if(list.has(key))list.delete(key);else list.add(key);
- state.settings.food.excludedRecipes=[...list];
- save();render();
-}
-function menuRecipePool(types){return state.recipes.filter(r=>types.some(t=>hasRecipeType(r,t))&&recipeInCurrentSeason(r)&&!recipeIsExcluded(r))}
-
-
-function shuffledTop(pool,limit=6){
- const ranked=[...pool].sort((a,b)=>recipeScore(b)-recipeScore(a));
- const top=ranked.slice(0,Math.min(limit,ranked.length));
- for(let i=top.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[top[i],top[j]]=[top[j],top[i]]}
- return top;
-}
-function pickWeeklyRecipe(pool,usedIds){
- if(!pool.length)return null;
- const available=pool.filter(r=>!usedIds.has(r.id));
- const source=available.length?available:pool;
- const ranked=shuffledTop(source,Math.min(8,source.length));
- return ranked[0]||source[0];
-}
-function generateMenu(){
- const f=state.settings.food||{};
- const meals=menuRecipePool(['Comida']);
- const dinners=menuRecipePool(['Cena']);
- const funMeals=meals.filter(r=>r.funRecipe===true);
- const funDinners=dinners.filter(r=>r.funRecipe===true);
- const breakfasts=menuRecipePool(['Desayuno']);
- const sweets=menuRecipePool(['Dulce']);
- if(!meals.length){alert('Añade alguna receta marcada como Comida y de la temporada actual antes de generar el menú.');return}
- if(!dinners.length){alert('Añade alguna receta marcada como Cena y de la temporada actual antes de generar el menú.');return}
- const currentWeek=weekKey();
- // Cada nueva generación debe ser una propuesta nueva. Las elecciones manuales
- // solo pertenecen al menú que se está revisando y no se arrastran a la siguiente generación.
- const previousManual={};
- const previousOutside={};
- const daysObj={};
- const usedLunch=new Set(),usedDinner=new Set();
- for(let i=0;i<7;i++){
-   const isFunLunch=i===4 && f.fridayFun!==false;
-   const isFunDinner=i===2;
-   const lunchPool=isFunLunch&&funMeals.length?funMeals:meals;
-   const dinnerPool=isFunDinner&&funDinners.length?funDinners:dinners;
-   const manualLunchId=previousManual[`${i}:lunch`];
-   const manualDinnerId=previousManual[`${i}:dinner`];
-   const manualLunch=manualLunchId?lunchPool.find(r=>String(r.id)===String(manualLunchId))||meals.find(r=>String(r.id)===String(manualLunchId)):null;
-   const manualDinner=manualDinnerId?dinnerPool.find(r=>String(r.id)===String(manualDinnerId))||dinners.find(r=>String(r.id)===String(manualDinnerId)):null;
-   const lunchOutside=!!previousOutside[`${i}:lunch`];
-   const dinnerOutside=!!previousOutside[`${i}:dinner`];
-   const lunch=lunchOutside?null:(manualLunch||pickWeeklyRecipe(lunchPool,usedLunch));
-   const dinner=dinnerOutside?null:(manualDinner||pickWeeklyRecipe(dinnerPool,usedDinner));
-   if(lunch)usedLunch.add(lunch.id); if(dinner)usedDinner.add(dinner.id);
-   const breakfast=i<5?(f.breakfast||'Café con leche + tostada con aceite y tomate'):(pickWeeklyRecipe(breakfasts,new Set())?.name||'Desayuno especial sencillo');
-   daysObj[i]={lunch:lunch?.name||'',lunchId:lunch?.id||null,dinner:dinner?.name||'',dinnerId:dinner?.id||null,breakfast,breakfastId:(state.recipes.find(r=>r.name===breakfast)?.id||null),tupper:f.twoTuppers!==false&&[1,3].includes(i),funLunch:!!(lunch&&isFunLunch&&lunchPool===funMeals),funDinner:!!(dinner&&isFunDinner&&dinnerPool===funDinners)}
- }
- const sweetPool=f.sweet!==false?sweets:[];
- const sweet= sweetPool.length ? pickWeeklyRecipe(sweetPool,new Set()) : null;
- state.menu={week:currentWeek,status:'proposal',days:daysObj,sweet:sweet?sweet.name:'',sweetId:sweet?sweet.id:null,manualSlots:previousManual,outsideSlots:previousOutside,generatedAt:new Date().toISOString(),revision:Number(state.menu?.revision||0),updatedAt:new Date().toISOString()};
- state.shoppingChecks={};
- menuLocalDirty=true;
- localCacheFromState();
- render();
- void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
-}
-function changeWeeklySweet(){
- if(!state.menu)return; const pool=menuRecipePool(['Dulce']); if(!pool.length){alert('No hay recetas marcadas como Dulce.');return;}
- const current=state.menu.sweetId; const candidates=pool.filter(r=>String(r.id)!==String(current)); const sweet=pickWeeklyRecipe(candidates.length?candidates:pool,new Set());
- state.menu.sweet=sweet.name; state.menu.sweetId=sweet.id; state.menu.status='proposal'; menuLocalDirty=true; localCacheFromState(); render(); void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:false});
-}
-function acceptMenu(){
- if(!state.menu)return;
- normalizeRecipes();
- const accepted=JSON.parse(JSON.stringify(state.menu));
- accepted.status='accepted';
- accepted.acceptedAt=new Date().toISOString();
- accepted.id=accepted.id||crypto.randomUUID();
- state.menuHistory=Array.isArray(state.menuHistory)?state.menuHistory:[];
- state.menuHistory=[accepted,...state.menuHistory.filter(m=>String(m.week)!==String(accepted.week))].slice(0,12);
- state.menu=accepted;
- state.shoppingChecks={};
- menuLocalDirty=true; localCacheFromState();render();
- if(supabaseClient&&currentUser){ void syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
- else { queueCloudSave(); }
-}
-function openMenuRecipePicker(day,slot){
- const type=slot==='lunch'?'Comida':'Cena';
- const all=menuRecipePool([type]);
- const fun=all.filter(r=>r.funRecipe===true);
- const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
- const pool=special&&fun.length?fun:all;
- const outside=!!state.menu?.outsideSlots?.[`${day}:${slot}`];
- if(!pool.length&&!outside){alert('No hay recetas disponibles para este hueco.');return}
- const current=state.menu?.days?.[day]?.[slot];
- const currentId=state.recipes.find(r=>r.name===current)?.id;
- const sorted=[...pool].sort((a,b)=>String(a.name).localeCompare(String(b.name),'es'));
- openModal(`Elegir ${slot==='lunch'?'comida':'cena'}`,`<div class="menu-picker"><p class="muted">Elige una receta para este día o indica que comerás fuera.</p><div class="menu-picker-list">${sorted.map(r=>`<button class="menu-picker-item ${String(r.id)===String(currentId)&&!outside?'selected':''}" onclick="selectManualMenuRecipe(${day},'${slot}','${r.id}')"><span><b>${esc(r.name)}</b><small>${esc(r.time||'')}</small></span>${String(r.id)===String(currentId)&&!outside?'<span>✓</span>':''}</button>`).join('')}</div><div class="menu-picker-actions"><button class="secondary small ${outside?'selected':''}" onclick="markMenuMealOutside(${day},'${slot}')">🍴 Comer fuera</button><button class="secondary small" onclick="clearManualMenuRecipe(${day},'${slot}')">Dejar automático</button></div></div>`);
-}
-async function selectManualMenuRecipe(day,slot,id){
- const r=state.recipes.find(x=>String(x.id)===String(id));
- if(!r||!state.menu)return;
- state.menu.manualSlots=state.menu.manualSlots||{};
- state.menu.manualSlots[`${day}:${slot}`]=r.id;
- state.menu.outsideSlots=state.menu.outsideSlots||{}; delete state.menu.outsideSlots[`${day}:${slot}`];
- state.menu.days[day][slot]=r.name;
- state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=r.id;
- if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&r.funRecipe===true;
- else state.menu.days[day].funDinner=Number(day)===2&&r.funRecipe===true;
- state.menu.status='proposal';
- state.shoppingChecks={};
- // A manual menu choice is a deliberate edit: persist the menu itself immediately.
- // Do not use the generic delayed save here.
- menuLocalDirty=true; localCacheFromState();
- closeModal();
- render();
- if(supabaseClient&&currentUser){ await syncMenuChoice(); }
-}
-async function markMenuMealOutside(day,slot){
- if(!state.menu)return;
- state.menu.manualSlots=state.menu.manualSlots||{};
- state.menu.outsideSlots=state.menu.outsideSlots||{};
- delete state.menu.manualSlots[`${day}:${slot}`];
- state.menu.outsideSlots[`${day}:${slot}`]=true;
- state.menu.days[day][slot]='';
- state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=null;
- if(slot==='lunch')state.menu.days[day].funLunch=false; else state.menu.days[day].funDinner=false;
- state.menu.status='proposal';
- state.shoppingChecks={};
- menuLocalDirty=true; localCacheFromState(); closeModal(); render();
- if(supabaseClient&&currentUser)await syncMenuBundle({menu:true,shoppingChecks:true}); else queueCloudSave();
-}
-async function clearManualMenuRecipe(day,slot){
- if(!state.menu)return;
- const type=slot==='lunch'?'Comida':'Cena';
- const all=menuRecipePool([type]);
- const fun=all.filter(r=>r.funRecipe===true);
- const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
- const pool=special&&fun.length?fun:all;
- const current=state.menu.days?.[day]?.[slot];
- const currentId=state.menu.days?.[day]?.[slot==='lunch'?'lunchId':'dinnerId'];
- const used=new Set(Object.entries(state.menu.days||{}).filter(([d])=>String(d)!==String(day)).map(([,v])=>v?.[slot==='lunch'?'lunchId':'dinnerId']).filter(Boolean));
- const candidates=pool.filter(r=>String(r.id)!==String(currentId)&&!used.has(r.id));
- const pick=shuffledTop(candidates.length?candidates:pool.filter(r=>String(r.id)!==String(currentId)),Math.min(8,(candidates.length?candidates:pool).length))[0]||pool[0];
- if(!pick)return;
- state.menu.manualSlots=state.menu.manualSlots||{};
- delete state.menu.manualSlots[`${day}:${slot}`];
- state.menu.outsideSlots=state.menu.outsideSlots||{}; delete state.menu.outsideSlots[`${day}:${slot}`];
- state.menu.days[day][slot]=pick.name;
- state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=pick.id;
- if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&pick.funRecipe===true;
- else state.menu.days[day].funDinner=Number(day)===2&&pick.funRecipe===true;
- state.menu.status='proposal';
- state.shoppingChecks={};
- localCacheFromState();
- closeModal();render();
- if(supabaseClient&&currentUser)await syncMenuBundle({menu:true,shoppingChecks:true});
- else queueCloudSave();
-}
-function changeMeal(day,slot){
- if(!state.menu)return;
- const type=slot==='lunch'?'Comida':'Cena';
- const all=menuRecipePool([type]);
- const fun=all.filter(r=>r.funRecipe===true);
- const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
- const list=special&&fun.length?fun:all;
- if(!list.length){alert('Añade alguna receta de '+type.toLowerCase()+' y de la temporada actual antes de cambiarla.');return}
- const current=state.menu.days[day]?.[slot];
- const weekUsed=new Set();
- Object.entries(state.menu.days||{}).forEach(([d,vals])=>{
-   if(String(d)===String(day))return;
-   const name=vals?.[slot];
-   const r=state.recipes.find(x=>x.name===name);if(r)weekUsed.add(r.id);
- });
- const candidates=list.filter(r=>r.name!==current&&!weekUsed.has(r.id));
- const source=candidates.length?candidates:list.filter(r=>r.name!==current);
- if(!source.length)return;
- const pick=shuffledTop(source,Math.min(8,source.length))[0]||source[0];
- state.menu.days[day][slot]=pick.name;
- state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=pick.id;
- state.menu.manualSlots=state.menu.manualSlots||{};
- state.menu.manualSlots[`${day}:${slot}`]=pick.id;
- state.menu.days[day][slot==='lunch'?'funLunch':'funDinner']=special&&pick.funRecipe===true;
- state.menu.status='proposal';
- state.shoppingChecks={};
- menuLocalDirty=true; localCacheFromState(); render();
- void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
-}
-async function restoreMenuHistory(id){
- const found=state.menuHistory?.find(m=>String(m.id)===String(id));
- if(!found)return;
- state.menu=JSON.parse(JSON.stringify(found));
- state.menu.status='accepted';
- state.menuHistory=state.menuHistory.filter(m=>String(m.id)!==String(id));
- state.menuHistory.unshift(JSON.parse(JSON.stringify(state.menu)));
- state.menuHistory=state.menuHistory.slice(0,12);
- state.shoppingChecks={};
- menuLocalDirty=true; localCacheFromState();render();
- if(supabaseClient&&currentUser){ await syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
- else queueCloudSave();
-}
-function menuHistoryForm(){
- const items=(state.menuHistory||[]).map(m=>{
-  const d=m.acceptedAt?new Date(m.acceptedAt).toLocaleDateString('es-ES',{day:'numeric',month:'long',year:'numeric'}):m.week;
-  const names=[0,1,2,3,4,5,6].map(i=>m.days?.[i]?.lunch).filter(Boolean).slice(0,3).map(esc).join(' · ');
-  return `<div class="history-row"><div><b>${esc(d)}</b><small>${names}${names?'…':''}</small></div><button class="secondary small" onclick="restoreMenuHistory('${m.id}')">Recuperar</button></div>`;
- }).join('');
- return items||'<div class="muted">Todavía no hay menús guardados.</div>';
-}
-function parseInventoryQuantity(value){
- const s=String(value||'').trim().toLowerCase().replace(',','.');
- const m=s.match(/(-?\d+(?:\.\d+)?|\d+\s*\/\s*\d+)/);
- if(!m)return null;
- const raw=m[1].replace(/\s+/g,'');
- const n=raw.includes('/')?(()=>{const [a,b]=raw.split('/').map(Number);return b?a/b:null})():Number(raw);
- if(n==null||Number.isNaN(n))return null;
- const unit=(s.match(/(kg|g|mg|l|ml|ud|unidad(?:es)?|u|bote(?:s)?|lata(?:s)?|paquete(?:s)?|rebanada(?:s)?)/)||[])[1]||'';
- const normalizedUnit=/^u(d|nidad|nidades)?$/.test(unit)?'ud':unit;
- return {value:n,unit:normalizedUnit};
-}
-function inventoryNameMatches(required,available){
- const a=normalizeIngredient(required),b=normalizeIngredient(available);
- return a===b||a.includes(b)||b.includes(a)
-}
-function findInventoryMatch(ingredient){
- return state.inventory.find(x=>inventoryNameMatches(ingredient,x.name));
-}
-function inventoryCoverage(ingredient,qty,unit){
- const item=findInventoryMatch(ingredient);
- if(!item)return {item:null,covered:0,missing:qty};
- if(qty===''||qty==null||unit===''||unit==='al gusto')return {item,covered:null,missing:0};
- const iq=parseInventoryQuantity(item.quantity);
- const rq=parseInventoryQuantity(`${qty} ${unit}`);
- if(!iq||!rq)return {item,covered:null,missing:0};
- if(iq.unit!==rq.unit)return {item,covered:null,missing:0};
- const missing=Math.max(0,rq.value-iq.value);
- return {item,covered:Math.min(iq.value,rq.value),missing};
-}
-function formatMissing(qty,unit){
- if(qty==null||qty==='')return '';
- const n=Math.abs(Number(qty));
- const pretty=Number.isInteger(n)?String(n):String(Math.round(n*100)/100);
- return `${pretty} ${unit}`.trim();
-}
-function recipePreparations(r){if(!r)return [];const ids=Array.isArray(r.preparationIds)?r.preparationIds.map(String):[];return state.preparations.filter(p=>ids.includes(String(p.id)))}
-function menuRecipeFromDay(day,slot){
- if(!day)return null;
- const id=day?.[slot+'Id'];
- if(id){const byId=state.recipes.find(r=>String(r.id)===String(id));if(byId)return byId;}
- const name=day?.[slot];
- return name?state.recipes.find(r=>r.name===name)||null:null;
-}
-function menuPreparations(){
- if(!state.menu)return [];
- const ids=new Set();
- Object.values(state.menu.days||{}).forEach(day=>['lunch','dinner','breakfast','snack'].forEach(slot=>{const r=menuRecipeFromDay(day,slot);recipePreparations(r).forEach(p=>ids.add(String(p.id)))}));
- return [...ids].map(id=>state.preparations.find(p=>String(p.id)===id)).filter(Boolean);
-}
-
-function aggregateMenuIngredients(){
- const map=new Map();
- if(!state.menu||state.menu.status!=='accepted')return [];
- Object.values(state.menu.days||{}).forEach(day=>{
-  ['lunch','dinner','breakfast','snack'].forEach(slot=>{
-   const r=state.recipes.find(x=>x.name===day?.[slot]);
-   if(!r)return;
-   (r.ingredients||parseIngredients(r.ingredientsText||'')).forEach(i=>{
-    const raw=String(i.ingredient||'').trim();if(!raw)return;
-    const key=normalizeIngredient(raw);
-    const q=parseInventoryQuantity(`${i.quantity||''} ${i.unit||''}`);
-    const existing=map.get(key);
-    if(!existing){map.set(key,{ingredient:raw,quantity:i.quantity||'',unit:i.unit||'',numeric:q?.value??null,count:1});}
-    else if(existing.numeric!=null&&q?.value!=null&&existing.unit===i.unit){existing.numeric+=q.value;existing.quantity=String(existing.numeric);existing.count++}
-    else {existing.count++}
-   });
-  });
- });
- return [...map.values()];
-}
-function shoppingItems(){
- const items=aggregateMenuIngredients(),out=[];
- items.forEach(i=>{
-  const coverage=inventoryCoverage(i.ingredient,i.quantity,i.unit);
-  if(!coverage.item){
-   out.push({key:normalizeIngredient(i.ingredient),name:`${i.ingredient}${i.quantity?' · '+i.quantity+' '+(i.unit||''):''}`,group:foodGroup(i.ingredient)});
-   return;
+  if (value === null || value === undefined || value === "") {
+    return ["comida", "cena"];
   }
-  if(coverage.missing>0){
-   out.push({key:normalizeIngredient(i.ingredient),name:`${i.ingredient} · faltan ${formatMissing(coverage.missing,i.unit)}`,group:foodGroup(i.ingredient)});
+
+  const text = String(value).trim().toLowerCase();
+
+  if (text === "ambas") return ["comida", "cena"];
+
+  const normalized = text
+    .split(/[;,|+]/)
+    .map(item => item.trim())
+    .flatMap(item => item === "ambas" ? ["comida", "cena"] : [item])
+    .filter(item => item === "comida" || item === "cena");
+
+  return normalized.length ? [...new Set(normalized)] : ["comida", "cena"];
+}
+
+function parseRecipeImportFile(filename, text) {
+  const lower = filename.toLowerCase();
+
+  if (lower.endsWith(".json")) {
+    const parsed = JSON.parse(text);
+    const list = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed.recipes)
+        ? parsed.recipes
+        : Array.isArray(parsed.recetas)
+          ? parsed.recetas
+          : [];
+
+    return list
+      .map(normalizeRecipeImportObject)
+      .filter(recipe => recipe.name);
   }
- });
- return out.sort((a,b)=>a.group.localeCompare(b.group,'es')||a.name.localeCompare(b.name,'es'));
-}
-function menuInventoryCoverage(){
- const items=aggregateMenuIngredients();
- return items.map(i=>{
-  const c=inventoryCoverage(i.ingredient,i.quantity,i.unit);
-  return {ingredient:i.ingredient,required:i.quantity&&i.unit?`${i.quantity} ${i.unit}`:'',inventory:c.item?.quantity||'',inventoryName:c.item?.name||'',missing:c.missing||0,covered:c.covered,unit:i.unit};
- });
-}
-function menuConsumptionForm(){
- const rows=menuInventoryCoverage();
- const usable=rows.filter(x=>x.inventoryName);
- const missing=rows.filter(x=>x.missing>0||!x.inventoryName);
- return `<div class="consumption-modal"><p class="muted">El menú no descuenta nada automáticamente. Revisa qué ingredientes se van a consumir y confirma al final.</p>${usable.map(x=>`<div class="consumption-row"><div><b>${esc(x.ingredient)}</b><small>${x.required?`Necesitas ${esc(x.required)} · `:''}Tienes ${esc(x.inventory)}${x.missing>0?` · <strong>Faltan ${esc(formatMissing(x.missing,x.unit))}</strong>`:''}</small></div></div>`).join('')||'<div class="muted">No hay ingredientes del menú que coincidan con el inventario.</div>'}${missing.length?`<div class="consumption-alert"><b>Ingredientes que tendrás que comprar</b><span>${missing.map(x=>esc(x.ingredient)).join(', ')}</span></div>`:''}<button class="primary" onclick="confirmMenuConsumption()">Registrar consumo y actualizar inventario</button></div>`;
-}
-function confirmMenuConsumption(){
- if(!state.menu||state.menu.status!=='accepted')return;
- if(state.menu.consumptionRegistered){alert('El consumo de este menú ya está registrado.');return}
- const rows=menuInventoryCoverage();
- let changed=0;
- rows.forEach(x=>{
-  if(!x.inventoryName||x.missing>0)return;
-  const item=findInventoryMatch(x.ingredient);
-  const iq=parseInventoryQuantity(item?.quantity),rq=parseInventoryQuantity(`${x.required}`);
-  if(item&&iq&&rq&&iq.unit===rq.unit){
-   const remaining=Math.max(0,iq.value-rq.value);
-   item.quantity=String(Number.isInteger(remaining)?remaining:Math.round(remaining*100)/100)+' '+iq.unit;
-   changed++;
+
+  if (lower.endsWith(".csv")) {
+    return parseRecipeCsv(text);
   }
- });
- state.menu.consumptionRegistered=true;
- save();render();
- alert(`Consumo registrado. Se han actualizado ${changed} productos del inventario.`);
-}
-function foodGroup(name){const n=normalizeIngredient(name);if(/pollo|pavo|ternera|cerdo|carne|huevo|salmon|atun|merluza|pescado|tofu|lenteja|garbanzo|judia/.test(n))return 'Proteínas';if(/tomate|lechuga|espinaca|brocoli|calabacin|berenjena|pimiento|cebolla|zanahoria|patata|verdura|fruta|manzana|platano/.test(n))return 'Fruta y verdura';if(/arroz|pasta|harina|pan|avena|quinoa|cereal/.test(n))return 'Despensa';if(/leche|yogur|queso|burrata|mozzarella/.test(n))return 'Refrigerados';return 'Otros'}
-function toggleShopping(key){state.shoppingChecks[key]=!state.shoppingChecks[key];menuLocalDirty=true;localCacheFromState();render();if(supabaseClient&&currentUser)void syncMenuBundle({menu:false,menuHistory:false,shoppingChecks:true});else queueCloudSave()}
-function shoppingForm(){const items=shoppingItems(),groups=[...new Set(items.map(x=>x.group))];return `<div class="shopping-list-modal">${groups.map(g=>`<div class="shopping-group"><h4>${esc(g)}</h4>${items.filter(x=>x.group===g).map(x=>`<label class="checkline shopping-check ${state.shoppingChecks[x.key]?'done':''}"><input type="checkbox" ${state.shoppingChecks[x.key]?'checked':''} onchange="toggleShopping('${x.key}')"><span>${esc(x.name)}</span></label>`).join('')}</div>`).join('')||'<p class="muted">No hay compras pendientes.</p>'}</div>`}
-function viewPreparation(id){
- const x=state.preparations.find(i=>String(i.id)===String(id));if(!x)return;
- const ingredients=Array.isArray(x.ingredients)?x.ingredients:parseIngredients(x.ingredientsText||'');
- const ingredientsHtml=ingredients.length?`<h4>Ingredientes</h4><ul>${ingredients.map(i=>`<li>${esc(i.ingredient)} · ${esc(i.quantity||'')} ${esc(i.unit||'')}</li>`).join('')}</ul>`:'';
- const steps=x.steps||x.preparation||'';
- openModal(x.name,`<div class="recipe-detail preparation-detail"><div class="recipe-detail-actions"><button class="secondary small" onclick="closeModal();openModal('Editar preparación',preparationForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button><button class="danger-button small" onclick="deletePreparation('${x.id}')">Eliminar</button></div><div class="recipe-detail-marks">${x.quantity?`<span class="recipe-badge">${esc(x.quantity)}</span>`:''}${x.freezable?'<span class="recipe-badge freeze">❄️ Se puede congelar</span>':''}</div>${x.description?`<p>${esc(x.description)}</p>`:''}${x.use?`<h4>Uso previsto</h4><p>${esc(x.use)}</p>`:''}${ingredientsHtml}${steps?`<h4>Preparación</h4><p class="recipe-steps">${esc(steps)}</p>`:'<p class="muted">Esta preparación todavía no tiene ingredientes ni pasos detallados.</p>'}</div>`);
-}
-function togglePrep(id){state.prepDone[id]=!state.prepDone[id];localCacheFromState();render();if(supabaseClient&&currentUser)void syncFoodModule('prepDone',state.prepDone);else save()}
-function preparationsListForm(list=state.preparations){return `<div class="prep-full-list">${list.map(x=>`<div class="prep-row ${state.prepDone[x.id]?'done':''}"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')">${state.prepDone[x.id]?'✓':''}</button><button class="prep-content" onclick="viewPreparation('${x.id}')"><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${esc(x.use||'')}${x.freezable?' · Congelable':''}</small></button><button class="secondary small prep-edit" onclick="event.stopPropagation();openModal('Editar preparación',preparationForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button></div>`).join('')||'<div class="muted">No hay preparaciones.</div>'}</div>`}
 
-// ============================================================
-// LIMPIEZA — rutinas periódicas y planificación semanal
-// ============================================================
-const cleaningWeekdays=[['1','Lunes'],['2','Martes'],['3','Miércoles'],['4','Jueves'],['5','Viernes'],['6','Sábado'],['0','Domingo']];
-const cleaningFrequencies=[['daily','Diaria'],['weekly','Semanal'],['biweekly','Bisemanal (cada 2 semanas)'],['monthly','Mensual'],['quarterly','Trimestral'],['yearly','Anual'],['biennial','Bianual (cada 6 meses)']];
-const cleaningWeeks=[['1','1.ª semana'],['2','2.ª semana'],['3','3.ª semana'],['4','4.ª semana'],['5','Última semana']];
-const cleaningMonths=[['1','Enero'],['2','Febrero'],['3','Marzo'],['4','Abril'],['5','Mayo'],['6','Junio'],['7','Julio'],['8','Agosto'],['9','Septiembre'],['10','Octubre'],['11','Noviembre'],['12','Diciembre']];
-function cleaningDateKey(d){const x=new Date(d);return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`}
-function cleaningParseDate(key){return new Date(`${key}T12:00:00`)}
-function cleaningMonday(d){const x=new Date(d);x.setHours(12,0,0,0);const day=x.getDay();x.setDate(x.getDate()-(day===0?6:day-1));return x}
-function cleaningWeekDates(){const start=cleaningMonday(today);return Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);return d})}
-function cleaningMonthDiff(a,b){return (b.getFullYear()-a.getFullYear())*12+b.getMonth()-a.getMonth()}
-function cleaningNthWeekday(year,monthIndex,weekday,weekOfMonth){
- const first=new Date(year,monthIndex,1,12);const last=new Date(year,monthIndex+1,0,12);
- if(Number(weekOfMonth)===5){const diff=(last.getDay()-Number(weekday)+7)%7;return new Date(year,monthIndex,last.getDate()-diff,12)}
- const diff=(Number(weekday)-first.getDay()+7)%7;const day=1+diff+(Number(weekOfMonth)-1)*7;
- if(day>last.getDate())return null;return new Date(year,monthIndex,day,12)
-}
-function cleaningAnchorDate(item){const raw=item.anchorDate||item.createdAt||todayKey();const d=cleaningParseDate(String(raw).slice(0,10));return Number.isNaN(d.getTime())?new Date(today):d}
-function cleaningDue(item,date){
- if(!item||typeof item!=='object')return false;
- const d=date instanceof Date?new Date(date):cleaningParseDate(date);d.setHours(12,0,0,0);
- const freq=item.frequency||'weekly';
- if(freq==='daily')return true;
- const weekday=Number(item.weekday ?? 1);
- if(d.getDay()!==weekday)return false;
- if(freq==='weekly')return true;
- const anchor=cleaningAnchorDate(item);
- if(freq==='biweekly'){
-  const anchorWeekday=anchor.getDay()===weekday;
-  if(!anchorWeekday)return false;
-  const days=Math.round((d-anchor)/(1000*60*60*24));
-  return days>=0 && Math.floor(days/7)%2===0;
- }
- if(freq==='yearly' && d.getMonth()!==Number(item.month||anchor.getMonth()+1)-1)return false;
- if(freq==='monthly' || freq==='quarterly' || freq==='biennial'){
-  const interval=freq==='quarterly'?3:(freq==='biennial'?6:1);
-  const monthDiff=cleaningMonthDiff(anchor,d);
-  if(monthDiff<0 || monthDiff%interval!==0)return false;
- }
- if(freq==='yearly' || freq==='biennial' || freq==='monthly' || freq==='quarterly'){
-  const target=cleaningNthWeekday(d.getFullYear(),d.getMonth(),weekday,Number(item.weekOfMonth||1));
-  return !!target&&cleaningDateKey(target)===cleaningDateKey(d);
- }
- return false;
-}
-function cleaningFrequencyLabel(item){return cleaningFrequencies.find(x=>x[0]===(item.frequency||'weekly'))?.[1]||'Semanal'}
-function cleaningScheduleText(item){
- const f=item.frequency||'weekly';
- if(f==='daily')return 'Todos los días';
- const day=cleaningWeekdays.find(x=>x[0]===String(item.weekday??1))?.[1]||'';
- if(f==='weekly')return `Cada ${day.toLowerCase()}`;
- if(f==='biweekly')return `Cada 2 semanas · ${day.toLowerCase()}`;
- const week=cleaningWeeks.find(x=>x[0]===String(item.weekOfMonth||1))?.[1]||'';
- if(f==='yearly'){const month=cleaningMonths.find(x=>x[0]===String(item.month||cleaningAnchorDate(item).getMonth()+1))?.[1]||'';return `${week} de ${month} · ${day.toLowerCase()}`}
- if(f==='biennial')return `Cada 6 meses · ${week} · ${day.toLowerCase()}`;
- return `${week} · ${day.toLowerCase()}`;
-}
-function cleaningForm(item=null){
- const f=item?.frequency||'weekly';
- const weekday=String(item?.weekday??1),week=String(item?.weekOfMonth??1),month=String(item?.month??(cleaningAnchorDate(item||{}).getMonth()+1));
- return `<div class="form"><label>Qué tengo que hacer<input id="fCleaningName" value="${esc(item?.name||'')}" placeholder="Ej. Limpiar baño"></label><label>Frecuencia<select id="fCleaningFreq" onchange="updateCleaningFormVisibility()">${cleaningFrequencies.map(([v,l])=>`<option value="${v}" ${f===v?'selected':''}>${l}</option>`).join('')}</select></label><div id="cleaningScheduleFields"><div class="form-two"><label>Día de la semana<select id="fCleaningWeekday">${cleaningWeekdays.map(([v,l])=>`<option value="${v}" ${weekday===v?'selected':''}>${l}</option>`).join('')}</select></label><label class="cleaning-week-field">Semana del mes<select id="fCleaningWeek">${cleaningWeeks.map(([v,l])=>`<option value="${v}" ${week===v?'selected':''}>${l}</option>`).join('')}</select></label></div><label class="cleaning-month-field">Mes del año<select id="fCleaningMonth">${cleaningMonths.map(([v,l])=>`<option value="${v}" ${month===v?'selected':''}>${l}</option>`).join('')}</select></label></div><label>Notas<textarea id="fCleaningNotes" placeholder="Opcional">${esc(item?.notes||'')}</textarea></label><button class="primary" onclick="saveCleaning('${item?.id||''}')">${item?'Guardar cambios':'Guardar rutina'}</button>${item?`<button class="danger-button" onclick="deleteCleaning('${item.id}')">Eliminar rutina</button>`:''}</div>`;
-}
-function updateCleaningFormVisibility(){const f=document.querySelector('#fCleaningFreq')?.value;document.querySelector('.cleaning-week-field')?.classList.toggle('hidden',f==='daily'||f==='weekly'||f==='biweekly');document.querySelector('.cleaning-month-field')?.classList.toggle('hidden',f!=='yearly');}
-function saveCleaning(id=''){
- const name=document.querySelector('#fCleaningName')?.value.trim();if(!name)return;
- let x=id?state.cleaning.find(i=>String(i.id)===String(id)):null;if(!x){x={id:crypto.randomUUID(),createdAt:todayKey()};state.cleaning.push(x)}
- const f=document.querySelector('#fCleaningFreq').value;x.name=name;x.frequency=f;x.weekday=Number(document.querySelector('#fCleaningWeekday').value);x.weekOfMonth=Number(document.querySelector('#fCleaningWeek').value);x.month=Number(document.querySelector('#fCleaningMonth').value);x.notes=document.querySelector('#fCleaningNotes').value.trim();if(!x.anchorDate)x.anchorDate=todayKey();
- x.completed=x.completed&&typeof x.completed==='object'?x.completed:{};localCacheFromState();closeModal();render();save();
-}
-function toggleCleaning(id,date){const x=state.cleaning.find(i=>String(i.id)===String(id));if(!x)return;x.completed=x.completed&&typeof x.completed==='object'?x.completed:{};const key=cleaningDateKey(date);x.completed[key]=!x.completed[key];localCacheFromState();render();save()}
-function deleteCleaning(id){if(!confirm('¿Eliminar esta rutina de limpieza?'))return;state.cleaning=state.cleaning.filter(x=>String(x.id)!==String(id));save();closeModal();render()}
-function editCleaning(id){const x=state.cleaning.find(i=>String(i.id)===String(id));if(x)openModal('Editar rutina de limpieza',cleaningForm(x));}
-function cleaningDayCard(date){
- const key=cleaningDateKey(date),due=state.cleaning.filter(x=>cleaningDue(x,date));
- const done=due.filter(x=>x.completed?.[key]).length;
- const lines=due.map(x=>`<div class="cleaning-task ${x.completed?.[key]?'done':''}"><button class="cleaning-check" onclick="toggleCleaning('${x.id}','${key}')" aria-label="Marcar ${esc(x.name)}">${x.completed?.[key]?'✓':''}</button><div class="cleaning-task-main"><b>${esc(x.name)}</b><small>${esc(cleaningFrequencyLabel(x))}${x.notes?' · '+esc(x.notes):''}</small></div><button class="cleaning-edit" onclick="editCleaning('${x.id}')" aria-label="Editar">⋯</button></div>`).join('');
- return `<article class="cleaning-day-card ${key===todayKey()?'today':''}"><header class="cleaning-day-head"><div><span>${date.toLocaleDateString('es-ES',{weekday:'long'})}</span><strong>${date.getDate()}</strong></div><small>${done}/${due.length}</small></header><div class="cleaning-day-list">${lines||'<span class="muted">Nada programado</span>'}</div></article>`;
-}
-function manageCleaning(){document.querySelector('#cleaningManagement')?.scrollIntoView({behavior:'smooth',block:'start'});}
-function cleaning(c){
- const dates=cleaningWeekDates();const total=dates.reduce((n,d)=>n+state.cleaning.filter(x=>cleaningDue(x,d)).length,0);const done=dates.reduce((n,d)=>{const k=cleaningDateKey(d);return n+state.cleaning.filter(x=>cleaningDue(x,d)&&x.completed?.[k]).length},0);
- const counts=cleaningFrequencies.map(([v,l])=>`<span class="cleaning-stat"><b>${state.cleaning.filter(x=>(x.frequency||'weekly')===v).length}</b>${l}</span>`).join('');
- c.innerHTML=`<div class="cleaning-page"><section class="cleaning-hero"><div><span class="eyebrow">Rutinas del hogar</span><h2>Limpieza</h2><p>Organiza lo que toca cada día sin tener que acordarte de todo.</p></div><div class="actions"><button class="secondary" onclick="manageCleaning()">Gestionar rutinas</button><button class="primary" onclick="openModal('Nueva rutina de limpieza',cleaningForm())">+ Añadir rutina</button></div></section><section class="cleaning-summary"><div><span>Esta semana</span><strong>${done}/${total}</strong><small>tareas completadas</small></div><div class="cleaning-frequency-summary">${counts}</div></section><div class="cleaning-week-scroll"><div class="cleaning-week">${dates.map(cleaningDayCard).join('')}</div></div><section id="cleaningManagement" class="cleaning-management"><div class="panel-heading"><div><h3>Todas mis rutinas</h3><span>Configura una vez y se repiten automáticamente.</span></div><button class="secondary small" onclick="openModal('Nueva rutina de limpieza',cleaningForm())">+ Rutina</button></div><div class="cleaning-routine-list">${state.cleaning.map(x=>`<div class="cleaning-routine-row"><div><b>${esc(x.name)}</b><span>${esc(cleaningFrequencyLabel(x))} · ${esc(cleaningScheduleText(x))}${x.notes?' · '+esc(x.notes):''}</span></div><button class="secondary small" onclick="editCleaning('${x.id}')">Editar</button></div>`).join('')||'<div class="empty-state"><span>Aún no tienes rutinas de limpieza.</span><button class="secondary" onclick="openModal(\'Nueva rutina de limpieza\',cleaningForm())">Añadir la primera</button></div>'}</div></section></div>`;
+  throw new Error("Solo se admiten archivos JSON o CSV.");
 }
 
-function calendarEventLane(e,monthEvents){const id=String(e.id);const active=monthEvents.filter(x=>{const s=eventStartDate(x),f=eventEndDate(x);return s&&f&&s<=eventEndDate(e)&&f>=eventStartDate(e)}).sort((a,b)=>String(eventStartDate(a)).localeCompare(String(eventStartDate(b)))||String(a.id).localeCompare(String(b.id)));return Math.max(0,active.findIndex(x=>String(x.id)===id))}
-function calendarBar(e,date,monthEvents){const start=eventStartDate(e),end=eventEndDate(e);const multi=start!==end;const isStart=date===start,isEnd=date===end;const lane=calendarEventLane(e,monthEvents);const col=cats[e.category]||cats.Otros;const label=isStart?esc(e.title):'';return `<span class="calendar-event-bar ${multi?'multi-day':''} ${isStart?'bar-start':''} ${isEnd?'bar-end':''} ${!isStart&&!isEnd?'bar-middle':''}" style="--event-color:${col};--event-lane:${lane}" title="${esc(e.title)}" onclick="event.stopPropagation();editEvent('${e.id}')"><span>${label}</span></span>`}
+function parseRecipeCsv(text) {
+  const rows = parseCsvRows(text);
+  if (rows.length < 2) return [];
 
-function calendar(c){
- const base=calendarMonthDate(); const y=base.getFullYear(),m=base.getMonth();
- const monthLabel=base.toLocaleDateString('es-ES',{month:'long',year:'numeric'}); const first=(new Date(y,m,1).getDay()+6)%7; const days=new Date(y,m+1,0).getDate();
- const monthEvents=monthEventsFor(y,m); let grid=['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('');
- for(let i=0;i<first;i++)grid+='<div class="day empty-day"></div>';
- for(let d=1;d<=days;d++){const date=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;const evs=eventsForDate(date);const bars=evs.slice(0,4).map(e=>calendarBar(e,date,monthEvents)).join('');grid+=`<button class="day calendar-day ${date===todayKey()?'today':''} ${evs.length?'has-events':''}" onclick="openNewEventForDate('${date}')"><b>${d}</b><div class="calendar-event-lanes">${bars}</div></button>`}
- const monthEventsSorted=monthEvents.slice().sort((a,b)=>String(eventStartDate(a)).localeCompare(String(eventStartDate(b))));
- const list=monthEventsSorted.length?monthEventsSorted.map(e=>eventRow(e)).join(''):'<div class="empty-state"><span>No hay eventos este mes.</span><button class="secondary" onclick="openModal(\'Nuevo evento\',eventForm())">+ Añadir evento</button></div>';
- const evcats=Object.entries(cats).map(([n,col])=>`<span class="pill" style="background:${col}22;color:${col}">${n}</span>`).join('');
- c.innerHTML=`<div class="calendar-page"><div class="calendar-toolbar"><div><h2>${cap(monthLabel)}</h2><span class="muted">Planifica eventos, cumpleaños y recordatorios.</span></div><div class="calendar-actions"><button class="secondary month-arrow" onclick="changeCalendarMonth(-1)" aria-label="Mes anterior">‹</button><button class="secondary" onclick="goCalendarToday()">Hoy</button><button class="secondary month-arrow" onclick="changeCalendarMonth(1)" aria-label="Mes siguiente">›</button><button class="primary" onclick="openModal('Nuevo evento',eventForm())">+ Evento</button></div></div><div class="calendar-main"><section class="calendar-card"><div class="calendar-grid">${grid}</div></section><aside class="calendar-side"><section class="calendar-panel"><div class="row"><div><h3>Eventos de ${base.toLocaleDateString('es-ES',{month:'long'})}</h3><span class="muted">${monthEventsSorted.length} evento${monthEventsSorted.length===1?'':'s'}</span></div></div><div class="list">${list}</div></section><section class="calendar-panel"><h3>Categorías</h3><div class="actions calendar-categories">${evcats}</div></section></aside></div></div>`;
-}
-function calendarMonthDate(){if(!state.calendarMonth)state.calendarMonth=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}`;return new Date(state.calendarMonth+'-01T12:00:00')}
-function changeCalendarMonth(n){const d=calendarMonthDate();d.setMonth(d.getMonth()+n);state.calendarMonth=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;save();render()}
-function goCalendarToday(){state.calendarMonth=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}`;save();render()}
-function eventStartDate(e){return e.startDate||e.date||''}
-function eventEndDate(e){return e.endDate||eventStartDate(e)}
-function eventMatchesDate(e,date){const start=eventStartDate(e);if(!start)return false;const end=eventEndDate(e)||start;const target=new Date(date+'T12:00:00'),base=new Date(start+'T12:00:00'),finish=new Date(end+'T12:00:00');if(!e.recurrence||e.recurrence==='none')return target>=base&&target<=finish;if(target<base)return false;const diff=Math.floor((target-base)/86400000);if(e.recurrence==='daily')return true;if(e.recurrence==='weekly')return diff%7===0;if(e.recurrence==='monthly')return base.getDate()===target.getDate();if(e.recurrence==='yearly')return base.getMonth()===target.getMonth()&&base.getDate()===target.getDate();return false}
-function eventsForDate(date){return state.events.filter(e=>eventMatchesDate(e,date))}
-function monthEventsFor(y,m){const monthStart=`${y}-${String(m+1).padStart(2,'0')}-01`,lastDay=new Date(y,m+1,0).getDate(),monthEnd=`${y}-${String(m+1).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;return state.events.filter(e=>{const s=eventStartDate(e),f=eventEndDate(e);return s&&f<=monthEnd&&f>=monthStart}).map(e=>({...e,displayDate:eventStartDate(e)}))}
-function eventRow(e){const col=cats[e.category]||cats.Otros;const start=eventStartDate(e),end=eventEndDate(e);const sd=new Date(start+'T12:00:00').toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short'});const ed=new Date(end+'T12:00:00').toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short'});const date=start===end?sd:`${sd} → ${ed}`;return `<div class="event-row"><span class="event-color" style="background:${col}"></span><div class="event-main"><b>${esc(e.title)}</b><span>${date}${e.startTime?' · '+esc(e.startTime):''}${e.endTime?'–'+esc(e.endTime):''} · ${esc(e.category||'Otros')}</span>${e.location?`<small>📍 ${esc(e.location)}</small>`:''}</div><button class="secondary small" onclick="editEvent('${e.id}')">Editar</button></div>`}
-function openNewEventForDate(date){openModal('Nuevo evento',eventForm({date,startDate:date,endDate:date}))}
-function eventForm(e=null){const linked=state.tasks.filter(t=>!t.done).map(t=>`<option value="${t.id}" ${e?.linkedTask===t.id?'selected':''}>${esc(t.title)}</option>`).join('');const startDate=e?.startDate||e?.date||todayKey(),endDate=e?.endDate||e?.date||startDate;return `<div class="form"><label>Título<input id="fTitle" value="${esc(e?.title||'')}" placeholder="Ej. Cita, cumpleaños, viaje…"></label><div class="form-two"><label>Fecha de inicio<input id="fDate" type="date" value="${startDate}"></label><label>Fecha de fin<input id="fEndDate" type="date" value="${endDate}"></label></div><div class="form-two"><label>Categoría<select id="fCat">${Object.keys(cats).map(x=>`<option ${x===(e?.category||'Otros')?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Hora inicio<input id="fStart" type="time" value="${e?.startTime||''}"></label></div><div class="form-two"><label>Hora fin<input id="fEnd" type="time" value="${e?.endTime||''}"></label><span></span></div><label>Ubicación<input id="fLocation" value="${esc(e?.location||'')}" placeholder="Opcional"></label><label>Repetir<select id="fEventRepeat"><option value="none" ${!e?.recurrence||e.recurrence==='none'?'selected':''}>No repetir</option><option value="daily" ${e?.recurrence==='daily'?'selected':''}>Cada día</option><option value="weekly" ${e?.recurrence==='weekly'?'selected':''}>Cada semana</option><option value="monthly" ${e?.recurrence==='monthly'?'selected':''}>Cada mes</option><option value="yearly" ${e?.recurrence==='yearly'?'selected':''}>Cada año</option></select></label><label class="checkline"><input id="fReminder" type="checkbox" ${e?.reminder?'checked':''}> Recordarme</label><label>Antelación del recordatorio<select id="fReminderLead"><option value="0" ${Number(e?.reminderLead||0)===0?'selected':''}>A la hora del evento</option><option value="15" ${Number(e?.reminderLead||0)===15?'selected':''}>15 minutos antes</option><option value="60" ${Number(e?.reminderLead||0)===60?'selected':''}>1 hora antes</option><option value="1440" ${Number(e?.reminderLead||0)===1440?'selected':''}>1 día antes</option></select></label><label>Vincular con tarea<select id="fLinked"><option value="">Sin tarea vinculada</option>${linked}</select></label><label>Notas<textarea id="fNotes" placeholder="Opcional">${esc(e?.notes||'')}</textarea></label><button class="primary" onclick="saveEvent('${e?.id||''}')">${e?'Guardar cambios':'Guardar evento'}</button>${e?`<button class="danger-button" onclick="deleteEvent('${e.id}')">Eliminar evento</button>`:''}</div>`}
-function saveEvent(id=''){const title=document.querySelector('#fTitle')?.value.trim();const date=document.querySelector('#fDate')?.value;const endDate=document.querySelector('#fEndDate')?.value||date;if(!title||!date||!endDate)return;if(endDate<date){alert('La fecha de fin no puede ser anterior a la fecha de inicio.');return}let e=id&&state.events.find(x=>x.id===id);if(!e){e={id:crypto.randomUUID()};state.events.push(e)}const recurrence=document.querySelector('#fEventRepeat').value;Object.assign(e,{title,date,startDate:date,endDate,category:document.querySelector('#fCat').value,startTime:document.querySelector('#fStart').value,endTime:document.querySelector('#fEnd').value,location:document.querySelector('#fLocation').value.trim(),recurrence,reminder:document.querySelector('#fReminder').checked,reminderLead:Number(document.querySelector('#fReminderLead').value)||0,linkedTask:document.querySelector('#fLinked').value,notes:document.querySelector('#fNotes').value.trim()});save();state.calendarMonth=date.slice(0,7);closeModal();render()}
-function editEvent(id){const e=state.events.find(x=>x.id===id);if(e)openModal('Editar evento',eventForm(e))}
-function deleteEvent(id){if(!confirm('¿Eliminar este evento?'))return;state.events=state.events.filter(e=>e.id!==id);save();closeModal();render()}
+  const headers = rows[0].map(value => value.trim().toLowerCase());
+  const recipes = [];
 
-function settings(c){
- const s=state.settings||{};s.notifications=s.notifications||{};s.food=s.food||{};
- c.innerHTML=`<div class="settings-page"><div class="settings-intro"><span class="eyebrow">Configuración</span><h2>Tu aplicación, a tu manera</h2><p>Los ajustes se guardan en este dispositivo y se aplican al resto de la aplicación.</p></div><div class="settings-grid">
- <section class="card settings-card"><div class="setting-head"><div><h3>Perfil y formato</h3><span class="muted">Datos básicos de uso.</span></div><button class="secondary small" onclick="openModal('Perfil y formato',profileSettingsForm())">Editar</button></div><div class="settings-list"><div class="setting-row"><div><b>${esc(s.name||'Sin nombre')}</b><span>Nombre</span></div></div><div class="setting-row"><div><b>${s.currency==='EUR'?'Euro (€)':s.currency}</b><span>Moneda</span></div><span class="pill">${esc(s.dateFormat||'DD/MM/YYYY')}</span></div><div class="setting-row"><div><b>${s.weekStartsMonday!==false?'Lunes':'Domingo'}</b><span>Primer día de la semana</span></div></div></div></section>
- <section class="card settings-card"><div class="setting-head"><div><h3>Apariencia</h3><span class="muted">Cómo quieres ver Mis cosas.</span></div><button class="secondary small" onclick="openModal('Apariencia',appearanceSettingsForm())">Editar</button></div><div class="settings-list"><div class="setting-row"><div><b>${s.theme==='dark'?'Oscuro':s.theme==='auto'?'Automático':'Claro'}</b><span>Modo de apariencia</span></div><span class="color-dot" style="background:var(--sage)"></span></div></div></section>
- <section class="card settings-card"><div class="setting-head"><div><h3>Notificaciones</h3><span class="muted">Preferencias de avisos.</span></div><button class="secondary small" onclick="openModal('Notificaciones',notificationSettingsForm())">Editar</button></div><div class="settings-list">${[['tasks','Tareas'],['calendar','Calendario'],['expenses','Gastos y presupuesto'],['food','Comidas y preparación']].map(([k,l])=>`<div class="setting-row"><div><b>${l}</b><span>${s.notifications[k]!==false?'Activadas':'Desactivadas'}</span></div></div>`).join('')}</div><p class="muted">Los avisos de tareas/calendario podrán aprovechar notificaciones del navegador cuando estén disponibles.</p></section>
- <section class="card settings-card"><div class="setting-head"><div><h3>Comidas</h3><span class="muted">Preferencias del menú semanal.</span></div><button class="secondary small" onclick="openModal('Preferencias de comidas',foodSettingsForm())">Editar</button></div><div class="settings-list"><div class="setting-row"><div><b>${s.food.useInventory!==false?'Sí':'No'}</b><span>Aprovechar inventario</span></div><span class="pill">${s.food.twoTuppers!==false?'2 tuppers':'Sin objetivo'}</span></div><div class="setting-row"><div><b>${s.food.quickMeals!==false?'Sí':'No'}</b><span>Priorizar comidas rápidas</span></div><span class="pill">${s.food.vegetables!==false?'Más verduras':''}</span></div></div></section>
- <section class="card settings-card"><div class="setting-head"><div><h3>Gastos</h3><span class="muted">Cuentas, categorías, presupuestos y recurrentes.</span></div><button class="secondary small" onclick="go('expenses')">Gestionar</button></div><div class="settings-list"><div class="setting-row"><div><b>${state.accounts.length}</b><span>Cuentas</span></div><span>${state.budgets.length} presupuestos</span></div><div class="setting-row"><div><b>${state.transactions.filter(t=>t.recurring&&!t.recurringFrom).length}</b><span>Movimientos recurrentes</span></div></div></div></section>
- <section class="card settings-card"><div class="setting-head"><div><h3>Aplicación</h3><span class="muted">Instala Mis cosas como una app en este dispositivo.</span></div></div><div class="data-actions"><button id="installAppBtn" class="secondary" onclick="installApp()">Instalar Mis cosas</button></div><p id="installHelp" class="muted">En Android/Chrome puedes instalarla desde aquí cuando el navegador lo permita. En iPhone: Compartir → Añadir a pantalla de inicio.</p></section><section class="card settings-card"><div class="setting-head"><div><h3>Datos</h3><span class="muted">Haz una copia antes de hacer cambios importantes.</span></div></div><div class="data-actions"><button class="secondary" onclick="exportData()">Exportar mis datos</button><button class="secondary" onclick="document.querySelector('#importDataInput').click()">Importar copia</button><input id="importDataInput" type="file" accept="application/json" hidden onchange="importData(this)"><button class="danger-button" onclick="clearAllInventory()">Borrar todo el inventario</button></div><p class="muted">La copia incluye también inventario, preparaciones, menú y configuración. El botón rojo borra solo Congelador, Despensa y Frescos.</p></section>
- <section class="card settings-card"><div class="setting-head"><div><h3>Aplicación</h3><span class="muted">PWA y almacenamiento local.</span></div><span class="status-dot">● Local</span></div><p class="muted">Los datos se mantienen en este navegador. Puedes instalar la PWA desde el navegador cuando esté disponible.</p></section>
- </div><section class="card settings-card"><div class="setting-head"><div><h3>Cuenta y sincronización</h3><span class="muted">Sesión actual</span></div><button class="secondary small" onclick="logout()">Cerrar sesión</button></div><div class="settings-list"><div class="setting-row"><div><b>${esc(currentUser?.email||'Sin sesión')}</b><span>Cuenta de Mis cosas</span></div><span class="pill">☁️ Conectada</span></div></div></section></div>`;
-}
-function profileSettingsForm(){const s=state.settings;return `<div class="form"><label>Nombre<input id="fSetName" value="${esc(s.name||'')}" placeholder="Tu nombre"></label><label>Moneda<select id="fSetCurrency"><option value="EUR" selected>Euro (€)</option><option value="GBP" ${s.currency==='GBP'?'selected':''}>Libra (£)</option><option value="USD" ${s.currency==='USD'?'selected':''}>Dólar ($)</option></select></label><label>Formato de fecha<select id="fSetDate"><option ${s.dateFormat==='DD/MM/YYYY'?'selected':''}>DD/MM/YYYY</option><option ${s.dateFormat==='MM/DD/YYYY'?'selected':''}>MM/DD/YYYY</option></select></label><label class="checkline"><input id="fSetMonday" type="checkbox" ${s.weekStartsMonday!==false?'checked':''}> La semana empieza en lunes</label><button class="primary" onclick="saveProfileSettings()">Guardar</button></div>`}
-function saveProfileSettings(){state.settings.name=document.querySelector('#fSetName').value.trim();state.settings.currency=document.querySelector('#fSetCurrency').value;state.settings.dateFormat=document.querySelector('#fSetDate').value;state.settings.weekStartsMonday=document.querySelector('#fSetMonday').checked;save();closeModal();applyAppearance();render()}
-function appearanceSettingsForm(){const s=state.settings;return `<div class="form"><label>Apariencia<select id="fSetTheme"><option value="light" ${s.theme==='light'?'selected':''}>Claro</option><option value="dark" ${s.theme==='dark'?'selected':''}>Oscuro</option><option value="auto" ${s.theme==='auto'?'selected':''}>Automático</option></select></label><label>Color principal<select id="fSetAccent"><option value="sage" ${s.accent==='sage'?'selected':''}>Verde salvia</option><option value="blue" ${s.accent==='blue'?'selected':''}>Azul lavanda</option><option value="water" ${s.accent==='water'?'selected':''}>Verde agua</option></select></label><button class="primary" onclick="saveAppearanceSettings()">Guardar</button></div>`}
-function saveAppearanceSettings(){state.settings.theme=document.querySelector('#fSetTheme').value;state.settings.accent=document.querySelector('#fSetAccent').value;save();closeModal();applyAppearance();render()}
-function applyAppearance(){const s=state.settings||{};let theme=s.theme||'light';if(theme==='auto')theme=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.dataset.theme=theme;document.documentElement.dataset.accent=s.accent||'sage'}
-function notificationSettingsForm(){const n=state.settings.notifications||{};const perm='Notification' in window?Notification.permission:'unsupported';return `<div class="form"><p class="muted">Los avisos se comprueban automáticamente cuando la aplicación está abierta. Para recibirlos, primero activa los permisos del navegador.</p><div class="setting-row notification-permission"><div><b>Permiso del navegador</b><span>${perm==='granted'?'Activado':perm==='denied'?'Bloqueado':perm==='unsupported'?'No disponible':'Pendiente'}</span></div><button class="secondary small" onclick="requestNotificationPermission();closeModal()">Activar</button></div>${[['tasks','Tareas'],['calendar','Calendario'],['expenses','Gastos y presupuesto'],['food','Comidas y preparación']].map(([k,l])=>`<label class="checkline"><input id="notif-${k}" type="checkbox" ${n[k]!==false?'checked':''}> ${l}</label>`).join('')}<button class="primary" onclick="saveNotificationSettings()">Guardar</button></div>`}
-function saveNotificationSettings(){state.settings.notifications=state.settings.notifications||{};['tasks','calendar','expenses','food'].forEach(k=>state.settings.notifications[k]=document.querySelector('#notif-'+k).checked);save();closeModal();render()}
-function foodSettingsForm(){const f=state.settings.food||{};return `<div class="form"><label>¿Cuántos días cocinas?<select id="foodCookDays"><option value="3" ${Number(f.cookingDays||4)===3?'selected':''}>3 días</option><option value="4" ${Number(f.cookingDays||4)===4?'selected':''}>4 días</option></select></label><label>Tiempo máximo entre semana<select id="foodTime"><option value="30" ${Number(f.weekdayMinutes||30)===30?'selected':''}>30 minutos</option><option value="45" ${Number(f.weekdayMinutes||30)===45?'selected':''}>45 minutos</option><option value="60" ${Number(f.weekdayMinutes||30)===60?'selected':''}>60 minutos</option></select></label><label class="checkline"><input id="foodInv" type="checkbox" ${f.useInventory!==false?'checked':''}> Aprovechar lo que tengo</label><label class="checkline"><input id="foodQuick" type="checkbox" ${f.quickMeals!==false?'checked':''}> Comidas rápidas</label><label class="checkline"><input id="foodVeg" type="checkbox" ${f.vegetables!==false?'checked':''}> Más verduras</label><label class="checkline"><input id="foodTup" type="checkbox" ${f.twoTuppers!==false?'checked':''}> Planificar 2 tuppers</label><label class="checkline"><input id="foodFriday" type="checkbox" ${f.fridayFun!==false?'checked':''}> Viernes: comida divertida</label><label class="checkline"><input id="foodSnack" type="checkbox" ${f.snacks!==false?'checked':''}> Incluir meriendas</label><label class="checkline"><input id="foodSweet" type="checkbox" ${f.sweet?'checked':''}> Incluir dulce</label><label class="checkline"><input id="foodBread" type="checkbox" ${f.bread?'checked':''}> Hacer pan</label><label>Desayuno entre semana<input id="foodBreakfast" value="${esc(f.breakfast||'Café con leche + tostada con aceite y tomate') }"></label><button class="primary" onclick="saveFoodSettings()">Guardar</button></div>`}
-function saveFoodSettings(){state.settings.food={cookingDays:Number(document.querySelector('#foodCookDays').value),weekdayMinutes:Number(document.querySelector('#foodTime').value),useInventory:document.querySelector('#foodInv').checked,quickMeals:document.querySelector('#foodQuick').checked,vegetables:document.querySelector('#foodVeg').checked,twoTuppers:document.querySelector('#foodTup').checked,fridayFun:document.querySelector('#foodFriday').checked,snacks:document.querySelector('#foodSnack').checked,sweet:document.querySelector('#foodSweet').checked,bread:document.querySelector('#foodBread').checked,breakfast:document.querySelector('#foodBreakfast').value.trim()};save();closeModal();render()}
-function accountsSettingsForm(){return `<div class="form">${state.accounts.map(a=>`<div class="account-setting-block"><div class="form-two"><label>Nombre<input id="accName-${a.id}" value="${esc(a.name)}"></label><label>Saldo inicial<input id="accBalance-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></label></div><label class="checkline"><input id="accActive-${a.id}" type="checkbox" ${a.active!==false?'checked':''}> Cuenta activa</label></div>`).join('')}<button class="primary" onclick="saveAccountsSettings()">Guardar cuentas</button></div>`}
-function saveAccountsSettings(){
- state.accounts.forEach(a=>{const n=document.querySelector('#accName-'+a.id),b=document.querySelector('#accBalance-'+a.id),active=document.querySelector('#accActive-'+a.id);if(n&&n.value.trim())a.name=n.value.trim();if(b)a.startingBalance=Number(b.value)||0;if(active)a.active=active.checked});
- save();closeModal();render();
-}
-function categoriesSettingsForm(){return `<div class="form"><p class="muted">Puedes añadir categorías nuevas. Las categorías que ya tienen movimientos se conservan para no romper tu histórico.</p><div class="category-settings-list">${Object.entries(expenseCategories).map(([g,a])=>`<div class="category-group-setting"><div class="setting-group-title"><b>${esc(g)}</b><span>${a.length}</span></div>${a.map((x,i)=>`<div class="category-edit-row"><input id="cat-${encodeURIComponent(g)}-${i}" value="${esc(x)}"><button type="button" class="icon-button" title="Eliminar" onclick="removeCategory('${esc(g)}','${esc(x)}')">×</button></div>`).join('')}</div>`).join('')}<div class="form-two"><label>Grupo<select id="newCatGroup">${Object.keys(expenseCategories).map(g=>`<option>${esc(g)}</option>`).join('')}</select></label><label>Nueva categoría<input id="newCatName" placeholder="Ej. Hogar"></label></div><button class="secondary" onclick="addCategory()">+ Añadir categoría</button><button class="primary" onclick="saveCategoriesSettings()">Guardar categorías</button></div>`}
-function addCategory(){const g=document.querySelector('#newCatGroup')?.value,n=document.querySelector('#newCatName')?.value.trim();if(!g||!n)return;if(!expenseCategories[g])expenseCategories[g]=[];if(!expenseCategories[g].includes(n))expenseCategories[g].push(n);saveCategories();openModal('Gestionar categorías',categoriesSettingsForm())}
-function removeCategory(group,name){const used=state.transactions.some(t=>t.category===name);if(used){alert('Esta categoría tiene movimientos y no se puede eliminar del histórico. Puedes dejar de usarla en adelante.');return}expenseCategories[group]=(expenseCategories[group]||[]).filter(x=>x!==name);saveCategories();openModal('Gestionar categorías',categoriesSettingsForm())}
-function saveCategoriesSettings(){
- Object.entries(expenseCategories).forEach(([g,a])=>a.forEach((old,i)=>{const el=document.querySelector('#cat-'+encodeURIComponent(g)+'-'+i);if(el&&el.value.trim()&&el.value.trim()!==old){const nn=el.value.trim();if(!a.includes(nn)||nn===old){const idx=expenseCategories[g].indexOf(old);if(idx>=0)expenseCategories[g][idx]=nn}}}));
- saveCategories();closeModal();render();
-}
-function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));queueCloudSave()}
-function exportData(){
- const data={version:19,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,cleaning:state.cleaning,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,menuHistory:state.menuHistory||[],calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
- const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`mis-cosas-copia-${todayKey()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
- const stamp=new Date().toLocaleString('es-ES');localStorage.setItem(KEY+'lastBackup',stamp);
- const el=document.querySelector('#backupStatus');if(el)el.textContent='Última copia manual: '+stamp;
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row.some(value => value.trim())) continue;
+
+    const get = (...names) => {
+      const index = names
+        .map(name => headers.indexOf(name))
+        .find(index => index >= 0);
+
+      return index >= 0 ? (row[index] || "").trim() : "";
+    };
+
+    const ingredients = parseIngredientText(
+      get("ingredients", "ingredientes")
+    );
+
+    recipes.push(normalizeRecipeImportObject({
+      name: get("name", "nombre"),
+      description: get("description", "descripcion", "descripción"),
+      preparation: get("preparation", "preparacion", "preparación"),
+      servings: get("servings", "raciones"),
+      prep_time: get("prep_time", "tiempo_preparacion"),
+      cook_time: get("cook_time", "tiempo_coccion"),
+      temperature: get("temperature", "temperatura"),
+      image_url: get("image_url", "imagen", "image"),
+      meal_types: get("meal_types", "tipos_comida", "tipo_comida", "meal_type", "tipo"),
+      fun_recipe: get("fun_recipe", "receta_divertida"),
+      is_freezable: get("is_freezable", "congelable"),
+      do_not_suggest: get("do_not_suggest", "no_sugerir"),
+      ingredients
+    }));
+  }
+
+  return recipes.filter(recipe => recipe.name);
 }
 
-async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','cleaning','recipes','inventory','preparations','shoppingChecks','prepDone','menuHistory'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;state.cleaning=normalizeCleaningArray(state.cleaning);save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Mis cosas.')}}
+function parseIngredientText(value) {
+  if (!value) return [];
 
-window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;updateInstallButton()});
-window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateInstallButton(true)});
-function updateInstallButton(installed=false){const b=document.querySelector('#installAppBtn'),h=document.querySelector('#installHelp');if(!b)return;if(installed||window.matchMedia('(display-mode: standalone)').matches){b.textContent='Aplicación instalada';b.disabled=true;if(h)h.textContent='Mis cosas ya está instalada en este dispositivo.';return}if(deferredInstallPrompt){b.disabled=false;b.textContent='Instalar Mis cosas';if(h)h.textContent='Instalación con un toque desde este navegador. ';}else{b.disabled=false;b.textContent='Cómo instalar';if(h)h.textContent='En Android/Chrome: menú ⋮ → Añadir a pantalla de inicio. En iPhone: Compartir → Añadir a pantalla de inicio.';}}
-async function installApp(){if(window.matchMedia('(display-mode: standalone)').matches){updateInstallButton(true);return}if(!deferredInstallPrompt){updateInstallButton();return}deferredInstallPrompt.prompt();const choice=await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;updateInstallButton(choice.outcome==='accepted')}
-initAuth();
-updateInstallButton();
+  return value.split(";").map(part => {
+    const [name, quantity, unit, notes] = part.split("|").map(item => item.trim());
 
-// Utilidades y controles globales (restaurados y centralizados)
-function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'-01T12:00');d.setMonth(d.getMonth()+n);state.expenseMonth=monthKey(d);render()}
-function bindTaskFormEvents(){const repeat=document.querySelector('#fTaskRepeat');const label=document.querySelector('#customRepeatLabel');if(repeat&&label)repeat.addEventListener('change',()=>label.classList.toggle('hidden',repeat.value!=='custom'))}
-function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden');bindTaskFormEvents()}
-function closeModal(){document.querySelector('#modal').classList.add('hidden')}
-function sameMonth(s){if(!s)return false;const d=new Date(String(s).length<=10?s+'T12:00:00':s);return d.getMonth()===today.getMonth()&&d.getFullYear()===today.getFullYear()}
-function cap(s=''){return s?s[0].toUpperCase()+s.slice(1):s}
-function esc(s=''){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+    return {
+      name: name || "",
+      quantity: quantity || null,
+      unit: unit || null,
+      notes: notes || null
+    };
+  }).filter(item => item.name);
+}
 
-function closeMobileMenu(){document.querySelector('.sidebar')?.classList.remove('open');document.querySelector('.menu-backdrop')?.classList.remove('show');document.body.classList.remove('menu-open')}
-function toggleMobileMenu(){const sidebar=document.querySelector('.sidebar');const backdrop=document.querySelector('.menu-backdrop');if(!sidebar)return;const open=!sidebar.classList.contains('open');sidebar.classList.toggle('open',open);backdrop?.classList.toggle('show',open);document.body.classList.toggle('menu-open',open)}
-const menuBtn=document.querySelector('#menuBtn');
-if(menuBtn)menuBtn.addEventListener('click',toggleMobileMenu);
-document.querySelector('.menu-backdrop')?.addEventListener('click',closeMobileMenu);
-document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();go(b.dataset.view);closeMobileMenu();}));
-// Fallback delegado para la navegación: garantiza que las vistas añadidas dinámicamente
-// (incluida Limpieza) siempre respondan al clic aunque un listener individual no se haya enlazado.
-document.addEventListener('click',e=>{const b=e.target.closest?.('[data-view]');if(!b)return;if(b.closest('#nav')||b.closest('.bottom-nav')){e.preventDefault();e.stopPropagation();go(b.dataset.view);closeMobileMenu();}},true);
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
 
-document.querySelector('#closeModal').addEventListener('click',closeModal);
-document.querySelector('#quickAdd').addEventListener('click',()=>{
- if(state.view==='tasks')openModal('Nueva tarea',taskForm());
- else if(state.view==='expenses')openModal('Nuevo gasto',expenseForm());
- else if(state.view==='calendar')openModal('Nuevo evento',eventForm());
- else if(state.view==='habits')openModal('Nuevo hábito',habitForm());
- else if(state.view==='cleaning')openModal('Nueva rutina de limpieza',cleaningForm());
- else if(state.view==='food')openModal('Añadir a Comidas',foodQuickForm());
- else openModal('Añadir',`<div class="actions"><button class="primary" onclick="closeModal();openModal('Nueva tarea',taskForm())">Nueva tarea</button><button class="secondary" onclick="closeModal();openModal('Nuevo gasto',expenseForm())">Nuevo gasto</button><button class="secondary" onclick="closeModal();openModal('Nuevo evento',eventForm())">Nuevo evento</button><button class="secondary" onclick="closeModal();openModal('Nuevo hábito',habitForm())">Nuevo hábito</button><button class="secondary" onclick="closeModal();openModal('Nueva rutina de limpieza',cleaningForm())">Limpieza</button></div>`)
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      i++;
+      continue;
+    }
+
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+
+    if (char === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") i++;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+
+    cell += char;
+  }
+
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function toNumberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+
+  const number = Number(String(value).replace(",", "."));
+  return Number.isFinite(number) ? number : null;
+}
+
+function toBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (value === null || value === undefined) return false;
+
+  return ["true", "1", "sí", "si", "yes", "x", "verdadero"].includes(
+    String(value).trim().toLowerCase()
+  );
+}
+
+async function importRecipes(recipes) {
+  let count = 0;
+  const errors = [];
+
+  for (const recipe of recipes) {
+    try {
+      const payload = {
+        name: recipe.name,
+        description: recipe.description || null,
+        preparation: recipe.preparation || null,
+        servings: toNumberOrNull(recipe.servings),
+        prep_time: toNumberOrNull(recipe.prep_time),
+        cook_time: toNumberOrNull(recipe.cook_time),
+        temperature: toNumberOrNull(recipe.temperature),
+        image_url: recipe.image_url || null,
+        meal_types: normalizeMealTypes(recipe.meal_types),
+        fun_recipe: toBoolean(recipe.fun_recipe),
+        is_freezable: toBoolean(recipe.is_freezable),
+        do_not_suggest: toBoolean(recipe.do_not_suggest)
+      };
+
+      const { data, error } = await supabaseClient
+        .from("recipes")
+        .insert(payload)
+        .select()
+        .single();
+
+      if (error) {
+        errors.push(`${recipe.name}: ${error.message}`);
+        continue;
+      }
+
+      for (const item of recipe.ingredients || []) {
+        const { ingredient, error: ingredientError } =
+          await findOrCreateIngredient(item.name, item.unit || "unidad");
+
+        if (ingredientError) {
+          errors.push(`${recipe.name} → ${item.name}: ${ingredientError.message}`);
+          continue;
+        }
+
+        const { error: relationError } = await supabaseClient
+          .from("recipe_ingredients")
+          .insert({
+            recipe_id: data.id,
+            ingredient_id: ingredient.id,
+            quantity: toNumberOrNull(item.quantity),
+            unit: item.unit || null,
+            notes: item.notes || null
+          });
+
+        if (relationError) {
+          errors.push(`${recipe.name} → ${item.name}: ${relationError.message}`);
+        }
+      }
+
+      count++;
+    } catch (error) {
+      errors.push(`${recipe.name}: ${error.message}`);
+    }
+  }
+
+  return {
+    success: count > 0 && errors.length === 0,
+    count,
+    message: errors.length
+      ? `${count} recetas importadas. ${errors.length} incidencias:\n${errors.slice(0, 8).join("\n")}`
+      : ""
+  };
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  setupInventoryButtons();
+  loadHomeDashboard();
+  testSupabaseConnection();
+
+  normalizeRecipeFilters();
+  setupRecipeButtons();
+  loadRecipes();
+  setupShoppingControls();
+
+  if (document.getElementById("inventario")?.classList.contains("active-page")) {
+    loadInventory();
+  }
+
+  if (document.getElementById("compra")?.classList.contains("active-page")) {
+    loadShoppingList();
+  }
 });

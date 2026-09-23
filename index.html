@@ -1,175 +1,91 @@
 <!doctype html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#8d9b86">
-  <meta name="description" content="ARA · Comidas">
-  <title>ARA · Comidas</title>
-  <link rel="stylesheet" href="styles.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#F1EFEA">
+<meta name="description" content="Mis cosas — tu organizador personal">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="./icon-192.png" sizes="192x192">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<title>Mis cosas</title>
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app">
-    <aside class="sidebar" id="sidebar">
-      <div class="brand">
-        <div class="brand-mark">A</div>
-        <div><strong>ARA</strong><span>Comidas</span></div>
-        <button class="close-menu" onclick="toggleMenu()">×</button>
-      </div>
-      <nav>
-        <button class="nav active" data-page="inicio" onclick="showPage('inicio')">⌂ <span>Inicio</span></button>
-        <button class="nav" data-page="menu" onclick="showPage('menu')">▣ <span>Menú</span></button>
-        <button class="nav" data-page="recetas" onclick="showPage('recetas')">▤ <span>Recetas</span></button>
-        <button class="nav" data-page="inventario" onclick="showPage('inventario')">▦ <span>Inventario</span></button>
-        <button class="nav" data-page="compra" onclick="showPage('compra')">□ <span>Lista de compra</span></button>
-      </nav>
-      <div class="sidebar-bottom">⚙ <span>Configuración</span></div>
-    </aside>
-
-    <div class="overlay" id="overlay" onclick="toggleMenu()"></div>
-
-    <main class="main">
-      <header>
-        <button class="mobile-menu" onclick="toggleMenu()">☰</button>
-        <div><small>ARA · COMIDAS</small><h1 id="page-title">Hola 👋</h1></div>
-      </header>
-
-      <section id="inicio" class="page active-page">
-        <div class="hero">
-          <div>
-            <small>TU SEMANA</small>
-            <h2>Organizar la comida,<br>sin complicaciones.</h2>
-            <p>Planifica, aprovecha lo que tienes y ten la compra bajo control.</p>
-          </div>
-          <div class="hero-symbol">✦</div>
-        </div>
-
-        <div class="home-dashboard" id="home-dashboard">
-          <div class="section-title"><small>HOY</small><h2>¿Qué toca?</h2></div>
-
-          <div class="home-meals" id="home-today-meals">
-            <div class="home-loading">Cargando tu menú de hoy…</div>
-          </div>
-
-          <div class="home-stats" id="home-stats">
-            <div class="home-loading">Cargando resumen…</div>
-          </div>
-
-          <div class="section-title home-inventory-title"><small>INVENTARIO</small><h2>Lo que tienes</h2></div>
-          <div class="home-inventory" id="home-inventory">
-            <div class="home-loading">Cargando inventario…</div>
-          </div>
-        </div>
-
-        <div class="section-title"><small>ACCESOS RÁPIDOS</small><h2>¿Qué quieres hacer?</h2></div>
-        <div class="quick-grid">
-          <button onclick="showPage('menu')"><b>▣</b><span><strong>Planificar menú</strong><em>Organiza esta semana</em></span>›</button>
-          <button onclick="showPage('recetas')"><b>▤</b><span><strong>Ver recetas</strong><em>Busca qué cocinar</em></span>›</button>
-          <button onclick="showPage('inventario')"><b>▦</b><span><strong>Revisar inventario</strong><em>Mira qué tienes</em></span>›</button>
-          <button onclick="showPage('compra')"><b>□</b><span><strong>Lista de compra</strong><em>Añade lo que falta</em></span>›</button>
-        </div>
-      </section>
-
-      <section id="menu" class="page">
-        <div class="page-head menu-page-head">
-          <div>
-            <small>SEMANA</small>
-            <h2>Menú semanal</h2>
-          </div>
-
-          <div class="menu-header-actions">
-            <div class="menu-week-navigation">
-              <button type="button" class="secondary menu-week-arrow" id="menu-prev-week" title="Semana anterior">‹</button>
-              <button type="button" class="secondary menu-current-week" id="menu-current-week">Esta semana</button>
-              <button type="button" class="secondary menu-week-arrow" id="menu-next-week" title="Semana siguiente">›</button>
-            </div>
-            <button type="button" class="secondary menu-inventory-review-button" onclick="openInventoryUsageReview()">📦 Repasar inventario</button>
-            <button type="button" class="primary menu-generate-button">✦ Generar menú</button>
-          </div>
-        </div>
-
-        <div class="menu-week-info">
-          <span id="menu-week-label"></span>
-          <span>Haz clic en el día para ver el detalle.</span>
-        </div>
-
-        <div class="inventory-review-prompt" id="inventory-review-prompt" hidden>
-          <div>
-            <strong>📦 Repaso de inventario</strong>
-            <span>Al final de la semana puedes revisar lo que se ha usado de despensa y congelador y marcar lo que se haya terminado.</span>
-          </div>
-          <button type="button" class="secondary" id="menu-review-inventory-button">Repasar semana</button>
-        </div>
-
-        <p class="menu-help-text" id="menu-generation-note">Las recetas que elijas manualmente quedan fijadas 🔒. El generador solo rellenará o cambiará las que no estén fijadas.</p>
-        <div class="week"></div>
-      </section>
-
-      <section id="recetas" class="page">
-        <div class="page-head">
-          <div><small>RECETARIO</small><h2>Recetas</h2></div>
-          <div class="recipe-header-actions">
-            <button class="secondary" type="button" onclick="openRecipeImportModal()">⇧ Importar recetas</button>
-            <button class="primary" type="button" onclick="openRecipeModal()">＋ Nueva receta</button>
-          </div>
-        </div>
-        <div class="chips">
-          <button class="chip selected" type="button">Todas</button>
-          <button class="chip" type="button">Comidas</button>
-          <button class="chip" type="button">Cenas</button>
-          <button class="chip" type="button">Divertidas</button>
-          <button class="chip" type="button">Congelables</button>
-          <button class="chip" type="button">No sugerir</button>
-        </div>
-        <div class="empty">
-          <div class="empty-icon">▤</div>
-          <h3>Aún no hay recetas</h3>
-          <p>Cuando conectemos Supabase podremos guardar aquí todo tu recetario.</p>
-          <button class="secondary" type="button" onclick="openRecipeModal()">＋ Añadir receta</button>
-        </div>
-      </section>
-
-      <section id="inventario" class="page">
-        <div class="page-head"><div><small>INVENTARIO</small><h2>Lo que tienes</h2></div><button class="primary">＋ Añadir producto</button></div>
-        <div class="inventory">
-          <article><div class="emoji">🥫</div><h3>Despensa</h3><p>Productos secos, conservas y básicos.</p><button>Ver productos →</button></article>
-          <article><div class="emoji">🥬</div><h3>Frigorífico</h3><p>Lo que tienes fresco.</p><button>Ver productos →</button></article>
-          <article><div class="emoji">🧊</div><h3>Congelador</h3><p>Tus productos congelados.</p><button>Ver productos →</button></article>
-        </div>
-      </section>
-
-      <section id="compra" class="page">
-        <div class="page-head shopping-page-head">
-          <div>
-            <small>COMPRA</small>
-            <h2>Lista de compra</h2>
-          </div>
-
-          <div class="shopping-header-actions">
-            <button class="secondary" type="button" onclick="addShoppingManual()">＋ Añadir</button>
-            <button class="primary" type="button" id="generate-shopping-button" onclick="generateShoppingList()">✦ Generar desde menú</button>
-          </div>
-        </div>
-
-        <p class="shopping-help" id="shopping-week-note">
-          Calcula lo que necesitas para el menú de esta semana y descuenta lo que ya tienes en el inventario.
-        </p>
-
-        <div id="shopping-list-content"></div>
-      </section>
-    </main>
-
-    <nav class="bottom-nav">
-      <button data-page="inicio" onclick="showPage('inicio')">⌂<span>Inicio</span></button>
-      <button data-page="menu" onclick="showPage('menu')">▣<span>Menú</span></button>
-      <button data-page="recetas" onclick="showPage('recetas')">▤<span>Recetas</span></button>
-      <button data-page="inventario" onclick="showPage('inventario')">▦<span>Inventario</span></button>
-      <button data-page="compra" onclick="showPage('compra')">□<span>Compra</span></button>
-    </nav>
+<div id="authScreen" class="auth-screen hidden">
+  <div class="auth-card">
+    <div class="brand auth-brand">Mis cosas</div>
+    <p class="eyebrow">Tu espacio personal</p>
+    <h1 id="authTitle">Iniciar sesión</h1>
+    <p id="authSubtitle" class="muted">Accede para tener tus datos sincronizados entre dispositivos.</p>
+    <form id="authForm" class="form">
+      <label>Email<input id="authEmail" type="email" autocomplete="email" required></label>
+      <label>Contraseña<input id="authPassword" type="password" autocomplete="current-password" minlength="6" required></label>
+      <button id="authSubmit" class="primary" type="submit">Entrar</button>
+    </form>
+    <div id="authMessage" class="auth-message" aria-live="polite"></div>
+    <button id="authToggle" class="text-button auth-toggle" type="button">¿No tienes cuenta? Crear una</button>
   </div>
+</div>
+<div class="app hidden" id="appShell">
+<aside class="sidebar">
+  <div class="brand">Mis cosas</div>
+  <nav id="nav">
+    <button data-view="home" class="active">Inicio</button>
+    <button data-view="tasks">Tareas</button>
+    <button data-view="cleaning" onclick="go('cleaning');closeMobileMenu()">Limpieza</button>
+    <button data-view="expenses">Gastos</button>
+    <button data-view="food">Comidas</button>
+    <div class="sep"></div>
+    <button data-view="calendar">Calendario</button>
+    <button data-view="habits">Hábitos</button>
+    <div class="sep"></div>
+    <button data-view="settings">Ajustes</button>
+  </nav>
+</aside>
+<div class="menu-backdrop" aria-hidden="true"></div>
+<main>
+<header>
+  <button id="menuBtn" class="icon mobile" aria-label="Menú">☰</button>
+  <div><h1 id="pageTitle">Inicio</h1><p id="pageSubtitle"></p></div>
+  <div class="header-actions"><span id="syncStatus" class="sync-status" aria-live="polite">☁️ Sincronizado</span><button id="quickAdd" class="add" aria-label="Añadir">+</button></div>
+</header>
+<section id="content"></section>
+</main>
+<nav class="bottom-nav">
+  <button data-view="home" class="active">Inicio</button>
+  <button data-view="tasks">Tareas</button>
+  <button data-view="cleaning" onclick="go('cleaning');closeMobileMenu()">Limpieza</button>
+  <button data-view="expenses">Gastos</button>
+  <button data-view="food">Comidas</button>
+</nav>
+</div>
+<div id="modal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h2 id="modalTitle"></h2><button id="closeModal" aria-label="Cerrar">×</button></div><div id="modalBody"></div></div></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="recipe-audit-v85.js"></script>
+<script src="app.js"></script>
+<script>if('serviceWorker' in navigator) navigator.serviceWorker.register('sw-v96.js');</script>
 
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="app.js"></script>
-  <script src="inventario-importacion.js"></script>
+<script>
+(function(){
+  let deferredInstallPrompt = null;
+  window.addEventListener('beforeinstallprompt', function(event){
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    document.querySelectorAll('[data-install-app]').forEach(function(btn){ btn.hidden = false; });
+  });
+  window.addEventListener('appinstalled', function(){
+    deferredInstallPrompt = null;
+    document.querySelectorAll('[data-install-app]').forEach(function(btn){ btn.hidden = true; });
+  });
+  document.addEventListener('click', function(event){
+    const btn = event.target.closest && event.target.closest('[data-install-app]');
+    if(!btn || !deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    deferredInstallPrompt.userChoice.finally(function(){ deferredInstallPrompt = null; });
+  });
+  window.misCosasCanInstall = function(){ return !!deferredInstallPrompt; };
+})();
+</script>
 </body>
 </html>

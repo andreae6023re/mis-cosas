@@ -1789,6 +1789,7 @@ updateInstallButton();
 
 // Utilidades y controles globales (restaurados y centralizados)
 function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'-01T12:00');d.setMonth(d.getMonth()+n);state.expenseMonth=monthKey(d);render()}
+function changeExpenseAccountFilter(id){state.expenseAccountFilter=id||'all';render()}
 function bindTaskFormEvents(){const repeat=document.querySelector('#fTaskRepeat');const label=document.querySelector('#customRepeatLabel');if(repeat&&label)repeat.addEventListener('change',()=>label.classList.toggle('hidden',repeat.value!=='custom'))}
 function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden');bindTaskFormEvents()}
 function closeModal(){document.querySelector('#modal').classList.add('hidden')}

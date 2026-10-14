@@ -1036,12 +1036,20 @@ function weekKey(d=new Date()){const x=new Date(Date.UTC(d.getFullYear(),d.getMo
 function money(n){return new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(Number(n)||0)}
 function accountOptions(sel){return state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}</option>`).join('')}
 function accountBalance(a){return Number(a.startingBalance||0)+state.transactions.reduce((s,t)=>{if(t.type==='transfer'){if(t.from===a.id)s-=+t.amount;if(t.to===a.id)s+=+t.amount}else if(t.account===a.id)s+=(t.type==='income'?1:-1)*(+t.amount);return s},0)}
+let expenseAccountFilter='all';
+function setExpenseAccountFilter(accountId){
+ expenseAccountFilter=accountId||'all';
+ render();
+}
 function expenses(c){
  ensureRecurringTransactions();
- const key=state.expenseMonth||monthKey(), tx=state.transactions.filter(t=>(t.date||'').startsWith(key));
+ const key=state.expenseMonth||monthKey();
+ const allMonthTx=state.transactions.filter(t=>(t.date||'').startsWith(key));
+ const accountFilter=expenseAccountFilter;
+ const tx=allMonthTx.filter(t=>accountFilter==='all' ? true : (t.type==='transfer' ? (t.from===accountFilter||t.to===accountFilter) : t.account===accountFilter));
  const income=tx.filter(t=>t.type==='income').reduce((s,t)=>s+ +t.amount,0), spent=tx.filter(t=>t.type==='expense').reduce((s,t)=>s+ +t.amount,0);
  const transfers=tx.filter(t=>t.type==='transfer').length;
- const budgets=state.budgets.filter(b=>b.month===key), totalBudget=budgets.reduce((s,b)=>s+ +b.amount,0);
+ const budgets=state.budgets.filter(b=>b.recurring||b.month===key), totalBudget=budgets.reduce((s,b)=>s+Number(b.amount||0),0);
  const byCat={};tx.filter(t=>t.type==='expense').forEach(t=>byCat[t.category]=(byCat[t.category]||0)+ +t.amount);
  const budgetCategories=new Set(budgets.map(b=>b.category));
  const budgetedSpent=[...budgetCategories].reduce((s,cat)=>s+(byCat[cat]||0),0);
@@ -1054,13 +1062,21 @@ function expenses(c){
   <section class="expense-monthbar"><button class="month-arrow" onclick="changeExpenseMonth(-1)">‹</button><div><span>Mes seleccionado</span><strong>${title}</strong></div><button class="month-arrow" onclick="changeExpenseMonth(1)">›</button></section>
   <section class="expense-kpis"><div><span>Ingresos</span><strong>${money(income)}</strong></div><div><span>Gastos</span><strong>${money(spent)}</strong></div><div><span>Balance</span><strong>${money(income-spent)}</strong></div><div><span>Presupuesto disponible</span><strong>${totalBudget?money(totalBudget-budgetedSpent):'—'}</strong><small>${totalBudget?money(totalBudget)+' presupuestados':'Sin presupuestos este mes'}</small></div></section>
   <div class="expense-layout">
-   <section class="expense-panel movements-panel"><div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos en ${title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
-    <div class="movement-list">${tx.sort((a,b)=>{const dateDiff=(b.date||'').localeCompare(a.date||'');if(dateDiff)return dateDiff;return state.transactions.indexOf(b)-state.transactions.indexOf(a)}).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos este mes.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
+   <section class="expense-panel movements-panel">
+    <div class="movement-filter" style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+     <label for="expenseAccountFilter" style="margin:0">Filtrar movimientos por cuenta</label>
+     <select id="expenseAccountFilter" onchange="setExpenseAccountFilter(this.value)">
+      <option value="all" ${accountFilter==='all'?'selected':''}>Todas las cuentas</option>
+      ${state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${accountFilter===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}
+     </select>
+    </div>
+    <div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos ${accountFilter==='all'?'en '+title:'de '+esc(state.accounts.find(a=>a.id===accountFilter)?.name||'la cuenta seleccionada')+' en '+title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
+    <div class="movement-list">${tx.sort((a,b)=>{const dateDiff=(b.date||'').localeCompare(a.date||'');if(dateDiff)return dateDiff;return state.transactions.indexOf(b)-state.transactions.indexOf(a)}).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos para esta cuenta en el mes seleccionado.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
    </section>
    <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>`<div class="account-card"><div><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div><strong>${money(accountBalance(a))}</strong></div>`).join('')}</div></section>
     <section class="expense-panel"><div class="panel-heading"><div><h3>Por categoría</h3><span>Gasto real del mes</span></div></div><div class="category-totals">${Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div><span>${esc(k)}</span><b>${money(v)}</b></div>`).join('')||'<span class="muted">Todavía no hay gastos.</span>'}</div></section></aside>
   </div>
-  <div class="expense-bottom"><section class="expense-panel"><div class="panel-heading"><div><h3>Presupuestos</h3><span>Límite mensual por categoría</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100),over=s>b.amount;return `<div class="budget-item"><div class="row"><div><b>${esc(b.category)}</b><small>${money(s)} de ${money(b.amount)}</small></div><div class="budget-actions"><strong class="${over?'over-budget':''}">${over?'Excedido':money(b.amount-s)+' disponible'}</strong><button class="icon-button" onclick="openModal('Editar presupuesto',budgetForm(${JSON.stringify(b).replace(/"/g,'&quot;')}))">⋯</button></div></div><div class="budget-bar"><i class="${over?'over':''}" style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No tienes presupuestos configurados.</div>'}</div></section>
+  <div class="expense-bottom"><section class="expense-panel"><div class="panel-heading"><div><h3>Presupuestos</h3><span>Límite mensual por categoría · se repiten cada mes</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100),over=s>b.amount;return `<div class="budget-item"><div class="row"><div><b>${esc(b.category)}</b><small>${money(s)} de ${money(b.amount)}</small></div><div class="budget-actions"><strong class="${over?'over-budget':''}">${over?'Excedido':money(b.amount-s)+' disponible'}</strong><button class="icon-button" onclick="openModal('Editar presupuesto',budgetForm(${JSON.stringify(b).replace(/"/g,'&quot;')}))">⋯</button></div></div><div class="budget-bar"><i class="${over?'over':''}" style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No tienes presupuestos configurados.</div>'}</div></section>
    <section class="expense-panel recurring-panel"><div class="panel-heading"><div><h3>Recurrentes</h3><span>Se generan automáticamente cada mes</span></div><button class="secondary small" onclick="openModal('Nuevo gasto recurrente',expenseForm())">+ Añadir</button></div><div class="recurring-list">${state.transactions.filter(t=>t.recurring&&!t.recurringFrom).map(t=>`<div class="recurring-row"><div><b>${esc(t.concept||t.category||'Movimiento')}</b><span>${t.type==='transfer'?`${esc(state.accounts.find(a=>a.id===t.from)?.name||'')} → ${esc(state.accounts.find(a=>a.id===t.to)?.name||'')}`:esc(t.category||'')} · día ${t.recurringDay||'—'}</span></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="${t.type==='transfer'?`editTransfer('${t.id}')`:`editExpense('${t.id}')`}">Editar</button></div>`).join('')||'<div class="muted">Todavía no hay movimientos recurrentes.</div>'}</div></section>
   </div>
  </div>`;
@@ -1088,8 +1104,25 @@ function resetExpensesData(){
 function transferForm(t=null){return `<div class="form"><label>De<select id="fTransferFrom">${accountOptions(t?.from)}</select></label><label>A<select id="fTransferTo">${accountOptions(t?.to)}</select></label><label>Importe<input id="fTransferAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Fecha<input id="fTransferDate" type="date" value="${t?.date||todayKey()}"></label><label>Concepto<input id="fTransferConcept" value="${esc(t?.concept||'')}"></label><label class="checkline"><input id="fTransferRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label>Día del mes<input id="fTransferRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveTransfer('${t?.id||''}')">${t?'Guardar cambios':'Guardar transferencia'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
 function saveTransfer(id=''){const from=document.querySelector('#fTransferFrom').value,to=document.querySelector('#fTransferTo').value,amount=+document.querySelector('#fTransferAmount').value;if(!amount||from===to)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type='transfer';t.from=from;t.to=to;t.amount=amount;t.date=document.querySelector('#fTransferDate').value;t.concept=document.querySelector('#fTransferConcept').value.trim()||'Transferencia';t.recurring=document.querySelector('#fTransferRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fTransferRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
 function editTransfer(id){const t=state.transactions.find(x=>x.id===id);if(t)openModal('Editar transferencia',transferForm(t))}
-function budgetForm(b=null){return `<div class="form"><label>Categoría<select id="fBudgetCategory">${Object.entries(expenseCategories).filter(([g])=>g!=='Ingresos').map(([g,a])=>`<optgroup label="${g}">${a.map(x=>`<option value="${esc(x)}" ${x===b?.category?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}</select></label><label>Importe mensual<input id="fBudgetAmount" type="number" step="0.01" value="${b?.amount??''}"></label><button class="primary" onclick="saveBudget('${b?.id||''}')">${b?'Guardar cambios':'Guardar presupuesto'}</button>${b?`<button class="danger-button" onclick="deleteBudget('${b.id}')">Eliminar</button>`:''}</div>`}
-function saveBudget(id=''){let category=document.querySelector('#fBudgetCategory').value,amount=+document.querySelector('#fBudgetAmount').value,key=state.expenseMonth||monthKey();if(!amount)return;let b=id?state.budgets.find(x=>x.id===id):state.budgets.find(x=>x.month===key&&x.category===category);if(b){b.category=category;b.amount=amount;b.month=key}else state.budgets.push({id:crypto.randomUUID(),month:key,category,amount});save();closeModal();render()}
+function budgetForm(b=null){return `<div class="form"><label>Categoría<select id="fBudgetCategory">${Object.entries(expenseCategories).filter(([g])=>g!=='Ingresos').map(([g,a])=>`<optgroup label="${g}">${a.map(x=>`<option value="${esc(x)}" ${x===b?.category?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}</select></label><label>Importe mensual<input id="fBudgetAmount" type="number" min="0.01" step="0.01" value="${b?.amount??''}"></label><p class="muted">Este presupuesto se mantendrá automáticamente en todos los meses.</p><button class="primary" onclick="saveBudget('${b?.id||''}')">${b?'Guardar cambios':'Guardar presupuesto'}</button>${b?`<button class="danger-button" onclick="deleteBudget('${b.id}')">Eliminar presupuesto</button>`:''}</div>`}
+function saveBudget(id=''){
+ const category=document.querySelector('#fBudgetCategory').value;
+ const amount=Number(document.querySelector('#fBudgetAmount').value);
+ if(!Number.isFinite(amount)||amount<=0)return;
+ // Mantener un único presupuesto por categoría. Migrar los antiguos mensuales
+ // de esa categoría al presupuesto recurrente sin perder el importe actualizado.
+ const matches=state.budgets.filter(x=>x.category===category);
+ let b=id?state.budgets.find(x=>x.id===id):matches[0];
+ if(b){
+  b.category=category;b.amount=amount;b.recurring=true;delete b.month;
+  // Unificar presupuestos históricos de la misma categoría.
+  state.budgets=state.budgets.filter(x=>x===b||x.category!==category);
+ }else{
+  state.budgets=state.budgets.filter(x=>x.category!==category);
+  state.budgets.push({id:crypto.randomUUID(),category,amount,recurring:true});
+ }
+ save();closeModal();render();
+}
 function deleteBudget(id){state.budgets=state.budgets.filter(x=>x.id!==id);save();closeModal();render()}
 function accountsForm(){return `<div class="form accounts-form">${state.accounts.map(a=>`<div class="account-edit"><div><b>${esc(a.name)}</b><span>Saldo inicial</span></div><input id="acc-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></div>`).join('')}<button class="primary" onclick="saveAccounts()">Guardar saldos</button></div>`}
 function saveAccounts(){state.accounts.forEach(a=>{const el=document.querySelector('#acc-'+a.id);if(el)a.startingBalance=Number(el.value)||0});save();closeModal();render()}

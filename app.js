@@ -1137,10 +1137,37 @@ function expenses(c){
   </div>
  </div>`;
 }
+function accountBalanceAfterTransaction(accountId, transaction){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return 0;
+ const targetDate=String(transaction.date||'');
+ const targetIndex=state.transactions.indexOf(transaction);
+ let balance=Number(account.startingBalance||0);
+ state.transactions.forEach((t,index)=>{
+  const date=String(t.date||'');
+  if(!date||date>targetDate||(date===targetDate&&index>targetIndex))return;
+  const amount=Number(t.amount||0);
+  if(t.type==='transfer'){
+   if(String(t.from)===String(accountId))balance-=amount;
+   if(String(t.to)===String(accountId))balance+=amount;
+  }else if(String(t.account)===String(accountId)){
+   balance+=(t.type==='income'?1:-1)*amount;
+  }
+ });
+ return balance;
+}
 function expenseRow(t){
- if(t.type==='transfer')return `<div class="movement-row transfer"><div class="movement-icon">↔</div><div class="movement-main"><b>${esc(t.concept||'Transferencia')}</b><span>${esc(state.accounts.find(a=>a.id===t.from)?.name||'')} → ${esc(state.accounts.find(a=>a.id===t.to)?.name||'')} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}</span></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="editTransfer('${t.id}')">Editar</button></div>`;
+ if(t.type==='transfer'){
+  const fromName=state.accounts.find(a=>String(a.id)===String(t.from))?.name||'Cuenta origen';
+  const toName=state.accounts.find(a=>String(a.id)===String(t.to))?.name||'Cuenta destino';
+  const fromBalance=accountBalanceAfterTransaction(t.from,t);
+  const toBalance=accountBalanceAfterTransaction(t.to,t);
+  return `<div class="movement-row transfer"><div class="movement-icon">↔</div><div class="movement-main"><b>${esc(t.concept||'Transferencia')}</b><span>${esc(fromName)} → ${esc(toName)} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}</span><small style="display:block;margin-top:5px;color:var(--muted,#777)">Saldo tras transferencia: ${esc(fromName)} ${money(fromBalance)} · ${esc(toName)} ${money(toBalance)}</small></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="editTransfer('${t.id}')">Editar</button></div>`;
+ }
  const income=t.type==='income';
- return `<div class="movement-row ${income?'income':'expense'}"><div class="movement-icon">${income?'↓':'−'}</div><div class="movement-main"><b>${esc(t.concept||t.category)}</b><span>${esc(t.category||'')} · ${esc(state.accounts.find(a=>a.id===t.account)?.name||'')} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}${t.ticket?' · Ticket':''}</span></div><strong>${income?'+':'−'}${money(t.amount)}</strong><button class="secondary small" onclick="editExpense('${t.id}')">Editar</button></div>`;
+ const accountName=state.accounts.find(a=>String(a.id)===String(t.account))?.name||'Cuenta';
+ const balance=accountBalanceAfterTransaction(t.account,t);
+ return `<div class="movement-row ${income?'income':'expense'}"><div class="movement-icon">${income?'↓':'−'}</div><div class="movement-main"><b>${esc(t.concept||t.category)}</b><span>${esc(t.category||'')} · ${esc(accountName)} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}${t.ticket?' · Ticket':''}</span><small style="display:block;margin-top:5px;color:var(--muted,#777)">Saldo tras movimiento: ${money(balance)}</small></div><strong>${income?'+':'−'}${money(t.amount)}</strong><button class="secondary small" onclick="editExpense('${t.id}')">Editar</button></div>`;
 }
 function expenseForm(t=null){const cat=t?.category||'Comida';return `<div class="form"><label>Tipo<select id="fExpenseType"><option value="expense" ${t?.type!=='income'?'selected':''}>Gasto</option><option value="income" ${t?.type==='income'?'selected':''}>Ingreso</option></select></label><label>Importe<input id="fExpenseAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Categoría<select id="fExpenseCategory">${categoryOptions(cat)}</select></label><label>Concepto<input id="fExpenseConcept" value="${esc(t?.concept||'')}" placeholder="Ej. Compra semanal"></label><div class="form-two"><label>Fecha<input id="fExpenseDate" type="date" value="${t?.date||todayKey()}"></label><label>Cuenta<select id="fExpenseAccount">${accountOptions(t?.account)}</select></label></div><label>Notas<textarea id="fExpenseNotes">${esc(t?.notes||'')}</textarea></label><label>Foto del ticket<input id="fExpenseTicket" type="file" accept="image/*">${t?.ticket?'<small>Ya hay un ticket guardado. Si eliges otro, lo sustituirá.</small>':''}</label><label class="checkline"><input id="fExpenseRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label>Día del mes<input id="fExpenseRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveExpense('${t?.id||''}')">${t?'Guardar cambios':'Guardar movimiento'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
 function categoryOptions(sel=''){return Object.entries(expenseCategories).map(([g,arr])=>`<optgroup label="${g}">${arr.map(x=>`<option value="${esc(x)}" ${x===sel?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}

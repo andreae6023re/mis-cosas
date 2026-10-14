@@ -1073,7 +1073,7 @@ function expenses(c){
     <div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos ${accountFilter==='all'?'en '+title:'de '+esc(state.accounts.find(a=>a.id===accountFilter)?.name||'la cuenta seleccionada')+' en '+title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
     <div class="movement-list">${tx.sort((a,b)=>{const dateDiff=(b.date||'').localeCompare(a.date||'');if(dateDiff)return dateDiff;return state.transactions.indexOf(b)-state.transactions.indexOf(a)}).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos para esta cuenta en el mes seleccionado.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
    </section>
-   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>`<div class="account-card"><div><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div><strong>${money(accountBalance(a))}</strong></div>`).join('')}</div></section>
+   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual y dinero reservado</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>{const total=accountBalance(a),reserved=pocketTotal(a),available=total-reserved;return `<div class="account-card"><div><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div><strong>${money(total)}</strong><div class="account-pocket-summary"><small>Reservado en pockets: ${money(reserved)}</small><small><b>Disponible: ${money(available)}</b></small><button class="secondary small" onclick="openModal('Pockets · ${esc(a.name)}',pocketsForm('${a.id}'))">Gestionar pockets</button></div></div>`}).join('')}</div></section>
     <section class="expense-panel"><div class="panel-heading"><div><h3>Por categoría</h3><span>Gasto real del mes</span></div></div><div class="category-totals">${Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div><span>${esc(k)}</span><b>${money(v)}</b></div>`).join('')||'<span class="muted">Todavía no hay gastos.</span>'}</div></section></aside>
   </div>
   <div class="expense-bottom"><section class="expense-panel"><div class="panel-heading"><div><h3>Presupuestos</h3><span>Límite mensual por categoría · se repiten cada mes</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100),over=s>b.amount;return `<div class="budget-item"><div class="row"><div><b>${esc(b.category)}</b><small>${money(s)} de ${money(b.amount)}</small></div><div class="budget-actions"><strong class="${over?'over-budget':''}">${over?'Excedido':money(b.amount-s)+' disponible'}</strong><button class="icon-button" onclick="openModal('Editar presupuesto',budgetForm(${JSON.stringify(b).replace(/"/g,'&quot;')}))">⋯</button></div></div><div class="budget-bar"><i class="${over?'over':''}" style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No tienes presupuestos configurados.</div>'}</div></section>
@@ -1124,6 +1124,43 @@ function saveBudget(id=''){
  save();closeModal();render();
 }
 function deleteBudget(id){state.budgets=state.budgets.filter(x=>x.id!==id);save();closeModal();render()}
+function pocketTotal(account){return (Array.isArray(account?.pockets)?account.pockets:[]).reduce((sum,p)=>sum+Math.max(0,Number(p.amount)||0),0)}
+function pocketsForm(accountId){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return '<p>No se encuentra la cuenta.</p>';
+ account.pockets=Array.isArray(account.pockets)?account.pockets:[];
+ const pockets=account.pockets.map(p=>`<div class="account-edit"><div><b>${esc(p.name||'Pocket')}</b><span>Dinero reservado para un objetivo</span></div><strong>${money(p.amount)}</strong><div class="actions"><button class="secondary small" onclick="openModal('Editar pocket',pocketForm('${account.id}','${p.id}'))">Editar</button><button class="danger-button small" onclick="deletePocket('${account.id}','${p.id}')">Eliminar</button></div></div>`).join('');
+ return `<div class="form accounts-form"><p class="muted">Los pockets separan mentalmente el dinero reservado sin crear gastos, movimientos ni transferencias. El saldo bancario sigue siendo el mismo; el disponible se calcula restando lo reservado.</p><div class="list">${pockets||'<p class="muted">Todavía no tienes pockets en esta cuenta.</p>'}</div><button class="primary" onclick="openModal('Nuevo pocket',pocketForm('${account.id}'))">+ Añadir pocket</button></div>`;
+}
+function pocketForm(accountId,pocketId=''){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return '<p>No se encuentra la cuenta.</p>';
+ account.pockets=Array.isArray(account.pockets)?account.pockets:[];
+ const pocket=pocketId?account.pockets.find(p=>String(p.id)===String(pocketId)):null;
+ return `<div class="form"><p class="muted">Este dinero seguirá formando parte del saldo de ${esc(account.name)} y no contará como gasto.</p><label>Nombre del pocket<input id="fPocketName" required value="${esc(pocket?.name||'')}" placeholder="Ej. Viaje a China"></label><label>Importe reservado<input id="fPocketAmount" type="number" min="0" step="0.01" required value="${pocket?.amount??''}"></label><button class="primary" onclick="savePocket('${account.id}','${pocket?.id||''}')">Guardar pocket</button></div>`;
+}
+function savePocket(accountId,pocketId=''){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return;
+ const name=document.querySelector('#fPocketName')?.value.trim();
+ const amount=Number(document.querySelector('#fPocketAmount')?.value);
+ if(!name||!Number.isFinite(amount)||amount<0)return;
+ account.pockets=Array.isArray(account.pockets)?account.pockets:[];
+ let pocket=pocketId?account.pockets.find(p=>String(p.id)===String(pocketId)):null;
+ if(pocket){pocket.name=name;pocket.amount=amount;}
+ else account.pockets.push({id:crypto.randomUUID(),name,amount});
+ save();
+ openModal('Pockets · '+account.name,pocketsForm(account.id));
+ render();
+}
+function deletePocket(accountId,pocketId){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return;
+ account.pockets=(Array.isArray(account.pockets)?account.pockets:[]).filter(p=>String(p.id)!==String(pocketId));
+ save();
+ openModal('Pockets · '+account.name,pocketsForm(account.id));
+ render();
+}
 function accountsForm(){return `<div class="form accounts-form">${state.accounts.map(a=>`<div class="account-edit"><div><b>${esc(a.name)}</b><span>Saldo inicial</span></div><input id="acc-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></div>`).join('')}<button class="primary" onclick="saveAccounts()">Guardar saldos</button></div>`}
 function saveAccounts(){state.accounts.forEach(a=>{const el=document.querySelector('#acc-'+a.id);if(el)a.startingBalance=Number(el.value)||0});save();closeModal();render()}
 function expiringInventory(){

@@ -1043,6 +1043,7 @@ function setExpenseAccountFilter(accountId){
 }
 function expenses(c){
  ensureRecurringTransactions();
+ ensureRecurringPocketContributions();
  const key=state.expenseMonth||monthKey();
  const allMonthTx=state.transactions.filter(t=>(t.date||'').startsWith(key));
  const accountFilter=expenseAccountFilter;
@@ -1148,30 +1149,56 @@ function saveBudget(id=''){
 }
 function deleteBudget(id){state.budgets=state.budgets.filter(x=>x.id!==id);save();closeModal();render()}
 function pocketTotal(account){return (Array.isArray(account?.pockets)?account.pockets:[]).reduce((sum,p)=>sum+Math.max(0,Number(p.amount)||0),0)}
+function ensureRecurringPocketContributions(){
+ const key=monthKey();
+ let changed=false;
+ (state.accounts||[]).forEach(account=>{
+  if(String(account.name||'').trim().toLowerCase()!=='cuenta nómina')return;
+  (Array.isArray(account.pockets)?account.pockets:[]).forEach(pocket=>{
+   const monthly=Math.max(0,Number(pocket.monthlyContribution)||0);
+   if(!monthly)return;
+   pocket.contributionMonths=Array.isArray(pocket.contributionMonths)?pocket.contributionMonths:[];
+   const start=String(pocket.contributionStartMonth||key);
+   if(key<start||pocket.contributionMonths.includes(key))return;
+   pocket.amount=Math.max(0,Number(pocket.amount)||0)+monthly;
+   pocket.contributionMonths.push(key);
+   changed=true;
+  });
+ });
+ if(changed)save();
+}
+
 function pocketsForm(accountId){
  const account=state.accounts.find(a=>String(a.id)===String(accountId));
  if(!account)return '<p>No se encuentra la cuenta.</p>';
  account.pockets=Array.isArray(account.pockets)?account.pockets:[];
- const pockets=account.pockets.map(p=>`<div class="account-edit"><div><b>${esc(p.name||'Pocket')}</b><span>Dinero reservado para un objetivo</span></div><strong>${money(p.amount)}</strong><div class="actions"><button class="secondary small" onclick="openModal('Editar pocket',pocketForm('${account.id}','${p.id}'))">Editar</button><button class="danger-button small" onclick="deletePocket('${account.id}','${p.id}')">Eliminar</button></div></div>`).join('');
+ const pockets=account.pockets.map(p=>`<div class="account-edit"><div><b>${esc(p.name||'Pocket')}</b><span>Reservado: ${money(p.amount)}${Number(p.monthlyContribution)>0?` · +${money(p.monthlyContribution)}/mes`:""}</span></div><strong>${money(p.amount)}</strong><div class="actions"><button class="secondary small" onclick="openModal('Editar pocket',pocketForm('${account.id}','${p.id}'))">Editar</button><button class="danger-button small" onclick="deletePocket('${account.id}','${p.id}')">Eliminar</button></div></div>`).join('');
  return `<div class="form accounts-form"><p class="muted">Los pockets separan mentalmente el dinero reservado sin crear gastos, movimientos ni transferencias. El saldo bancario sigue siendo el mismo; el disponible se calcula restando lo reservado.</p><div class="list">${pockets||'<p class="muted">Todavía no tienes pockets en esta cuenta.</p>'}</div><button class="primary" onclick="openModal('Nuevo pocket',pocketForm('${account.id}'))">+ Añadir pocket</button></div>`;
 }
 function pocketForm(accountId,pocketId=''){
  const account=state.accounts.find(a=>String(a.id)===String(accountId));
  if(!account)return '<p>No se encuentra la cuenta.</p>';
+ if(String(account.name||'').trim().toLowerCase()!=='cuenta nómina')return '<p>Los pockets están disponibles únicamente en Cuenta nómina.</p>';
  account.pockets=Array.isArray(account.pockets)?account.pockets:[];
  const pocket=pocketId?account.pockets.find(p=>String(p.id)===String(pocketId)):null;
- return `<div class="form"><p class="muted">Este dinero seguirá formando parte del saldo de ${esc(account.name)} y no contará como gasto.</p><label>Nombre del pocket<input id="fPocketName" required value="${esc(pocket?.name||'')}" placeholder="Ej. Viaje a China"></label><label>Importe reservado<input id="fPocketAmount" type="number" min="0" step="0.01" required value="${pocket?.amount??''}"></label><button class="primary" onclick="savePocket('${account.id}','${pocket?.id||''}')">Guardar pocket</button></div>`;
+ const nextMonthDate=new Date();nextMonthDate.setDate(1);nextMonthDate.setMonth(nextMonthDate.getMonth()+1);
+ const nextMonth=monthKey(nextMonthDate);
+ return `<div class="form"><p class="muted">El saldo reservado no cuenta como gasto. Puedes añadir una cantidad fija cada mes desde Cuenta nómina; se reservará automáticamente una vez por mes.</p><label>Nombre del pocket<input id="fPocketName" required value="${esc(pocket?.name||'')}" placeholder="Ej. Viaje a China"></label><label>Importe ya reservado<input id="fPocketAmount" type="number" min="0" step="0.01" required value="${pocket?.amount??''}"></label><div class="form-two"><label>Aportación mensual<input id="fPocketMonthly" type="number" min="0" step="0.01" value="${pocket?.monthlyContribution??0}" placeholder="Ej. 150"></label><label>Empezar en<input id="fPocketStartMonth" type="month" value="${pocket?.contributionStartMonth||nextMonth}"></label></div><p class="muted">La aportación mensual no se registra como gasto ni como movimiento bancario. Solo aumenta el importe reservado y reduce el disponible para gastar.</p><button class="primary" onclick="savePocket('${account.id}','${pocket?.id||''}')">Guardar pocket</button></div>`;
 }
 function savePocket(accountId,pocketId=''){
  const account=state.accounts.find(a=>String(a.id)===String(accountId));
- if(!account)return;
+ if(!account||String(account.name||'').trim().toLowerCase()!=='cuenta nómina')return;
  const name=document.querySelector('#fPocketName')?.value.trim();
  const amount=Number(document.querySelector('#fPocketAmount')?.value);
- if(!name||!Number.isFinite(amount)||amount<0)return;
+ const monthly=Number(document.querySelector('#fPocketMonthly')?.value||0);
+ const startMonth=document.querySelector('#fPocketStartMonth')?.value||monthKey();
+ if(!name||!Number.isFinite(amount)||amount<0||!Number.isFinite(monthly)||monthly<0||!/^\d{4}-\d{2}$/.test(startMonth))return;
  account.pockets=Array.isArray(account.pockets)?account.pockets:[];
  let pocket=pocketId?account.pockets.find(p=>String(p.id)===String(pocketId)):null;
- if(pocket){pocket.name=name;pocket.amount=amount;}
- else account.pockets.push({id:crypto.randomUUID(),name,amount});
+ if(pocket){
+  pocket.name=name;pocket.amount=amount;pocket.monthlyContribution=monthly;pocket.contributionStartMonth=startMonth;
+  pocket.contributionMonths=Array.isArray(pocket.contributionMonths)?pocket.contributionMonths:[];
+ }else account.pockets.push({id:crypto.randomUUID(),name,amount,monthlyContribution:monthly,contributionStartMonth:startMonth,contributionMonths:[]});
  save();
  openModal('Pockets · '+account.name,pocketsForm(account.id));
  render();

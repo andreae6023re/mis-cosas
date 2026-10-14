@@ -1073,7 +1073,30 @@ function expenses(c){
     <div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos ${accountFilter==='all'?'en '+title:'de '+esc(state.accounts.find(a=>a.id===accountFilter)?.name||'la cuenta seleccionada')+' en '+title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
     <div class="movement-list">${tx.sort((a,b)=>{const dateDiff=(b.date||'').localeCompare(a.date||'');if(dateDiff)return dateDiff;return state.transactions.indexOf(b)-state.transactions.indexOf(a)}).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos para esta cuenta en el mes seleccionado.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
    </section>
-   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual y dinero reservado</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>{const total=accountBalance(a),reserved=pocketTotal(a),available=total-reserved;return `<div class="account-card"><div><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div><strong>${money(total)}</strong><div class="account-pocket-summary"><small>Reservado en pockets: ${money(reserved)}</small><small><b>Disponible: ${money(available)}</b></small><button class="secondary small" onclick="openModal('Pockets · ${esc(a.name)}',pocketsForm('${a.id}'))">Gestionar pockets</button></div></div>`}).join('')}</div></section>
+   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual y dinero reservado</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>{
+    const total=accountBalance(a);
+    const isPayroll=String(a.name||'').trim().toLowerCase()==='cuenta nómina';
+    const reserved=isPayroll?pocketTotal(a):0;
+    const available=total-reserved;
+    const pockets=isPayroll?(Array.isArray(a.pockets)?a.pockets:[]):[];
+    return `<div class="account-card" style="display:block;padding:16px 18px">
+      <div class="account-card-main" style="display:flex;align-items:center;justify-content:space-between;gap:14px;min-width:0">
+        <div style="min-width:0;flex:1"><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div>
+        <strong style="text-align:right;white-space:nowrap">${money(total)}</strong>
+      </div>
+      ${isPayroll?`<div class="payroll-pocket-area" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border,#e7e3dc)">
+        ${pockets.length?pockets.map(p=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0">
+          <div style="min-width:0"><b style="display:block;font-size:0.95em">${esc(p.name||'Pocket')}</b><small style="color:var(--muted,#777)">Dinero reservado</small></div>
+          <strong style="white-space:nowrap">${money(p.amount)}</strong>
+          <div style="display:flex;gap:4px;flex-shrink:0"><button class="icon-button" aria-label="Editar pocket" title="Editar" onclick="openModal('Editar pocket',pocketForm('${a.id}','${p.id}'))">✎</button><button class="icon-button" aria-label="Eliminar pocket" title="Eliminar" onclick="deletePocket('${a.id}','${p.id}')">×</button></div>
+        </div>`).join(''):`<div style="padding:6px 0;color:var(--muted,#777);font-size:0.9em">Todavía no tienes dinero reservado para objetivos.</div>`}
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;padding:11px 12px;border-radius:12px;background:var(--surface-soft,#eeeee8)">
+          <span style="font-weight:600">Disponible para gastar</span><strong style="white-space:nowrap">${money(available)}</strong>
+        </div>
+        <button class="secondary" style="display:block;width:100%;margin-top:10px" onclick="openModal('Pockets · ${esc(a.name)}',pocketsForm('${a.id}'))">+ Gestionar pockets</button>
+      </div>`:''}
+    </div>`;
+  }).join('')}</div></section>
     <section class="expense-panel"><div class="panel-heading"><div><h3>Por categoría</h3><span>Gasto real del mes</span></div></div><div class="category-totals">${Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div><span>${esc(k)}</span><b>${money(v)}</b></div>`).join('')||'<span class="muted">Todavía no hay gastos.</span>'}</div></section></aside>
   </div>
   <div class="expense-bottom"><section class="expense-panel"><div class="panel-heading"><div><h3>Presupuestos</h3><span>Límite mensual por categoría · se repiten cada mes</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100),over=s>b.amount;return `<div class="budget-item"><div class="row"><div><b>${esc(b.category)}</b><small>${money(s)} de ${money(b.amount)}</small></div><div class="budget-actions"><strong class="${over?'over-budget':''}">${over?'Excedido':money(b.amount-s)+' disponible'}</strong><button class="icon-button" onclick="openModal('Editar presupuesto',budgetForm(${JSON.stringify(b).replace(/"/g,'&quot;')}))">⋯</button></div></div><div class="budget-bar"><i class="${over?'over':''}" style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No tienes presupuestos configurados.</div>'}</div></section>

@@ -1080,10 +1080,42 @@ function expenses(c){
     const reserved=isPayroll?pocketTotal(a):0;
     const available=total-reserved;
     const pockets=isPayroll?(Array.isArray(a.pockets)?a.pockets:[]):[];
+    const accountTx=state.transactions.filter(t=>{
+      if(!(t.date||'').startsWith(key))return false;
+      return t.type==='transfer' ? (t.from===a.id||t.to===a.id) : t.account===a.id;
+    });
+    const beforeTx=state.transactions.filter(t=>{
+      if(!t.date||t.date.slice(0,7)>=key)return false;
+      return t.type==='transfer' ? (t.from===a.id||t.to===a.id) : t.account===a.id;
+    });
+    const movementDelta=t=>{
+      if(t.type==='transfer')return (t.to===a.id?1:0)*Number(t.amount||0)-(t.from===a.id?1:0)*Number(t.amount||0);
+      return (t.type==='income'?1:-1)*Number(t.amount||0);
+    };
+    const opening=Number(a.startingBalance||0)+beforeTx.reduce((sum,t)=>sum+movementDelta(t),0);
+    const monthIncome=accountTx.filter(t=>t.type==='income').reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthExpenses=accountTx.filter(t=>t.type==='expense').reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthTransfersIn=accountTx.filter(t=>t.type==='transfer'&&t.to===a.id).reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthTransfersOut=accountTx.filter(t=>t.type==='transfer'&&t.from===a.id).reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthNet=monthIncome-monthExpenses+monthTransfersIn-monthTransfersOut;
+    const monthClose=opening+monthNet;
     return `<div class="account-card" style="display:block;padding:16px 18px">
       <div class="account-card-main" style="display:flex;align-items:center;justify-content:space-between;gap:14px;min-width:0">
         <div style="min-width:0;flex:1"><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div>
         <strong style="text-align:right;white-space:nowrap">${money(total)}</strong>
+      </div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border,#e7e3dc)">
+        <div style="font-weight:600;font-size:0.9em;margin-bottom:7px">Resumen de ${esc(title)}</div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:6px 12px;font-size:0.86em">
+          <span style="color:var(--muted,#777)">Saldo al inicio del mes</span><span>${money(opening)}</span>
+          <span style="color:var(--muted,#777)">Ingresos</span><span>${money(monthIncome)}</span>
+          <span style="color:var(--muted,#777)">Gastos</span><span>${money(monthExpenses)}</span>
+          <span style="color:var(--muted,#777)">Transferencias recibidas</span><span>${money(monthTransfersIn)}</span>
+          <span style="color:var(--muted,#777)">Transferencias enviadas</span><span>${money(monthTransfersOut)}</span>
+          <span style="font-weight:600;padding-top:5px;border-top:1px solid var(--border,#e7e3dc)">Balance del mes</span><strong style="padding-top:5px;border-top:1px solid var(--border,#e7e3dc);color:${monthNet<0?'var(--danger,#a33)':'var(--success,#416b50)'}">${money(monthNet)}</strong>
+          <span style="font-weight:600">Saldo con movimientos registrados</span><strong>${money(monthClose)}</strong>
+        </div>
+        <small style="display:block;margin-top:7px;color:var(--muted,#777)">Incluye solo los movimientos registrados hasta ahora en ${esc(title)}.</small>
       </div>
       ${isPayroll?`<div class="payroll-pocket-area" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border,#e7e3dc)">
         ${pockets.length?pockets.map(p=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0">

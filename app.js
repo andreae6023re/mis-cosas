@@ -1076,10 +1076,12 @@ function expenses(c){
    </section>
    <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual y dinero reservado</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>{
     const total=accountBalance(a);
-    const isPayroll=String(a.name||'').trim().toLowerCase()==='cuenta nómina';
+    const accountNameKey=String(a.name||'').trim().toLowerCase();
+    const supportsPockets=accountNameKey==='cuenta nómina'||accountNameKey==='revolut';
+    const isPayroll=supportsPockets;
     const reserved=isPayroll?pocketTotal(a):0;
     const available=total-reserved;
-    const pockets=isPayroll?(Array.isArray(a.pockets)?a.pockets:[]):[];
+    const pockets=supportsPockets?(Array.isArray(a.pockets)?a.pockets:[]):[];
     const accountTx=state.transactions.filter(t=>{
       if(!(t.date||'').startsWith(key))return false;
       return t.type==='transfer' ? (t.from===a.id||t.to===a.id) : t.account===a.id;
@@ -1117,7 +1119,7 @@ function expenses(c){
         </div>
         <small style="display:block;margin-top:7px;color:var(--muted,#777)">Incluye solo los movimientos registrados hasta ahora en ${esc(title)}.</small>
       </div>
-      ${isPayroll?`<div class="payroll-pocket-area" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border,#e7e3dc)">
+      ${supportsPockets?`<div class="payroll-pocket-area" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border,#e7e3dc)">
         ${pockets.length?pockets.map(p=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0">
           <div style="min-width:0"><b style="display:block;font-size:0.95em">${esc(p.name||'Pocket')}</b><small style="color:var(--muted,#777)">Dinero reservado</small></div>
           <strong style="white-space:nowrap">${money(p.amount)}</strong>
@@ -1237,7 +1239,7 @@ function pocketsForm(accountId){
 function pocketForm(accountId,pocketId=''){
  const account=state.accounts.find(a=>String(a.id)===String(accountId));
  if(!account)return '<p>No se encuentra la cuenta.</p>';
- if(String(account.name||'').trim().toLowerCase()!=='cuenta nómina')return '<p>Los pockets están disponibles únicamente en Cuenta nómina.</p>';
+ if(!['cuenta nómina','revolut'].includes(String(account.name||'').trim().toLowerCase()))return '<p>Los pockets están disponibles únicamente en Cuenta nómina y Revolut.</p>';
  account.pockets=Array.isArray(account.pockets)?account.pockets:[];
  const pocket=pocketId?account.pockets.find(p=>String(p.id)===String(pocketId)):null;
  const nextMonthDate=new Date();nextMonthDate.setDate(1);nextMonthDate.setMonth(nextMonthDate.getMonth()+1);
@@ -1246,7 +1248,7 @@ function pocketForm(accountId,pocketId=''){
 }
 function savePocket(accountId,pocketId=''){
  const account=state.accounts.find(a=>String(a.id)===String(accountId));
- if(!account||String(account.name||'').trim().toLowerCase()!=='cuenta nómina')return;
+ if(!account||!['cuenta nómina','revolut'].includes(String(account.name||'').trim().toLowerCase()))return;
  const name=document.querySelector('#fPocketName')?.value.trim();
  const amount=Number(document.querySelector('#fPocketAmount')?.value);
  const monthly=Number(document.querySelector('#fPocketMonthly')?.value||0);

@@ -1270,7 +1270,8 @@ function deletePocket(accountId,pocketId){
  openModal('Pockets · '+account.name,pocketsForm(account.id));
  render();
 }
-function accountsForm(){return `<div class="form accounts-form">${state.accounts.map(a=>`<div class="account-edit"><div><b>${esc(a.name)}</b><span>Saldo inicial</span></div><input id="acc-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></div>`).join('')}<button class="primary" onclick="saveAccounts()">Guardar saldos</button></div>`}
+function accountsForm(){return `<div class="form accounts-form">${state.accounts.map(a=>`<div class="account-edit"><div><b>${esc(a.name)}</b><span>Saldo inicial</span></div><input id="acc-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></div>`).join('')}<div class="account-edit" style="align-items:center"><div><b>Añadir cuenta</b><span>Crear una cuenta nueva</span></div><button class="secondary small" onclick="addN26Account()">+ Añadir N26</button></div><button class="primary" onclick="saveAccounts()">Guardar saldos</button></div>`}
+function addN26Account(){if(state.accounts.some(a=>String(a.name||'').trim().toLowerCase()==='n26')){alert('La cuenta N26 ya existe.');return}state.accounts.push({id:crypto.randomUUID(),name:'N26',startingBalance:0,active:true});save();openModal('Configurar cuentas',accountsForm());render()}
 function saveAccounts(){state.accounts.forEach(a=>{const el=document.querySelector('#acc-'+a.id);if(el)a.startingBalance=Number(el.value)||0});save();closeModal();render()}
 function expiringInventory(){
  const limit=new Date(); limit.setHours(23,59,59,999); limit.setDate(limit.getDate()+7);

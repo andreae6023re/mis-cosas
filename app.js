@@ -268,7 +268,7 @@ async function loadAllFromCloud(){
   if(Array.isArray(local[key]) && local[key].length>0)return local[key];
   return Array.isArray(cloud[key])?cloud[key]:local[key];
  };
- state.tasks=chooseArray('tasks');state.expenses=chooseArray('expenses');state.transactions=chooseArray('transactions');state.accounts=chooseArray('accounts');state.budgets=chooseArray('budgets');state.events=chooseArray('events');state.habits=chooseArray('habits');state.cleaning=normalizeCleaningArray(chooseArray('cleaning'));state.sportClasses=chooseArray('sportClasses');state.sportSessions=chooseArray('sportSessions');state.sportExercises=chooseArray('sportExercises');state.sportSteps=chooseArray('sportSteps');
+ state.tasks=chooseArray('tasks');state.expenses=chooseArray('expenses');state.transactions=chooseArray('transactions');state.accounts=chooseArray('accounts');state.budgets=chooseArray('budgets');state.events=chooseArray('events');state.habits=chooseArray('habits');state.cleaning=normalizeCleaningArray(chooseArray('cleaning'));state.sportClasses=chooseArray('sportClasses');state.sportSessions=chooseArray('sportSessions');const previousSportExerciseCount=(chooseArray('sportExercises')||[]).length;state.sportExercises=mergeSportExerciseCatalog(chooseArray('sportExercises'));const sportCatalogChanged=state.sportExercises.length!==previousSportExerciseCount;state.sportSteps=chooseArray('sportSteps');
  state.recipes=chooseArray('recipes');state.inventory=chooseArray('inventory');state.preparations=chooseArray('preparations');state.menuHistory=chooseArray('menuHistory');normalizeRecipes();
  const chooseObject=(key)=>{
   if(cloud[key]&&typeof cloud[key]==='object' && (Object.keys(cloud[key]).length>0 || isNewSchema))return cloud[key];
@@ -285,6 +285,7 @@ async function loadAllFromCloud(){
  if(cloud.expenseCategories&&typeof cloud.expenseCategories==='object' && (Object.keys(cloud.expenseCategories).length || isNewSchema))expenseCategories=cloud.expenseCategories;
  else if(Object.keys(local.expenseCategories).length)expenseCategories=local.expenseCategories;
  localCacheFromState();
+ if(sportCatalogChanged){cloudChangeRevision++;cloudLocalDirty=true;queueCloudSave()}
  // IMPORTANT: loading from cloud is read-only. Never write the whole local state back here.
  // This prevents an empty module on one device from overwriting populated data on another.
  cloudShadow=JSON.parse(JSON.stringify(cloud));
@@ -491,6 +492,13 @@ startCloudPolling();
 
 }
 const KEY='mis_cosas_';
+const DEFAULT_SPORT_EXERCISES=['Press de banca','Press inclinado','Press declinado','Press mancuernas','Inclinado','Declinado','Aperturas inclinados','Aperturas','Contractora','Fondos','Cruces polea','Press máquina','Press militar','Apertura','Elevación frontal','Pájaros','Polea frontal','Polea lateral','Remo con barra','Encogimientos','Curl de barra','Curl mancuernas','Concentrado','Banco Scott','Polea baja','Press francés','Patada tríceps','Press','Jalón bíceps','Jalón cabeza','Sentadilla','Multipower','Prensa','Extensión','Flexión femoral','Zancada','Sentadilla búlgara','Aductores','Abductores','Glúteo'];
+function mergeSportExerciseCatalog(existing=[]){
+ const result=Array.isArray(existing)?existing.filter(x=>x&&String(x.name||'').trim()):[];
+ const seen=new Set(result.map(x=>String(x.name).trim().toLocaleLowerCase('es')));
+ DEFAULT_SPORT_EXERCISES.forEach(name=>{const key=name.toLocaleLowerCase('es');if(!seen.has(key)){result.push({id:crypto.randomUUID(),name});seen.add(key)}});
+ return result;
+}
 function normalizeCleaningArray(value){
  if(!Array.isArray(value))return [];
  return value.filter(x=>x&&typeof x==='object'&&String(x.name||'').trim()).map(x=>({...x,completed:x.completed&&typeof x.completed==='object'?x.completed:{}}));
@@ -505,7 +513,7 @@ const state={
  events:JSON.parse(localStorage.getItem(KEY+'events')||'[]'),
  habits:JSON.parse(localStorage.getItem(KEY+'habits')||'[]'),
  cleaning:normalizeCleaningArray(JSON.parse(localStorage.getItem(KEY+'cleaning')||'[]')),
- sportClasses:JSON.parse(localStorage.getItem(KEY+'sportClasses')||'[]'),sportSessions:JSON.parse(localStorage.getItem(KEY+'sportSessions')||'[]'),sportExercises:JSON.parse(localStorage.getItem(KEY+'sportExercises')||'[]'),sportSteps:JSON.parse(localStorage.getItem(KEY+'sportSteps')||'[]'),sportStepGoal:Number(localStorage.getItem(KEY+'sportStepGoal'))||8000,sportMonth:localStorage.getItem(KEY+'sportMonth')||`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`,
+ sportClasses:JSON.parse(localStorage.getItem(KEY+'sportClasses')||'[]'),sportSessions:JSON.parse(localStorage.getItem(KEY+'sportSessions')||'[]'),sportExercises:mergeSportExerciseCatalog(JSON.parse(localStorage.getItem(KEY+'sportExercises')||'[]')),sportSteps:JSON.parse(localStorage.getItem(KEY+'sportSteps')||'[]'),sportStepGoal:Number(localStorage.getItem(KEY+'sportStepGoal'))||8000,sportMonth:localStorage.getItem(KEY+'sportMonth')||`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`,
  recipes:JSON.parse(localStorage.getItem(KEY+'recipes')||'[]'),
  inventory:JSON.parse(localStorage.getItem(KEY+'inventory')||'[]'),
  preparations:JSON.parse(localStorage.getItem(KEY+'preparations')||'[]'),

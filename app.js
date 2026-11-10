@@ -499,7 +499,8 @@ const SPORT_EXERCISE_GROUPS={
  'Hombro':['Press máquina','Press militar','Apertura','Elevación frontal','Pájaros','Press mancuernas','Polea frontal','Polea lateral','Remo con barra','Encogimientos'],
  'Biceps':['Curl de barra','Curl mancuernas','Concentrado','Banco Scott','Polea baja','Press francés','Patada tríceps','Press','Fondos','Jalón bíceps','Jalón cabeza'],
  'Brazos':['Curl de barra','Curl mancuernas','Concentrado','Banco Scott','Polea baja','Press francés','Patada tríceps','Press','Fondos','Jalón bíceps','Jalón cabeza'],
- 'Piernas':['Sentadilla','Multipower','Prensa','Extensión','Flexión femoral','Zancada','Sentadilla búlgara','Aductores','Abductores','Glúteo']
+ 'Piernas':['Sentadilla','Multipower','Prensa','Extensión','Flexión femoral','Zancada','Sentadilla búlgara','Aductores','Abductores','Glúteo'],
+ 'Movilidad':[]
 };
 const SPORT_EXERCISE_CATEGORIES=Object.keys(SPORT_EXERCISE_GROUPS);
 function mergeSportExerciseCatalog(existing=[]){

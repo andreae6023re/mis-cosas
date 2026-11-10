@@ -1,14 +1,8 @@
-Brain Dump – rediseño de Deporte
+Brain Dump – Exportación de recetas
 
-Sustituye el app.js actual por este archivo.
+Sustituye el archivo app.js actual por el incluido en este ZIP.
 
-Cambios:
-- Nuevo Resumen con sesiones de fuerza, minutos de cardio, movilidad y media de pasos semanal.
-- Pestaña Rutinas con tarjetas independientes por día (se conserva el diseño anterior).
-- Pestaña Entrenar para el diario de fuerza.
-- Nueva pestaña Movilidad con registro de ejercicios y comentarios de repeticiones/tiempo.
-- Se elimina la pestaña Calendario dentro de Deporte; el calendario general permanece independiente.
-- Cardio, Pasos, Progreso y catálogo de Ejercicios se mantienen.
-- Los eventos deportivos del resumen de inicio se agrupan como un único “Gimnasio” por día.
+En Comidas encontrarás el botón «Exportar recetas» en la cabecera y junto al recetario.
+La exportación genera un archivo JSON con todas las recetas y todos sus campos, incluidos ingredientes, cantidades, pasos, etiquetas, temporadas, favoritos, congelación, preparaciones vinculadas y campos adicionales que ya existan en cada receta.
 
-Validación: comprobación sintáctica con node --check superada. No se ha realizado una prueba conectada contra Supabase ni una prueba visual en el despliegue.
+El archivo está pensado para compartirlo y poder revisar/completar las fichas sin perder los datos existentes.

@@ -1,0 +1,14 @@
+BRAIN DUMP - ACTUALIZACION DE HOME Y NOMBRE
+
+1. Sustituye el app.js actual por el app.js incluido en este paquete.
+2. La nueva home incluye accesos rápidos, resumen de tareas/deporte/gastos/comidas/hábitos/calendario, rutinas, menú semanal, hábitos marcables, agenda de hoy y resumen mensual.
+3. El cambio de nombre a Brain Dump se aplica a los textos de la interfaz gestionados por app.js y al título de la pestaña.
+
+IMPORTANTE SOBRE LA INSTALACIÓN ANDROID/PWA:
+Este paquete de origen solo contiene app.js. El nombre que Android muestra bajo el icono de la aplicación se define en manifest.webmanifest/manifest.json (name y short_name), y el título inicial de la página puede estar también en index.html. Esos archivos no estaban incluidos en el ZIP de origen, por lo que no se han modificado ni se puede garantizar el cambio del nombre del icono instalado. Para completar ese último detalle, hace falta el ZIP completo del proyecto que incluya index.html, manifest y service worker.
+
+REVISION REALIZADA:
+- node --check app.js: correcto.
+- Comprobación de presencia de funciones de rutinas, sesiones, sincronización y copias de seguridad: correcta.
+- No se han eliminado ni cambiado las estructuras de datos existentes.
+- La revisión estática no sustituye una prueba en el navegador conectado a Supabase.

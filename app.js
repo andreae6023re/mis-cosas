@@ -73,7 +73,7 @@ let foodModuleQueues={};
 let foodModuleRevisions={};
 let foodModulesReady=false;
 let foodModulesSetupError='';
-const FOOD_MODULE_KEYS={recipes:'recipes',preparations:'preparations',inventory:'inventory',menu:'menu',menuHistory:'menuHistory',shoppingChecks:'shoppingChecks',prepDone:'prepDone'};
+const FOOD_MODULE_KEYS={recipes:'recipes',preparations:'preparations',inventory:'inventory',menu:'menu',menuHistory:'menuHistory',shoppingChecks:'shoppingChecks',shoppingManualItems:'shoppingManualItems',prepDone:'prepDone'};
 function foodModuleValue(module){
  if(module==='recipes')return Array.isArray(state.recipes)?state.recipes:[];
  if(module==='preparations')return Array.isArray(state.preparations)?state.preparations:[];
@@ -81,6 +81,7 @@ function foodModuleValue(module){
  if(module==='menu')return state.menu||null;
  if(module==='menuHistory')return Array.isArray(state.menuHistory)?state.menuHistory:[];
  if(module==='shoppingChecks')return state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{};
+ if(module==='shoppingManualItems')return Array.isArray(state.shoppingManualItems)?state.shoppingManualItems:[];
  if(module==='prepDone')return state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{};
  return null;
 }
@@ -91,6 +92,7 @@ function setFoodModuleValue(module,value){
  else if(module==='menu')state.menu=value&&typeof value==='object'?value:null;
  else if(module==='menuHistory')state.menuHistory=Array.isArray(value)?value:[];
  else if(module==='shoppingChecks')state.shoppingChecks=value&&typeof value==='object'?value:{};
+ else if(module==='shoppingManualItems')state.shoppingManualItems=Array.isArray(value)?value:[];
  else if(module==='prepDone')state.prepDone=value&&typeof value==='object'?value:{};
 }
 async function loadFoodModules(){
@@ -218,6 +220,7 @@ function cloudPayload(){
   inventory:Array.isArray(state.inventory)?state.inventory:[],
   preparations:Array.isArray(state.preparations)?state.preparations:[],
   shoppingChecks:state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{},
+  shoppingManualItems:Array.isArray(state.shoppingManualItems)?state.shoppingManualItems:[],
   prepDone:state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{},
   menu:state.menu||null,
   menuHistory:Array.isArray(state.menuHistory)?state.menuHistory:[],
@@ -251,7 +254,7 @@ function localCacheFromState(){
 async function loadAllFromCloud(){
  if(!supabaseClient||!currentUser)return false;
  const local={
-  tasks:Array.isArray(state.tasks)?state.tasks:[],expenses:Array.isArray(state.expenses)?state.expenses:[],transactions:Array.isArray(state.transactions)?state.transactions:[],accounts:Array.isArray(state.accounts)?state.accounts:[],budgets:Array.isArray(state.budgets)?state.budgets:[],events:Array.isArray(state.events)?state.events:[],habits:Array.isArray(state.habits)?state.habits:[],cleaning:Array.isArray(state.cleaning)?state.cleaning:[],sportClasses:state.sportClasses||[],sportSessions:state.sportSessions||[],sportExercises:state.sportExercises||[],sportRoutines:state.sportRoutines||[],sportSteps:state.sportSteps||[],sportStepGoal:Number(state.sportStepGoal)||8000,sportMonth:state.sportMonth||'',recipes:Array.isArray(state.recipes)?state.recipes:[],inventory:Array.isArray(state.inventory)?state.inventory:[],preparations:Array.isArray(state.preparations)?state.preparations:[],shoppingChecks:state.shoppingChecks||{},prepDone:state.prepDone||{},menu:state.menu||null,menuHistory:Array.isArray(state.menuHistory)?state.menuHistory:[],calendarMonth:state.calendarMonth||'',settings:state.settings||{},expenseCategories:typeof expenseCategories==='object'?expenseCategories:{}
+  tasks:Array.isArray(state.tasks)?state.tasks:[],expenses:Array.isArray(state.expenses)?state.expenses:[],transactions:Array.isArray(state.transactions)?state.transactions:[],accounts:Array.isArray(state.accounts)?state.accounts:[],budgets:Array.isArray(state.budgets)?state.budgets:[],events:Array.isArray(state.events)?state.events:[],habits:Array.isArray(state.habits)?state.habits:[],cleaning:Array.isArray(state.cleaning)?state.cleaning:[],sportClasses:state.sportClasses||[],sportSessions:state.sportSessions||[],sportExercises:state.sportExercises||[],sportRoutines:state.sportRoutines||[],sportSteps:state.sportSteps||[],sportStepGoal:Number(state.sportStepGoal)||8000,sportMonth:state.sportMonth||'',recipes:Array.isArray(state.recipes)?state.recipes:[],inventory:Array.isArray(state.inventory)?state.inventory:[],preparations:Array.isArray(state.preparations)?state.preparations:[],shoppingChecks:state.shoppingChecks||{},shoppingManualItems:Array.isArray(state.shoppingManualItems)?state.shoppingManualItems:[],prepDone:state.prepDone||{},menu:state.menu||null,menuHistory:Array.isArray(state.menuHistory)?state.menuHistory:[],calendarMonth:state.calendarMonth||'',settings:state.settings||{},expenseCategories:typeof expenseCategories==='object'?expenseCategories:{}
  };
  const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
  if(error)throw error;
@@ -276,7 +279,7 @@ async function loadAllFromCloud(){
   if(local[key]&&typeof local[key]==='object'&&Object.keys(local[key]).length)return local[key];
   return cloud[key]&&typeof cloud[key]==='object'?cloud[key]:local[key];
  };
- state.shoppingChecks=chooseObject('shoppingChecks');state.prepDone=chooseObject('prepDone');
+ state.shoppingChecks=chooseObject('shoppingChecks');state.shoppingManualItems=chooseArray('shoppingManualItems');state.prepDone=chooseObject('prepDone');
  if(cloud.menu!==undefined && (cloud.menu!==null || isNewSchema))state.menu=cloud.menu;else if(legacy&&legacy.menu!==undefined)state.menu=legacy.menu;else state.menu=local.menu;
  if(typeof cloud.calendarMonth==='string' && (cloud.calendarMonth || isNewSchema))state.calendarMonth=cloud.calendarMonth;else state.calendarMonth=local.calendarMonth;
  if(typeof cloud.sportMonth==='string' && (cloud.sportMonth || isNewSchema))state.sportMonth=cloud.sportMonth;else state.sportMonth=local.sportMonth;
@@ -537,6 +540,7 @@ const state={
  inventory:JSON.parse(localStorage.getItem(KEY+'inventory')||'[]'),
  preparations:JSON.parse(localStorage.getItem(KEY+'preparations')||'[]'),
  shoppingChecks:JSON.parse(localStorage.getItem(KEY+'shoppingChecks')||'{}'),
+ shoppingManualItems:JSON.parse(localStorage.getItem(KEY+'shoppingManualItems')||'[]'),
  prepDone:JSON.parse(localStorage.getItem(KEY+'prepDone')||'{}'),
  menu:JSON.parse(localStorage.getItem(KEY+'menu')||'null')||null,
  menuHistory:JSON.parse(localStorage.getItem(KEY+'menuHistory')||'[]'),
@@ -695,16 +699,22 @@ function ensureBrainDumpHomeStyles(){
  .bd-menu-days{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.bd-menu-day{background:var(--surface-soft,#f5f5f0);border-radius:13px;padding:11px;min-width:0}.bd-menu-day b{display:block;font-size:12px;margin-bottom:7px}.bd-menu-day span{display:block;font-size:12px;line-height:1.4;margin-top:5px;overflow-wrap:anywhere}.bd-menu-day em{display:block;font-style:normal;color:var(--muted,#777);font-size:10px}
  .bd-habits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.bd-habit{display:flex;align-items:center;gap:9px;text-align:left;padding:10px 12px;border:1px solid var(--border,#e8e5df);border-radius:12px;background:var(--surface-soft,#f7f6f2);color:var(--text,#333);min-width:0}.bd-habit.done{background:#edf2eb;border-color:#d3dfd0}.bd-habit i{width:21px;height:21px;flex:0 0 21px;border:1.5px solid #9eaa98;border-radius:6px;display:grid;place-items:center;font-style:normal;color:#fff}.bd-habit.done i{background:#71866c;border-color:#71866c}.bd-habit span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .bd-agenda{display:grid;gap:8px}.bd-agenda-row{display:grid;grid-template-columns:60px minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border-radius:12px;background:var(--surface-soft,#f7f6f2)}.bd-agenda-time{font-size:12px;color:var(--muted,#777);font-variant-numeric:tabular-nums}.bd-agenda-row small{color:var(--muted,#777)}
+ .shopping-page{max-width:1120px;margin:0 auto}
+ .shopping-list-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 10px;border-bottom:1px solid var(--border,#e8e5df);border-radius:10px}
+ .shopping-list-row:last-child{border-bottom:0}.shopping-list-row.done{opacity:.62;background:var(--surface-soft,#f5f5f0)}
+ .shopping-list-row .shopping-check{flex:1;min-width:0;margin:0}.shopping-list-row .shopping-check span{overflow-wrap:anywhere}
+ .shopping-list-row.done .shopping-check span{text-decoration:line-through}.shopping-source{font-size:11px;color:var(--muted,#888);white-space:nowrap}
+ .shopping-group{margin-top:15px}.shopping-group h4{margin:0 0 7px;font-size:13px;color:var(--muted,#74786f);font-weight:700}
  .bd-budget{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.bd-budget>div{padding:12px;border-radius:12px;background:var(--surface-soft,#f7f6f2)}.bd-budget span,.bd-budget b{display:block}.bd-budget span{font-size:11px;color:var(--muted,#777)}.bd-budget b{font-size:20px;margin-top:5px}
  @media(max-width:760px){.bd-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-routine-list{grid-template-columns:1fr}.bd-menu-days{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-menu-day:last-child{grid-column:span 2}}
  @media(max-width:520px){.bd-home{gap:12px}.bd-welcome{padding:19px;border-radius:18px}.bd-quick{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.bd-quick button{min-height:72px;padding:11px}.bd-overview{gap:8px}.bd-tile{padding:13px;border-radius:15px}.bd-tile-value{font-size:23px}.bd-section{padding:14px;border-radius:17px}.bd-habits{grid-template-columns:1fr}.bd-agenda-row{grid-template-columns:48px minmax(0,1fr);}.bd-agenda-row .secondary{grid-column:2;justify-self:start}.bd-budget b{font-size:17px}}
  `;document.head.appendChild(st);
 }
 function render(){
- ensureSportStyles();ensureSportNavigation();ensureBrainDumpBranding();ensureBrainDumpHomeStyles();
- const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],cleaning:['Limpieza','Rutinas diarias, semanales y periódicas'],sport:['Deporte','Clases, entrenamientos y progreso personal'],settings:['Ajustes','Configura la aplicación']};
+ ensureSportStyles();ensureSportNavigation();ensureShoppingNavigation();ensureBrainDumpBranding();ensureBrainDumpHomeStyles();
+ const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],shopping:['Lista de la compra','Compra del menú y productos para reponer'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],cleaning:['Limpieza','Rutinas diarias, semanales y periódicas'],sport:['Deporte','Clases, entrenamientos y progreso personal'],settings:['Ajustes','Configura la aplicación']};
  document.querySelector('#pageTitle').textContent=names[state.view][0];document.querySelector('#pageSubtitle').textContent=names[state.view][1];
- const viewFn={home,tasks,expenses,food,calendar,habits,cleaning,sport,settings}[state.view]||home;viewFn(document.querySelector('#content'));
+ const viewFn={home,tasks,expenses,food,shopping:shoppingListView,calendar,habits,cleaning,sport,settings}[state.view]||home;viewFn(document.querySelector('#content'));
 }
 
 // DEPORTE
@@ -725,6 +735,14 @@ function ensureSportNavigation(){
   if(cleaning){cleaning.dataset.view='sport';cleaning.setAttribute('aria-label','Deporte');cleaning.title='Deporte';const label=cleaning.querySelector('.nav-label, .label, span');if(label)label.textContent='Deporte';else cleaning.textContent='Deporte';}
   if(existing&&cleaning&&existing!==cleaning)existing.remove();
  }
+}
+function ensureShoppingNavigation(){
+ const nav=document.querySelector('#nav');if(!nav)return;
+ let b=nav.querySelector('[data-view="shopping"]');
+ if(!b){b=document.createElement('button');b.type='button';b.className='nav-item';b.dataset.view='shopping';b.textContent='Lista de la compra';b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();go('shopping');closeMobileMenu()});}
+ const food=nav.querySelector('[data-view="food"]');
+ if(food&&food.nextElementSibling!==b)food.insertAdjacentElement('afterend',b);
+ else if(!food&&!b.isConnected){const settings=nav.querySelector('[data-view="settings"]');settings?nav.insertBefore(b,settings):nav.appendChild(b)}
 }
 function ensureSportStyles(){if(document.getElementById('sport-styles'))return;const st=document.createElement('style');st.id='sport-styles';st.textContent=`
 .sport-wrap{display:grid;gap:16px}.sport-tabs,.sport-month-nav,.sport-actions{display:flex;gap:8px;flex-wrap:wrap}.sport-tabs button{padding:10px 14px;border:1px solid var(--border,#e5e2dc);border-radius:12px;background:var(--surface,#fff);color:var(--text,#333)}.sport-tabs button.active{background:var(--accent-soft,#e8eee8);font-weight:650}
@@ -1152,11 +1170,13 @@ function newTaskFromEmpty(){openModal('Nueva tarea',taskForm())}
 let expenseCategories=JSON.parse(localStorage.getItem(KEY+'expenseCategories')||'null')||{"Gastos fijos":["Alquiler","Seguro"],"Suministros":["Agua","Luz","Aerotermia","Móvil","Internet"],"Suscripciones":["Spotify","Podomo","ACNUR"],"Otros gastos":["Comida","Paga","Transporte","Otros gastos"],"Ingresos":["Nómina","Otros ingresos"]};
 // Compatibilidad con la categoría original de la V7.
 if(expenseCategories.Suscripciones?.includes('Podomo') && !expenseCategories.Suscripciones.includes('Podimo')){expenseCategories.Suscripciones=expenseCategories.Suscripciones.map(x=>x==='Podomo'?'Podimo':x);localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));}
-const defaultAccounts=["Cuenta de gastos","Cuenta nómina","Cuenta ahorro","Revolut"];
+const defaultAccounts=["Cuenta de gastos","Cuenta nómina","Cuenta ahorro","Revolut","N26"];
 if(!Array.isArray(state.accounts))state.accounts=defaultAccounts.map(name=>({id:crypto.randomUUID(),name,startingBalance:0,active:true}));
+if(!state.accounts.some(a=>String(a.name||'').trim().toLowerCase()==='n26'))state.accounts.push({id:crypto.randomUUID(),name:'N26',startingBalance:0,active:true});
 if(!Array.isArray(state.transactions))state.transactions=[];
 normalizeExpenseReferences();
 if(!Array.isArray(state.budgets))state.budgets=[];
+if(!Array.isArray(state.shoppingManualItems))state.shoppingManualItems=[];
 if(!state.settings || typeof state.settings!=='object')state.settings={};
 state.settings.notifications=state.settings.notifications||{tasks:true,calendar:true,expenses:true,food:true};
 state.settings.notifications.notificationLog=state.settings.notifications.notificationLog||{};
@@ -1265,22 +1285,22 @@ function weekKey(d=new Date()){const x=new Date(Date.UTC(d.getFullYear(),d.getMo
 function money(n){return new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(Number(n)||0)}
 function accountOptions(sel){return state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}</option>`).join('')}
 function accountBalance(a){return Number(a.startingBalance||0)+state.transactions.reduce((s,t)=>{if(t.type==='transfer'){if(t.from===a.id)s-=+t.amount;if(t.to===a.id)s+=+t.amount}else if(t.account===a.id)s+=(t.type==='income'?1:-1)*(+t.amount);return s},0)}
-let expenseAccountFilter='all';
-function setExpenseAccountFilter(accountId){
- expenseAccountFilter=accountId||'all';
- render();
-}
+let expenseAccountFilter='all',expenseSearch='',expenseTypeFilter='all';
+function setExpenseAccountFilter(accountId){expenseAccountFilter=accountId||'all';render()}
+function setExpenseSearch(value){expenseSearch=value||'';render()}
+function setExpenseTypeFilter(value){expenseTypeFilter=value||'all';render()}
 function expenses(c){
  ensureRecurringTransactions();
  ensureRecurringPocketContributions();
  const key=state.expenseMonth||monthKey();
  const allMonthTx=state.transactions.filter(t=>(t.date||'').startsWith(key));
  const accountFilter=expenseAccountFilter;
- const tx=allMonthTx.filter(t=>accountFilter==='all' ? true : (t.type==='transfer' ? (t.from===accountFilter||t.to===accountFilter) : t.account===accountFilter));
- const income=tx.filter(t=>t.type==='income').reduce((s,t)=>s+ +t.amount,0), spent=tx.filter(t=>t.type==='expense').reduce((s,t)=>s+ +t.amount,0);
+ const accountTx=allMonthTx.filter(t=>accountFilter==='all' ? true : (t.type==='transfer' ? (t.from===accountFilter||t.to===accountFilter) : t.account===accountFilter));
+  const tx=accountTx.filter(t=>{const q=expenseSearch.trim().toLocaleLowerCase('es');const textMatch=!q||[t.concept,t.category,t.notes].some(v=>String(v||'').toLocaleLowerCase('es').includes(q));return textMatch&&(expenseTypeFilter==='all'||t.type===expenseTypeFilter)});
+ const income=accountTx.filter(t=>t.type==='income').reduce((s,t)=>s+ +t.amount,0), spent=accountTx.filter(t=>t.type==='expense').reduce((s,t)=>s+ +t.amount,0);
  const transfers=tx.filter(t=>t.type==='transfer').length;
  const budgets=state.budgets.filter(b=>b.recurring||b.month===key), totalBudget=budgets.reduce((s,b)=>s+Number(b.amount||0),0);
- const byCat={};tx.filter(t=>t.type==='expense').forEach(t=>byCat[t.category]=(byCat[t.category]||0)+ +t.amount);
+ const byCat={};accountTx.filter(t=>t.type==='expense').forEach(t=>byCat[t.category]=(byCat[t.category]||0)+ +t.amount);
  const budgetCategories=new Set(budgets.map(b=>b.category));
  const budgetedSpent=[...budgetCategories].reduce((s,cat)=>s+(byCat[cat]||0),0);
  const title=new Date(key+'-01T12:00').toLocaleDateString('es-ES',{month:'long',year:'numeric'});
@@ -1290,17 +1310,16 @@ function expenses(c){
    <div class="actions"><button class="secondary" onclick="openModal('Nueva transferencia',transferForm())">Transferir</button><button class="primary" onclick="openModal('Nuevo gasto',expenseForm())">+ Nuevo movimiento</button></div>
   </section>
   <section class="expense-monthbar"><button class="month-arrow" onclick="changeExpenseMonth(-1)">‹</button><div><span>Mes seleccionado</span><strong>${title}</strong></div><button class="month-arrow" onclick="changeExpenseMonth(1)">›</button></section>
-  <section class="expense-kpis"><div><span>Ingresos</span><strong>${money(income)}</strong></div><div><span>Gastos</span><strong>${money(spent)}</strong></div><div><span>Balance</span><strong>${money(income-spent)}</strong></div><div><span>Presupuesto disponible</span><strong>${totalBudget?money(totalBudget-budgetedSpent):'—'}</strong><small>${totalBudget?money(totalBudget)+' presupuestados':'Sin presupuestos este mes'}</small></div></section>
+  <section class="expense-kpis"><div><span>Ingresos</span><strong>${money(income)}</strong></div><div><span>Gastos</span><strong>${money(spent)}</strong></div><div><span>Balance / ahorro</span><strong>${money(income-spent)}</strong><small>${income>0?(100*(income-spent)/income).toFixed(1).replace('.',',')+' % de ahorro':'Sin ingresos'}</small></div><div><span>Presupuesto disponible</span><strong>${totalBudget?money(totalBudget-budgetedSpent):'—'}</strong><small>${totalBudget?money(totalBudget)+' presupuestados':'Sin presupuestos este mes'}</small></div></section> 
+   <section class="expense-panel" style="margin:0 0 14px"><div class="panel-heading"><div><h3>Objetivo de ahorro</h3><span>${Number(state.settings.expenseSavingsGoal)>0?'Meta mensual: '+money(state.settings.expenseSavingsGoal):'Configura una meta mensual de ahorro'}</span></div><button class="secondary small" onclick="openModal('Objetivo de ahorro',expenseSavingsGoalForm())">${Number(state.settings.expenseSavingsGoal)>0?'Editar':'Configurar'}</button></div>${Number(state.settings.expenseSavingsGoal)>0?`<div style="height:8px;background:var(--surface-soft,#eee);border-radius:20px;overflow:hidden"><div style="height:100%;width:${Math.max(0,Math.min(100,(income-spent)/Number(state.settings.expenseSavingsGoal)*100))}%;background:#879c91"></div></div><small style="display:block;margin-top:7px">${money(income-spent)} de ${money(state.settings.expenseSavingsGoal)} ahorrados este mes</small>`:''}</section>
   <div class="expense-layout">
    <section class="expense-panel movements-panel">
-    <div class="movement-filter" style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-     <label for="expenseAccountFilter" style="margin:0">Filtrar movimientos por cuenta</label>
-     <select id="expenseAccountFilter" onchange="setExpenseAccountFilter(this.value)">
-      <option value="all" ${accountFilter==='all'?'selected':''}>Todas las cuentas</option>
-      ${state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${accountFilter===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}
-     </select>
-    </div>
-    <div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos ${accountFilter==='all'?'en '+title:'de '+esc(state.accounts.find(a=>a.id===accountFilter)?.name||'la cuenta seleccionada')+' en '+title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
+    <div class="movement-filter" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:9px;margin-bottom:14px">
+      <label style="margin:0">Cuenta<select id="expenseAccountFilter" onchange="setExpenseAccountFilter(this.value)"><option value="all" ${accountFilter==='all'?'selected':''}>Todas las cuentas</option>${state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${accountFilter===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
+      <label style="margin:0">Tipo<select onchange="setExpenseTypeFilter(this.value)"><option value="all" ${expenseTypeFilter==='all'?'selected':''}>Todos</option><option value="expense" ${expenseTypeFilter==='expense'?'selected':''}>Gastos</option><option value="income" ${expenseTypeFilter==='income'?'selected':''}>Ingresos</option><option value="transfer" ${expenseTypeFilter==='transfer'?'selected':''}>Traspasos</option></select></label>
+      <label style="margin:0">Buscar<input type="search" value="${esc(expenseSearch)}" placeholder="Concepto, categoría..." onchange="setExpenseSearch(this.value)"></label>
+     </div>
+     <div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos ${accountFilter==='all'?'en '+title:'de '+esc(state.accounts.find(a=>a.id===accountFilter)?.name||'la cuenta seleccionada')+' en '+title}</span></div><button class="secondary small" onclick="openExpenseTickets()">Tickets (${state.transactions.filter(t=>t.ticket).length})</button><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
     <div class="movement-list">${tx.sort((a,b)=>{const dateDiff=(b.date||'').localeCompare(a.date||'');if(dateDiff)return dateDiff;return state.transactions.indexOf(b)-state.transactions.indexOf(a)}).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos para esta cuenta en el mes seleccionado.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
    </section>
    <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual y dinero reservado</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>{
@@ -1400,6 +1419,9 @@ function expenseRow(t){
  const balance=accountBalanceAfterTransaction(t.account,t);
  return `<div class="movement-row ${income?'income':'expense'}"><div class="movement-icon">${income?'↓':'−'}</div><div class="movement-main"><b>${esc(t.concept||t.category)}</b><span>${esc(t.category||'')} · ${esc(accountName)} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}${t.ticket?' · Ticket':''}</span><small style="display:block;margin-top:5px;color:var(--muted,#777)">Saldo tras movimiento: ${money(balance)}</small></div><strong>${income?'+':'−'}${money(t.amount)}</strong><button class="secondary small" onclick="editExpense('${t.id}')">Editar</button></div>`;
 }
+function expenseSavingsGoalForm(){const v=Number(state.settings.expenseSavingsGoal)||0;return `<div class="form"><p class="muted">Define cuánto quieres ahorrar al mes. Se calcula con ingresos menos gastos; los traspasos entre tus cuentas no cuentan.</p><label>Objetivo mensual (€)<input id="fExpenseSavingsGoal" type="number" min="0" step="0.01" value="${v||''}"></label><button class="primary" onclick="saveExpenseSavingsGoal()">Guardar objetivo</button><button class="secondary" onclick="state.settings.expenseSavingsGoal=0;save();closeModal();render()">Quitar objetivo</button></div>`}
+function saveExpenseSavingsGoal(){state.settings.expenseSavingsGoal=Math.max(0,Number(document.querySelector('#fExpenseSavingsGoal').value)||0);save();closeModal();render()}
+function openExpenseTickets(){const tickets=state.transactions.filter(t=>t.ticket).sort((a,b)=>(b.date||'').localeCompare(a.date||''));openModal('Tickets y facturas',`<div class="form"><p class="muted">Tickets y facturas adjuntos a tus movimientos.</p>${tickets.map(t=>`<div style="display:flex;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border,#e8e5df)"><img src="${t.ticket}" alt="Ticket" style="width:58px;height:58px;object-fit:cover;border-radius:9px"><div style="flex:1;min-width:0"><b>${esc(t.concept||t.category||'Movimiento')}</b><small style="display:block;color:var(--muted,#777)">${esc(t.date||'')} · ${money(t.amount)}</small></div><button class="secondary small" onclick="window.open('${t.ticket}','_blank')">Ver</button></div>`).join('')||'<p class="muted">Todavía no hay tickets adjuntos.</p>'}</div>`)}
 function expenseForm(t=null){const cat=t?.category||'Comida';return `<div class="form"><label>Tipo<select id="fExpenseType"><option value="expense" ${t?.type!=='income'?'selected':''}>Gasto</option><option value="income" ${t?.type==='income'?'selected':''}>Ingreso</option></select></label><label>Importe<input id="fExpenseAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Categoría<select id="fExpenseCategory">${categoryOptions(cat)}</select></label><label>Concepto<input id="fExpenseConcept" value="${esc(t?.concept||'')}" placeholder="Ej. Compra semanal"></label><div class="form-two"><label>Fecha<input id="fExpenseDate" type="date" value="${t?.date||todayKey()}"></label><label>Cuenta<select id="fExpenseAccount">${accountOptions(t?.account)}</select></label></div><label>Notas<textarea id="fExpenseNotes">${esc(t?.notes||'')}</textarea></label><label>Foto del ticket<input id="fExpenseTicket" type="file" accept="image/*">${t?.ticket?'<small>Ya hay un ticket guardado. Si eliges otro, lo sustituirá.</small>':''}</label><label class="checkline"><input id="fExpenseRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label>Día del mes<input id="fExpenseRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveExpense('${t?.id||''}')">${t?'Guardar cambios':'Guardar movimiento'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
 function categoryOptions(sel=''){return Object.entries(expenseCategories).map(([g,arr])=>`<optgroup label="${g}">${arr.map(x=>`<option value="${esc(x)}" ${x===sel?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}
 async function saveExpense(id){const amount=+document.querySelector('#fExpenseAmount').value;if(!amount)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type=document.querySelector('#fExpenseType').value;t.amount=amount;t.category=document.querySelector('#fExpenseCategory').value;t.concept=document.querySelector('#fExpenseConcept').value.trim();t.date=document.querySelector('#fExpenseDate').value;t.account=document.querySelector('#fExpenseAccount').value;t.notes=document.querySelector('#fExpenseNotes').value.trim();const f=document.querySelector('#fExpenseTicket').files[0];if(f)t.ticket=await fileToData(f);t.recurring=document.querySelector('#fExpenseRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fExpenseRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
@@ -1529,7 +1551,7 @@ function food(c){
  ${menu?.status==='proposal'?'<div class="menu-hint">Revisa el menú y usa los botones <b>Comida</b> y <b>Cena</b> de cada día para elegir o cambiar una receta. Las elecciones manuales se mantienen mientras revisas este menú, pero al regenerarlo se crea una propuesta nueva. Cuando te guste, pulsa <b>Aceptar menú</b>.</div>':''}<div class="menu-history-inline"><div><b>Historial de menús</b><span>${(state.menuHistory||[]).length} guardados</span></div>${(state.menuHistory||[]).length?`<button class="text-button" onclick="openModal('Historial de menús',menuHistoryForm())">Ver historial →</button>`:'<span class="muted">Al aceptar un menú se guardará aquí.</span>'}</div></section>
  <aside class="food-side"><section class="food-panel"><div class="panel-heading"><div><h3>Inventario</h3><span>Lo que tienes ahora</span></div><div class="actions"><button class="secondary small" onclick="exportPantryFreezerExcel()">Exportar Excel</button><button class="secondary small" onclick="document.querySelector('#inventoryImportInput').click()">Importar</button><input id="inventoryImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importInventory(this)"><button class="secondary small" onclick="openModal('Nuevo producto',inventoryForm())">+ Añadir</button></div></div><div class="inventory-mini"><div><b>Congelador</b><span>${counts.freezer}</span></div><div><b>Despensa</b><span>${counts.pantry}</span></div><div><b>Frescos</b><span>${counts.fresh}</span></div></div>${expiringInventory().length?`<div class="food-alert"><b>Próximo a caducar</b><span>${expiringInventory().map(x=>esc(x.name)).join(', ')}</span></div>`:''}<button class="text-button" onclick="openModal('Inventario',inventoryListForm())">Ver y gestionar inventario →</button></section>
  <section class="food-panel"><div class="panel-heading"><div><h3>Preparar esta semana</h3><span>${state.menu?`${pendingPrep} pendientes`:'Según el menú semanal'}</span></div><div class="actions"><button class="secondary small" onclick="openModal('Nueva preparación',preparationForm())">+ Añadir</button>${state.preparations.length?'<button class="secondary small" onclick="openModal(\'Preparaciones\',preparationsListForm())">Gestionar</button>':''}</div></div><div class="prep-list">${weeklyPrep.slice(0,6).map(x=>`<div class="prep-row ${state.prepDone[x.id]?'done':''}"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')" aria-label="Marcar preparación">${state.prepDone[x.id]?'✓':''}</button><button class="prep-content" onclick="viewPreparation('${x.id}')"><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${x.freezable?'Congelable':'Para consumir'}</small></button></div>`).join('')||(state.menu?'<div class="muted">Este menú no necesita ninguna preparación guardada.</div>':'<div class="muted">Genera un menú para ver solo las preparaciones que realmente necesitan tus recetas.</div>')}</div>${weeklyPrep.length>6?`<button class="text-button" onclick="openModal('Preparaciones del menú',preparationsListForm(weeklyPrep))">Ver todas →</button>`:''}</section></aside></div>
- <section class="food-panel shopping-panel"><div class="panel-heading"><div><h3>Lista de la compra</h3><span>${pendingShop} pendientes · ${shopping.length} en total</span></div><button class="secondary small" onclick="openModal('Lista de la compra',shoppingForm())">Ver lista</button></div><div class="shopping-progress"><div><span style="width:${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}%"></span></div><small>${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}% completada</small></div><div class="shopping-preview">${shopping.slice(0,8).map(x=>`<button class="shopping-item ${state.shoppingChecks[x.key]?'done':''}" onclick="toggleShopping('${x.key}')"><span>${state.shoppingChecks[x.key]?'✓':'○'}</span>${esc(x.name)}</button>`).join('')||'<span class="muted">Se calculará al aceptar un menú.</span>'}</div></section>
+ <section class="food-panel shopping-panel"><div class="panel-heading"><div><h3>Lista de la compra</h3><span>${pendingShop} pendientes · ${shopping.length} en total</span></div><button class="secondary small" onclick="go('shopping')">Ver lista</button></div><div class="shopping-progress"><div><span style="width:${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}%"></span></div><small>${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}% completada</small></div><div class="shopping-preview">${shopping.slice(0,8).map(x=>`<button class="shopping-item ${state.shoppingChecks[x.key]?'done':''}" onclick="toggleShopping('${x.key}')"><span>${state.shoppingChecks[x.key]?'✓':'○'}</span>${esc(x.name)}</button>`).join('')||'<span class="muted">Añade productos o acepta un menú para generar la compra.</span>'}</div></section>
  ${menu?.status==='accepted'?`<section class="food-panel consumption-panel"><div class="panel-heading"><div><h3>Consumo del menú</h3><span>Revisa antes de descontar el inventario</span></div><button class="secondary small" onclick="openModal('Consumo del menú',menuConsumptionForm())">${menu.consumptionRegistered?'Consumo registrado':'Revisar consumo'}</button></div><p class="muted">${menu.consumptionRegistered?'Este menú ya se ha descontado del inventario.':'Tus productos no se descuentan automáticamente; tú decides cuándo hacerlo.'}</p></section>`:''}
  <section class="food-panel recipes-panel"><div class="panel-heading"><div><h3>Mis recetas</h3><span>${state.recipes.length} guardadas</span></div><div class="actions"><button class="secondary small" onclick="exportRecipes()">Exportar recetas</button><button class="secondary small" onclick="document.querySelector('#recipeImportInput').click()">Importar recetas</button><input id="recipeImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importRecipes(this)"><button class="primary small" onclick="openModal('Añadir receta',recipeForm())">+ Añadir receta</button></div></div><div class="recipe-grid">${state.recipes.map(r=>`<article class="recipe-card"><div class="recipe-card-top"><span class="pill">${esc(recipeTypeLabel(r))}</span><div class="recipe-card-marks">${r.funRecipe?'<span class="recipe-mark fun" title="Receta divertida" aria-label="Receta divertida">🎉</span>':''}${r.freezable?'<span class="recipe-mark freeze" title="Se puede congelar" aria-label="Se puede congelar">❄️</span>':''}${r.favorite?'<span class="favorite-mark" title="Favorita">★</span>':''}</div></div><h4>${esc(r.name)}</h4><p>${esc(r.description||'Sin descripción')}</p><div class="recipe-meta"><span>${r.servings||1} raciones</span><span>${esc(r.time||'Tiempo no indicado')}</span>${r.freezable?'<span>Congelable</span>':''}</div><div class="actions"><button class="secondary small" onclick="viewRecipe('${r.id}')">Ver</button><button class="secondary small" onclick="editRecipe('${r.id}')">Editar</button></div></article>`).join('')||'<div class="empty-state">Todavía no tienes recetas. Añade la primera.</div>'}</div></section></div>`;
 }
@@ -1780,7 +1802,7 @@ function generateMenu(){
  const sweetPool=f.sweet!==false?sweets:[];
  const sweet= sweetPool.length ? pickWeeklyRecipe(sweetPool,new Set()) : null;
  state.menu={week:currentWeek,status:'proposal',days:daysObj,sweet:sweet?sweet.name:'',sweetId:sweet?sweet.id:null,manualSlots:previousManual,outsideSlots:previousOutside,generatedAt:new Date().toISOString(),revision:Number(state.menu?.revision||0),updatedAt:new Date().toISOString()};
- state.shoppingChecks={};
+ resetMenuShoppingChecks();
  menuLocalDirty=true;
  localCacheFromState();
  render();
@@ -1801,7 +1823,7 @@ function acceptMenu(){
  state.menuHistory=Array.isArray(state.menuHistory)?state.menuHistory:[];
  state.menuHistory=[accepted,...state.menuHistory.filter(m=>String(m.week)!==String(accepted.week))].slice(0,12);
  state.menu=accepted;
- state.shoppingChecks={};
+ resetMenuShoppingChecks();
  menuLocalDirty=true; localCacheFromState();render();
  if(supabaseClient&&currentUser){ void syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
  else { queueCloudSave(); }
@@ -1830,7 +1852,7 @@ async function selectManualMenuRecipe(day,slot,id){
  if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&r.funRecipe===true;
  else state.menu.days[day].funDinner=Number(day)===2&&r.funRecipe===true;
  state.menu.status='proposal';
- state.shoppingChecks={};
+ resetMenuShoppingChecks();
  // A manual menu choice is a deliberate edit: persist the menu itself immediately.
  // Do not use the generic delayed save here.
  menuLocalDirty=true; localCacheFromState();
@@ -1848,7 +1870,7 @@ async function markMenuMealOutside(day,slot){
  state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=null;
  if(slot==='lunch')state.menu.days[day].funLunch=false; else state.menu.days[day].funDinner=false;
  state.menu.status='proposal';
- state.shoppingChecks={};
+ resetMenuShoppingChecks();
  menuLocalDirty=true; localCacheFromState(); closeModal(); render();
  if(supabaseClient&&currentUser)await syncMenuBundle({menu:true,shoppingChecks:true}); else queueCloudSave();
 }
@@ -1873,7 +1895,7 @@ async function clearManualMenuRecipe(day,slot){
  if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&pick.funRecipe===true;
  else state.menu.days[day].funDinner=Number(day)===2&&pick.funRecipe===true;
  state.menu.status='proposal';
- state.shoppingChecks={};
+ resetMenuShoppingChecks();
  localCacheFromState();
  closeModal();render();
  if(supabaseClient&&currentUser)await syncMenuBundle({menu:true,shoppingChecks:true});
@@ -1904,7 +1926,7 @@ function changeMeal(day,slot){
  state.menu.manualSlots[`${day}:${slot}`]=pick.id;
  state.menu.days[day][slot==='lunch'?'funLunch':'funDinner']=special&&pick.funRecipe===true;
  state.menu.status='proposal';
- state.shoppingChecks={};
+ resetMenuShoppingChecks();
  menuLocalDirty=true; localCacheFromState(); render();
  void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
 }
@@ -1916,7 +1938,7 @@ async function restoreMenuHistory(id){
  state.menuHistory=state.menuHistory.filter(m=>String(m.id)!==String(id));
  state.menuHistory.unshift(JSON.parse(JSON.stringify(state.menu)));
  state.menuHistory=state.menuHistory.slice(0,12);
- state.shoppingChecks={};
+ resetMenuShoppingChecks();
  menuLocalDirty=true; localCacheFromState();render();
  if(supabaseClient&&currentUser){ await syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
  else queueCloudSave();
@@ -2011,6 +2033,12 @@ function shoppingItems(){
    out.push({key:normalizeIngredient(i.ingredient),name:`${i.ingredient} · faltan ${formatMissing(coverage.missing,i.unit)}`,group:foodGroup(i.ingredient)});
   }
  });
+ const menuKeys=new Set(out.map(x=>x.key));
+ (Array.isArray(state.shoppingManualItems)?state.shoppingManualItems:[]).forEach(item=>{
+  const normalized=normalizeIngredient(item.name||'');
+  if(!normalized||menuKeys.has(normalized))return;
+  out.push({key:'manual:'+item.id,name:`${item.name}${item.quantity?' · '+item.quantity:''}`,group:item.category||'Reposición',manual:true,id:item.id});
+ });
  return out.sort((a,b)=>a.group.localeCompare(b.group,'es')||a.name.localeCompare(b.name,'es'));
 }
 function menuInventoryCoverage(){
@@ -2046,8 +2074,39 @@ function confirmMenuConsumption(){
  alert(`Consumo registrado. Se han actualizado ${changed} productos del inventario.`);
 }
 function foodGroup(name){const n=normalizeIngredient(name);if(/pollo|pavo|ternera|cerdo|carne|huevo|salmon|atun|merluza|pescado|tofu|lenteja|garbanzo|judia/.test(n))return 'Proteínas';if(/tomate|lechuga|espinaca|brocoli|calabacin|berenjena|pimiento|cebolla|zanahoria|patata|verdura|fruta|manzana|platano/.test(n))return 'Fruta y verdura';if(/arroz|pasta|harina|pan|avena|quinoa|cereal/.test(n))return 'Despensa';if(/leche|yogur|queso|burrata|mozzarella/.test(n))return 'Refrigerados';return 'Otros'}
-function toggleShopping(key){state.shoppingChecks[key]=!state.shoppingChecks[key];menuLocalDirty=true;localCacheFromState();render();if(supabaseClient&&currentUser)void syncMenuBundle({menu:false,menuHistory:false,shoppingChecks:true});else queueCloudSave()}
-function shoppingForm(){const items=shoppingItems(),groups=[...new Set(items.map(x=>x.group))];return `<div class="shopping-list-modal">${groups.map(g=>`<div class="shopping-group"><h4>${esc(g)}</h4>${items.filter(x=>x.group===g).map(x=>`<label class="checkline shopping-check ${state.shoppingChecks[x.key]?'done':''}"><input type="checkbox" ${state.shoppingChecks[x.key]?'checked':''} onchange="toggleShopping('${x.key}')"><span>${esc(x.name)}</span></label>`).join('')}</div>`).join('')||'<p class="muted">No hay compras pendientes.</p>'}</div>`}
+function resetMenuShoppingChecks(){const keep={};Object.entries(state.shoppingChecks||{}).forEach(([k,v])=>{if(String(k).startsWith('manual:'))keep[k]=v});state.shoppingChecks=keep;}
+function persistShoppingList(){
+ localCacheFromState();
+ if(supabaseClient&&currentUser){void syncFoodModule('shoppingChecks',state.shoppingChecks);void syncFoodModule('shoppingManualItems',state.shoppingManualItems);}
+ else queueCloudSave();
+}
+function toggleShopping(key){
+ state.shoppingChecks[key]=!state.shoppingChecks[key];persistShoppingList();
+ if(state.view==='shopping')shoppingListView(document.querySelector('#content'));else render();
+}
+function shoppingManualForm(item=null){
+ return `<div class="form"><label>Producto<input id="shoppingManualName" value="${esc(item?.name||'')}" placeholder="Ej. Lentejas, lavavajillas..." maxlength="100"></label><div class="form-two"><label>Cantidad<input id="shoppingManualQuantity" value="${esc(item?.quantity||'')}" placeholder="Ej. 1 paquete"></label><label>Sección<select id="shoppingManualCategory">${['Reposición','Despensa','Fruta y verdura','Refrigerados','Limpieza e higiene','Hogar','Otros'].map(x=>`<option ${x===(item?.category||'Reposición')?'selected':''}>${x}</option>`).join('')}</select></label></div><button class="primary" onclick="saveShoppingManualItem('${item?.id||''}')">${item?'Guardar cambios':'Añadir a la lista'}</button>${item?`<button class="danger-button" onclick="deleteShoppingManualItem('${item.id}')">Eliminar producto</button>`:''}</div>`;
+}
+function saveShoppingManualItem(id=''){
+ const name=document.querySelector('#shoppingManualName')?.value.trim();if(!name){alert('Escribe el nombre del producto.');return}
+ const quantity=document.querySelector('#shoppingManualQuantity')?.value.trim()||'',category=document.querySelector('#shoppingManualCategory')?.value||'Reposición';
+ let item=id?state.shoppingManualItems.find(x=>String(x.id)===String(id)):null;
+ if(!item){item={id:crypto.randomUUID(),createdAt:new Date().toISOString()};state.shoppingManualItems.push(item)}
+ item.name=name;item.quantity=quantity;item.category=category;closeModal();persistShoppingList();render();
+}
+function deleteShoppingManualItem(id){state.shoppingManualItems=state.shoppingManualItems.filter(x=>String(x.id)!==String(id));delete state.shoppingChecks['manual:'+id];closeModal();persistShoppingList();render();}
+function shoppingListView(c){
+ const items=shoppingItems(),groups=[...new Set(items.map(x=>x.group))],pending=items.filter(x=>!state.shoppingChecks[x.key]).length,done=items.length-pending;
+ c.innerHTML=`<div class="food-page shopping-page"><section class="food-hero"><div><span class="eyebrow">Compra y reposición</span><h2>Lista de la compra</h2><p>Los ingredientes que faltan para tu menú aparecen aquí automáticamente. Añade también cualquier cosa que necesites reponer.</p></div><div class="actions"><button class="primary" onclick="openModal('Añadir producto',shoppingManualForm())">+ Añadir producto</button></div></section>
+ <section class="food-stats"><div><span>Pendientes</span><strong>${pending}</strong><small>por comprar</small></div><div><span>En total</span><strong>${items.length}</strong><small>productos</small></div><div><span>Comprados</span><strong>${done}</strong><small>marcados</small></div><div><span>Del menú</span><strong>${items.filter(x=>!x.manual).length}</strong><small>ingredientes</small></div></section>
+ <section class="food-panel shopping-panel"><div class="panel-heading"><div><h3>Tu lista</h3><span>${pending} pendientes · ${items.length?Math.round(done/items.length*100):0}% completada</span></div><div class="actions"><button class="secondary small" onclick="openModal('Añadir producto',shoppingManualForm())">+ Añadir</button><button class="secondary small" onclick="clearCompletedShopping()">Limpiar comprados</button></div></div><div class="shopping-progress"><div><span style="width:${items.length?Math.round(done/items.length*100):0}%"></span></div><small>${items.length?Math.round(done/items.length*100):0}% completada</small></div>
+ ${groups.map(g=>`<div class="shopping-group"><h4>${esc(g)}</h4>${items.filter(x=>x.group===g).map(x=>`<div class="shopping-list-row ${state.shoppingChecks[x.key]?'done':''}"><label class="checkline shopping-check ${state.shoppingChecks[x.key]?'done':''}"><input type="checkbox" ${state.shoppingChecks[x.key]?'checked':''} onchange="toggleShopping('${x.key}')"><span>${esc(x.name)}</span></label>${x.manual?`<button class="icon-button" title="Editar producto" onclick="openModal('Editar producto',shoppingManualForm(state.shoppingManualItems.find(i=>i.id==='${x.id}')))" >Editar</button>`:'<span class="shopping-source">Menú</span>'}</div>`).join('')}</div>`).join('')||'<div class="empty-state">Tu lista está vacía. Añade productos o acepta un menú semanal para generar la compra.</div>'}</section></div>`;
+}
+function clearCompletedShopping(){
+ const completed=shoppingItems().filter(x=>state.shoppingChecks[x.key]);const manualIds=new Set(completed.filter(x=>x.manual).map(x=>String(x.id)));
+ state.shoppingManualItems=state.shoppingManualItems.filter(x=>!manualIds.has(String(x.id)));completed.filter(x=>x.manual).forEach(x=>delete state.shoppingChecks[x.key]);persistShoppingList();render();
+}
+function shoppingForm(){return `<div class="shopping-list-modal">${shoppingListView(document.createElement('div'))||''}</div>`}
 function viewPreparation(id){
  const x=state.preparations.find(i=>String(i.id)===String(id));if(!x)return;
  const ingredients=Array.isArray(x.ingredients)?x.ingredients:parseIngredients(x.ingredientsText||'');
@@ -2231,13 +2290,13 @@ function saveCategoriesSettings(){
 }
 function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));queueCloudSave()}
 function exportData(){
- const data={version:19,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,cleaning:state.cleaning,sportClasses:state.sportClasses,sportSessions:state.sportSessions,sportExercises:state.sportExercises,sportRoutines:state.sportRoutines,sportSteps:state.sportSteps,sportStepGoal:state.sportStepGoal,sportMonth:state.sportMonth,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,menuHistory:state.menuHistory||[],calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
+ const data={version:20,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,cleaning:state.cleaning,sportClasses:state.sportClasses,sportSessions:state.sportSessions,sportExercises:state.sportExercises,sportRoutines:state.sportRoutines,sportSteps:state.sportSteps,sportStepGoal:state.sportStepGoal,sportMonth:state.sportMonth,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,shoppingManualItems:state.shoppingManualItems||[],prepDone:state.prepDone,menu:state.menu,menuHistory:state.menuHistory||[],calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`brain-dump-copia-${todayKey()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
  const stamp=new Date().toLocaleString('es-ES');localStorage.setItem(KEY+'lastBackup',stamp);
  const el=document.querySelector('#backupStatus');if(el)el.textContent='Última copia manual: '+stamp;
 }
 
-async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','cleaning','sportClasses','sportSessions','sportExercises','sportRoutines','sportSteps','recipes','inventory','preparations','shoppingChecks','prepDone','menuHistory'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.sportMonth)state.sportMonth=data.sportMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;state.cleaning=normalizeCleaningArray(state.cleaning);save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Brain Dump.')}}
+async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','cleaning','sportClasses','sportSessions','sportExercises','sportRoutines','sportSteps','recipes','inventory','preparations','shoppingChecks','shoppingManualItems','prepDone','menuHistory'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.sportMonth)state.sportMonth=data.sportMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;state.cleaning=normalizeCleaningArray(state.cleaning);save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Brain Dump.')}}
 
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;updateInstallButton()});
 window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateInstallButton(true)});

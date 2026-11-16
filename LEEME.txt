@@ -1,17 +1,23 @@
-Brain Dump – Lista de la compra
+BRAIN DUMP - RUTINAS INDIVIDUALES
 
-Incluye una sección independiente «Lista de la compra» en la navegación.
+CAMBIO INCLUIDO
+- Las rutinas ya no se crean como planes fijos de tres días.
+- Cada rutina es independiente y tiene su propio nombre y lista de ejercicios.
+- Puedes crear tantas rutinas como quieras (por ejemplo: Pierna, Torso, Full body o Movilidad).
+- Los ejercicios se añaden desde el catálogo, filtrando por categoría muscular.
+- Puedes editar, entrenar y eliminar cada rutina de forma independiente.
+- Al iniciar un entrenamiento desde una rutina, se cargan sus ejercicios.
 
-Funciones:
-- Integra automáticamente los ingredientes que faltan para el menú semanal aceptado.
-- Permite añadir productos manuales (por ejemplo, lentejas, lavavajillas, papel higiénico).
-- Permite indicar cantidad y sección: reposición, despensa, fruta y verdura, refrigerados, limpieza e higiene, hogar u otros.
-- Permite marcar productos como comprados, editar y eliminar productos manuales.
-- La vista de Comidas mantiene una vista previa de la misma lista.
-- Los productos añadidos manualmente y su estado se guardan localmente y se sincronizan con Supabase mediante el módulo de Comidas.
-- Los productos manuales se conservan al regenerar la lista del menú.
+COMPATIBILIDAD DE DATOS
+- Se incluye una conversión automática de las rutinas antiguas con estructura de tres días: cada día pasa a ser una rutina independiente.
+- Los entrenamientos ya registrados se conservan.
+- No se cambian las tablas ni la configuración de Supabase.
 
-Instalación:
-Sustituye el app.js actual por el incluido en este ZIP.
+INSTALACIÓN
+1. Haz una copia de seguridad de Brain Dump desde Ajustes antes de sustituir archivos.
+2. Sustituye el app.js actual por el incluido en este paquete.
+3. Publica el cambio en el mismo lugar donde alojas Brain Dump.
+4. Recarga la aplicación. Si el navegador conserva la versión anterior, fuerza la actualización o limpia la caché de la PWA.
 
-Validación realizada: comprobación sintáctica de JavaScript con node --check y comprobación de integridad del ZIP. No se ha realizado una prueba de sesión real con Supabase.
+ALCANCE Y PRUEBAS
+Este paquete incluye app.js, no el proyecto completo. Se ha comprobado la sintaxis con node --check y la integridad del ZIP. No se ha podido probar la interfaz en un navegador conectado a tu cuenta de Supabase.

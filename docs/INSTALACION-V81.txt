@@ -1,0 +1,18 @@
+MIS COSAS V81 - PASO IMPORTANTE
+
+Antes de usar la sincronizacion nueva de Comidas, ejecuta el archivo:
+supabase-v81-food-modules.sql
+
+en Supabase > SQL Editor > New query > pegar el contenido > Run.
+
+La V81 separa Comidas de app_data:
+- recipes
+- preparations
+- inventory
+- menu
+- menuHistory
+- shoppingChecks
+- prepDone
+
+La primera vez que abras V81, migrara automaticamente los datos actuales de app_data a estas filas independientes.
+No borra ni modifica los datos de otros modulos.

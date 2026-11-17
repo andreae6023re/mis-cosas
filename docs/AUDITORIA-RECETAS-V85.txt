@@ -1,0 +1,9 @@
+V85 — Auditoría de recetas y preparaciones
+
+Esta versión corrige el catálogo de 241 recetas.
+- Se sustituyen las 50 recetas comida_nueva por una versión coherente.
+- Se eliminan las asociaciones de preparaciones inferidas/incorrectas.
+- Solo se vincula una preparación cuando la receta pide explícitamente ese componente como ingrediente.
+- Se mantienen las 28 preparaciones canónicas.
+- No requiere SQL nuevo.
+- La auditoría se ejecuta una sola vez y guarda las correcciones en Supabase.

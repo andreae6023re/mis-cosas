@@ -2230,7 +2230,7 @@ function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'
 function changeExpenseAccountFilter(id){state.expenseAccountFilter=id||'all';render()}
 function bindTaskFormEvents(){const repeat=document.querySelector('#fTaskRepeat');const label=document.querySelector('#customRepeatLabel');if(repeat&&label)repeat.addEventListener('change',()=>label.classList.toggle('hidden',repeat.value!=='custom'))}
 function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden');bindTaskFormEvents();bindSportSessionDraftAutosave()}
-function closeModal(){document.querySelector('#modal').classList.add('hidden')}
+function closeModal(){const sportForm=document.querySelector('#ssForm');sportForm?._sportDraftObserver?.disconnect();document.querySelector('#modal').classList.add('hidden')}
 function sameMonth(s){if(!s)return false;const d=new Date(String(s).length<=10?s+'T12:00:00':s);return d.getMonth()===today.getMonth()&&d.getFullYear()===today.getFullYear()}
 function cap(s=''){return s?s[0].toUpperCase()+s.slice(1):s}
 function esc(s=''){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}

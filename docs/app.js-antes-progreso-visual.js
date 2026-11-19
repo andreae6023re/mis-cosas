@@ -1,0 +1,2257 @@
+
+// ============================================================
+// SUPABASE / AUTENTICACIÓN
+// ============================================================
+const SUPABASE_URL='https://pmrhnwvrmqznenfkkumc.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY='sb_publishable_DCKU0ae2X_tXHyEwb6o1HA_OpP50Rpt';
+const supabaseClient=window.supabase?.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY);
+let currentUser=null;
+let authMode='login';
+let deferredInstallPrompt=null;
+let syncStatusTimer=null;
+
+function showAuthMessage(message,type=''){
+ const el=document.querySelector('#authMessage');
+ if(el){el.textContent=message||'';el.className='auth-message '+type}
+}
+function showAuth(mode='login'){
+ authMode=mode;
+ document.querySelector('#authScreen')?.classList.remove('hidden');
+ document.querySelector('#appShell')?.classList.add('hidden');
+ const title=document.querySelector('#authTitle'),sub=document.querySelector('#authSubtitle'),submit=document.querySelector('#authSubmit'),toggle=document.querySelector('#authToggle');
+ if(!title)return;
+ if(mode==='signup'){
+  title.textContent='Crear cuenta';
+  sub.textContent='Crea tu cuenta para usar Brain Dump en todos tus dispositivos.';
+  submit.textContent='Crear cuenta';
+  toggle.textContent='¿Ya tienes cuenta? Iniciar sesión';
+ }else{
+  title.textContent='Iniciar sesión';
+  sub.textContent='Accede para tener tus datos sincronizados entre dispositivos.';
+  submit.textContent='Entrar';
+  toggle.textContent='¿No tienes cuenta? Crear una';
+ }
+ showAuthMessage('');
+}
+function showApp(){
+ document.querySelector('#authScreen')?.classList.add('hidden');
+ document.querySelector('#appShell')?.classList.remove('hidden');
+}
+function setSyncStatus(status,message){
+ const el=document.querySelector('#syncStatus');
+ if(!el)return;
+ clearTimeout(syncStatusTimer);
+ el.classList.remove('syncing','error');
+ if(status==='syncing'){el.classList.add('syncing');el.textContent='↻ Guardando…';}
+ else if(status==='error'){el.classList.add('error');el.textContent='⚠️ Sin sincronizar';}
+ else {el.textContent='☁️ Sincronizado';}
+ if(status==='syncing')return;
+ syncStatusTimer=setTimeout(()=>{if(state.cloudSyncError)setSyncStatus('error');},3500);
+}
+
+async function ensureCloudRow(user){
+ if(!supabaseClient||!user)return;
+ const {data,error}=await supabaseClient.from('app_data').select('user_id').eq('user_id',user.id).maybeSingle();
+ if(error)throw error;
+ if(!data){
+  const {error:insertError}=await supabaseClient.from('app_data').insert({user_id:user.id,data:{}});
+  if(insertError)throw insertError;
+ }
+}
+
+let cloudSaveTimer=null;
+let cloudShadow=null;
+let cloudWriteChain=Promise.resolve();
+let cloudLocalDirty=false;
+let cloudChangeRevision=0;
+let menuLocalDirty=false;
+let menuSyncRevision=0;
+let menuSyncChain=Promise.resolve();
+let menuPendingFields={menu:false,menuHistory:false,shoppingChecks:false};
+let menuSyncScheduled=false;
+let foodModuleQueues={};
+let foodModuleRevisions={};
+let foodModulesReady=false;
+let foodModulesSetupError='';
+const FOOD_MODULE_KEYS={recipes:'recipes',preparations:'preparations',inventory:'inventory',menu:'menu',menuHistory:'menuHistory',shoppingChecks:'shoppingChecks',prepDone:'prepDone'};
+function foodModuleValue(module){
+ if(module==='recipes')return Array.isArray(state.recipes)?state.recipes:[];
+ if(module==='preparations')return Array.isArray(state.preparations)?state.preparations:[];
+ if(module==='inventory')return Array.isArray(state.inventory)?state.inventory:[];
+ if(module==='menu')return state.menu||null;
+ if(module==='menuHistory')return Array.isArray(state.menuHistory)?state.menuHistory:[];
+ if(module==='shoppingChecks')return state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{};
+ if(module==='prepDone')return state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{};
+ return null;
+}
+function setFoodModuleValue(module,value){
+ if(module==='recipes')state.recipes=Array.isArray(value)?value:[];
+ else if(module==='preparations')state.preparations=Array.isArray(value)?value:[];
+ else if(module==='inventory')state.inventory=Array.isArray(value)?value:[];
+ else if(module==='menu')state.menu=value&&typeof value==='object'?value:null;
+ else if(module==='menuHistory')state.menuHistory=Array.isArray(value)?value:[];
+ else if(module==='shoppingChecks')state.shoppingChecks=value&&typeof value==='object'?value:{};
+ else if(module==='prepDone')state.prepDone=value&&typeof value==='object'?value:{};
+}
+async function loadFoodModules(){
+ if(!supabaseClient||!currentUser)return false;
+ const {data,error}=await supabaseClient.from('app_data_modules').select('module,data,revision,updated_at').eq('user_id',currentUser.id);
+ if(error){foodModulesReady=false;foodModulesSetupError=String(error.message||error);throw error;}
+ const rows=Array.isArray(data)?data:[];
+ const present=new Set(rows.map(r=>r.module));
+ for(const row of rows){
+  if(!Object.prototype.hasOwnProperty.call(FOOD_MODULE_KEYS,row.module))continue;
+  setFoodModuleValue(row.module,row.data);
+  foodModuleRevisions[row.module]=Number(row.revision||0);
+ }
+ // One-time migration: if a module row does not exist yet, copy the current app_data value into it.
+ for(const module of Object.keys(FOOD_MODULE_KEYS))if(!present.has(module)){
+  const value=foodModuleValue(module);
+  const {error:migrationError}=await supabaseClient.from('app_data_modules').upsert({user_id:currentUser.id,module,data:value,revision:0,updated_at:new Date().toISOString()},{onConflict:'user_id,module'});
+  if(migrationError)throw migrationError;
+  foodModuleRevisions[module]=0;
+ }
+ normalizeInventoryStorageState();
+ normalizeRecipes();
+ localCacheFromState();
+ foodModulesReady=true;foodModulesSetupError='';
+ return true;
+}
+function syncFoodModule(module,value=foodModuleValue(module),options={}){
+ if(!supabaseClient||!currentUser)return Promise.resolve(false);
+ if(!foodModulesReady){
+  const msg='La sincronización de Comidas necesita la tabla app_data_modules. Ejecuta supabase-v81-food-modules.sql en Supabase.';
+  state.cloudSyncError=msg;setSyncStatus('error');console.error(msg,foodModulesSetupError);
+  return Promise.resolve(false);
+ }
+ const expected=Number(foodModuleRevisions[module]||0);
+ const nextValue=JSON.parse(JSON.stringify(value));
+ foodModuleQueues[module]=foodModuleQueues[module]||Promise.resolve();
+ foodModuleQueues[module]=foodModuleQueues[module].then(async()=>{
+  setSyncStatus('syncing');
+  try{
+   const {data:row,error:readError}=await supabaseClient.from('app_data_modules').select('data,revision').eq('user_id',currentUser.id).eq('module',module).maybeSingle();
+   if(readError)throw readError;
+   const remoteRevision=Number(row?.revision||0);
+   const currentRevision=Number(foodModuleRevisions[module]||0);
+   // If another device has advanced the same module, do not silently overwrite it.
+   if(options.expectedRevision!==undefined && remoteRevision!==Number(options.expectedRevision)){
+    setFoodModuleValue(module,row?.data);foodModuleRevisions[module]=remoteRevision;localCacheFromState();
+    throw new Error('Este módulo cambió en otro dispositivo. Se ha cargado la versión más reciente.');
+   }
+   const writeRevision=Math.max(remoteRevision,currentRevision)+1;
+   const {data:updated,error:updateError}=await supabaseClient.from('app_data_modules')
+    .update({data:nextValue,revision:writeRevision,updated_at:new Date().toISOString()})
+    .eq('user_id',currentUser.id).eq('module',module).eq('revision',remoteRevision).select('data,revision').maybeSingle();
+   if(updateError)throw updateError;
+   if(!updated)throw new Error('El módulo cambió en otro dispositivo. Vuelve a intentarlo.');
+   foodModuleRevisions[module]=Number(updated.revision||writeRevision);
+   state.cloudSyncError='';
+   localCacheFromState();
+   setSyncStatus('ok');
+   return true;
+  }catch(err){
+   console.error('Error sincronizando '+module,err);state.cloudSyncError=String(err?.message||err||'Error de sincronización');setSyncStatus('error');return false;
+  }
+ });
+ return foodModuleQueues[module];
+}
+
+async function syncPreparationMutation(action,itemOrId){
+ if(!supabaseClient||!currentUser||!foodModulesReady)return false;
+ const localItem=action==='delete'?null:JSON.parse(JSON.stringify(itemOrId));
+ foodModuleQueues.preparations=foodModuleQueues.preparations||Promise.resolve();
+ foodModuleQueues.preparations=foodModuleQueues.preparations.then(async()=>{
+  setSyncStatus('syncing');
+  let lastError=null;
+  for(let attempt=0;attempt<4;attempt++){
+   try{
+    const {data:row,error:readError}=await supabaseClient.from('app_data_modules').select('data,revision').eq('user_id',currentUser.id).eq('module','preparations').maybeSingle();
+    if(readError)throw readError;
+    const remote=Array.isArray(row?.data)?JSON.parse(JSON.stringify(row.data)):[];
+    let merged=remote;
+    if(action==='delete'){
+      const id=String(itemOrId);
+      merged=remote.filter(x=>String(x?.id)!==id);
+    }else{
+      const id=String(localItem.id);
+      const idx=remote.findIndex(x=>String(x?.id)===id);
+      if(idx>=0)merged[idx]={...remote[idx],...localItem};
+      else merged=[...remote,localItem];
+    }
+    const remoteRevision=Number(row?.revision||0);
+    const writeRevision=remoteRevision+1;
+    const {data:updated,error:updateError}=await supabaseClient.from('app_data_modules')
+      .update({data:merged,revision:writeRevision,updated_at:new Date().toISOString()})
+      .eq('user_id',currentUser.id).eq('module','preparations').eq('revision',remoteRevision)
+      .select('data,revision').maybeSingle();
+    if(updateError)throw updateError;
+    if(!updated){lastError=new Error('La preparación cambió en otro dispositivo.');continue;}
+    state.preparations=Array.isArray(updated.data)?updated.data:[];
+    foodModuleRevisions.preparations=Number(updated.revision||writeRevision);
+    localCacheFromState();
+    state.cloudSyncError='';
+    setSyncStatus('ok');
+    return true;
+   }catch(err){lastError=err;break;}
+  }
+  console.error('Error sincronizando preparaciones',lastError);
+  state.cloudSyncError=String(lastError?.message||lastError||'Error de sincronización de preparaciones');
+  setSyncStatus('error');
+  return false;
+ });
+ return foodModuleQueues.preparations;
+}
+
+function cloudPayload(){
+ return {
+  tasks:Array.isArray(state.tasks)?state.tasks:[],
+  expenses:Array.isArray(state.expenses)?state.expenses:[],
+  transactions:Array.isArray(state.transactions)?state.transactions:[],
+  accounts:Array.isArray(state.accounts)?state.accounts:[],
+  budgets:Array.isArray(state.budgets)?state.budgets:[],
+  events:Array.isArray(state.events)?state.events:[],
+  habits:Array.isArray(state.habits)?state.habits:[],
+  cleaning:Array.isArray(state.cleaning)?state.cleaning:[],
+  sportClasses:state.sportClasses||[],sportSessions:state.sportSessions||[],sportExercises:state.sportExercises||[],sportRoutines:state.sportRoutines||[],sportSteps:state.sportSteps||[],sportStepGoal:Number(state.sportStepGoal)||8000,sportMonth:state.sportMonth||'',
+  recipes:Array.isArray(state.recipes)?state.recipes:[],
+  inventory:Array.isArray(state.inventory)?state.inventory:[],
+  preparations:Array.isArray(state.preparations)?state.preparations:[],
+  shoppingChecks:state.shoppingChecks&&typeof state.shoppingChecks==='object'?state.shoppingChecks:{},
+  prepDone:state.prepDone&&typeof state.prepDone==='object'?state.prepDone:{},
+  menu:state.menu||null,
+  menuHistory:Array.isArray(state.menuHistory)?state.menuHistory:[],
+  calendarMonth:state.calendarMonth||'',
+  settings:state.settings&&typeof state.settings==='object'?state.settings:{},
+  expenseCategories:typeof expenseCategories==='object'?expenseCategories:{},
+  schemaVersion:4
+ };
+}
+
+function normalizeStorageValue(value, fallback='pantry'){
+  const s=String(value??'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[_-]+/g,' ').replace(/\s+/g,' ');
+  if(['freezer','congelador','congelados','congelado','congelador/freezer','freezer/congelador'].includes(s))return 'freezer';
+  if(['fresh','fresco','frescos','fresca','frescas'].includes(s))return 'fresh';
+  if(['pantry','despensa','despensa/pantry','pantry/despensa'].includes(s))return 'pantry';
+  return fallback;
+}
+function normalizeInventoryStorageState(){
+  state.inventory=(Array.isArray(state.inventory)?state.inventory:[]).map(x=>({...x,storage:normalizeStorageValue(x.storage,'pantry')}));
+}
+function localCacheFromState(){
+  normalizeInventoryStorageState();
+ Object.keys(state).forEach(k=>{
+  if(k==='view'||k==='cloudSyncError')return;
+  if(k==='calendarMonth'||k==='sportMonth'||k==='sportStepGoal'){localStorage.setItem(KEY+k,String(state[k]||''));return}
+  if(Array.isArray(state[k])||k==='settings'||k==='menu'||k==='shoppingChecks'||k==='prepDone')localStorage.setItem(KEY+k,JSON.stringify(state[k]));
+ });
+ if(typeof expenseCategories==='object')localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));
+}
+
+async function loadAllFromCloud(){
+ if(!supabaseClient||!currentUser)return false;
+ const local={
+  tasks:Array.isArray(state.tasks)?state.tasks:[],expenses:Array.isArray(state.expenses)?state.expenses:[],transactions:Array.isArray(state.transactions)?state.transactions:[],accounts:Array.isArray(state.accounts)?state.accounts:[],budgets:Array.isArray(state.budgets)?state.budgets:[],events:Array.isArray(state.events)?state.events:[],habits:Array.isArray(state.habits)?state.habits:[],cleaning:Array.isArray(state.cleaning)?state.cleaning:[],sportClasses:state.sportClasses||[],sportSessions:state.sportSessions||[],sportExercises:state.sportExercises||[],sportRoutines:state.sportRoutines||[],sportSteps:state.sportSteps||[],sportStepGoal:Number(state.sportStepGoal)||8000,sportMonth:state.sportMonth||'',recipes:Array.isArray(state.recipes)?state.recipes:[],inventory:Array.isArray(state.inventory)?state.inventory:[],preparations:Array.isArray(state.preparations)?state.preparations:[],shoppingChecks:state.shoppingChecks||{},prepDone:state.prepDone||{},menu:state.menu||null,menuHistory:Array.isArray(state.menuHistory)?state.menuHistory:[],calendarMonth:state.calendarMonth||'',settings:state.settings||{},expenseCategories:typeof expenseCategories==='object'?expenseCategories:{}
+ };
+ const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
+ if(error)throw error;
+ const cloud=data?.data&&typeof data.data==='object'?data.data:{};
+ const legacy=cloud.food&&typeof cloud.food==='object'?cloud.food:null;
+ const isNewSchema=Number(cloud.schemaVersion||0)>=2;
+ const chooseArray=(key,legacyKey=key)=>{
+  // Once a row has a modern schema, the cloud value is authoritative — including []
+  // because an empty array may be an intentional user deletion. Only brand-new legacy
+  // rows may recover populated local data.
+  if(isNewSchema && Array.isArray(cloud[key]))return cloud[key];
+  if(Array.isArray(cloud[key]) && cloud[key].length>0)return cloud[key];
+  if(legacy && Array.isArray(legacy[legacyKey]) && legacy[legacyKey].length>0)return legacy[legacyKey];
+  if(Array.isArray(local[key]) && local[key].length>0)return local[key];
+  return Array.isArray(cloud[key])?cloud[key]:local[key];
+ };
+ state.tasks=chooseArray('tasks');state.expenses=chooseArray('expenses');state.transactions=chooseArray('transactions');state.accounts=chooseArray('accounts');state.budgets=chooseArray('budgets');state.events=chooseArray('events');state.habits=chooseArray('habits');state.cleaning=normalizeCleaningArray(chooseArray('cleaning'));state.sportClasses=chooseArray('sportClasses');state.sportSessions=chooseArray('sportSessions');const previousSportExerciseCount=(chooseArray('sportExercises')||[]).length;state.sportExercises=mergeSportExerciseCatalog(chooseArray('sportExercises'));state.sportRoutines=chooseArray('sportRoutines');const sportCatalogChanged=state.sportExercises.length!==previousSportExerciseCount;state.sportSteps=chooseArray('sportSteps');
+ state.recipes=chooseArray('recipes');state.inventory=chooseArray('inventory');state.preparations=chooseArray('preparations');state.menuHistory=chooseArray('menuHistory');normalizeRecipes();
+ const chooseObject=(key)=>{
+  if(cloud[key]&&typeof cloud[key]==='object' && (Object.keys(cloud[key]).length>0 || isNewSchema))return cloud[key];
+  if(legacy&&legacy[key]&&typeof legacy[key]==='object'&&Object.keys(legacy[key]).length)return legacy[key];
+  if(local[key]&&typeof local[key]==='object'&&Object.keys(local[key]).length)return local[key];
+  return cloud[key]&&typeof cloud[key]==='object'?cloud[key]:local[key];
+ };
+ state.shoppingChecks=chooseObject('shoppingChecks');state.prepDone=chooseObject('prepDone');
+ if(cloud.menu!==undefined && (cloud.menu!==null || isNewSchema))state.menu=cloud.menu;else if(legacy&&legacy.menu!==undefined)state.menu=legacy.menu;else state.menu=local.menu;
+ if(typeof cloud.calendarMonth==='string' && (cloud.calendarMonth || isNewSchema))state.calendarMonth=cloud.calendarMonth;else state.calendarMonth=local.calendarMonth;
+ if(typeof cloud.sportMonth==='string' && (cloud.sportMonth || isNewSchema))state.sportMonth=cloud.sportMonth;else state.sportMonth=local.sportMonth;
+ if(Number.isFinite(Number(cloud.sportStepGoal))&&Number(cloud.sportStepGoal)>0)state.sportStepGoal=Number(cloud.sportStepGoal);else state.sportStepGoal=Number(local.sportStepGoal)||8000;
+ if(cloud.settings&&typeof cloud.settings==='object' && (Object.keys(cloud.settings).length || isNewSchema))state.settings=cloud.settings;else state.settings=local.settings;
+ if(cloud.expenseCategories&&typeof cloud.expenseCategories==='object' && (Object.keys(cloud.expenseCategories).length || isNewSchema))expenseCategories=cloud.expenseCategories;
+ else if(Object.keys(local.expenseCategories).length)expenseCategories=local.expenseCategories;
+ localCacheFromState();
+ if(sportCatalogChanged){cloudChangeRevision++;cloudLocalDirty=true;queueCloudSave()}
+ // IMPORTANT: loading from cloud is read-only. Never write the whole local state back here.
+ // This prevents an empty module on one device from overwriting populated data on another.
+ cloudShadow=JSON.parse(JSON.stringify(cloud));
+ // Food modules live in their own rows so menu, recipes, preparations and inventory
+ // cannot overwrite one another through the monolithic app_data JSON document.
+ try{await loadFoodModules();}catch(moduleErr){
+  foodModulesReady=false;foodModulesSetupError=String(moduleErr?.message||moduleErr||'Error');
+  console.warn('No se pudieron cargar los módulos independientes; se mantiene app_data.',moduleErr);
+  state.cloudSyncError='No se ha configurado la sincronización de Comidas. Ejecuta supabase-v81-food-modules.sql en Supabase.';
+  setSyncStatus('error');
+ }
+ return true;
+}
+function syncCloudField(key,value){
+ if(!supabaseClient||!currentUser)return Promise.resolve(false);
+ const writeRevision=cloudChangeRevision;
+ cloudWriteChain=cloudWriteChain.then(async()=>{
+  setSyncStatus('syncing');
+  try{
+   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
+   if(error)throw error;
+   const current=data?.data&&typeof data.data==='object'?data.data:{};
+   const next={...current,[key]:value,schemaVersion:4};
+   if(key==='inventory'){if(Array.isArray(value)&&value.length===0)next.inventoryClearedAt=state.inventoryClearedAt||new Date().toISOString();else delete next.inventoryClearedAt;}
+   const {error:upsertError}=await supabaseClient.from('app_data').upsert({user_id:currentUser.id,data:next},{onConflict:'user_id'});
+   if(upsertError)throw upsertError;
+   cloudShadow=JSON.parse(JSON.stringify(next));
+   state.cloudSyncError='';
+   if(cloudChangeRevision===writeRevision)cloudLocalDirty=false;
+   setSyncStatus('ok');
+   return true;
+  }catch(err){
+   console.error('Error sincronizando '+key,err);
+   state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+   setSyncStatus('error');
+   return false;
+  }
+ });
+ return cloudWriteChain;
+}
+function queueCloudSave(){
+ if(!supabaseClient||!currentUser)return;
+ clearTimeout(cloudSaveTimer);
+ cloudSaveTimer=setTimeout(()=>{saveAllToCloud();},350);
+}
+
+function saveAllToCloud(){
+ if(!supabaseClient||!currentUser)return Promise.resolve(false);
+ const writeRevision=cloudChangeRevision;
+ cloudWriteChain=cloudWriteChain.then(async()=>{
+  setSyncStatus('syncing');
+  const payload=cloudPayload();
+  const baseline=cloudShadow||{};
+  const menuManagedKeys=new Set(['recipes','preparations','inventory','menu','menuHistory','shoppingChecks','prepDone']);
+  const changedKeys=Object.keys(payload).filter(k=>!menuManagedKeys.has(k)&&JSON.stringify(payload[k])!==JSON.stringify(baseline[k]));
+  if(!changedKeys.length){setSyncStatus('ok');return true}
+  try{
+   const {data,error}=await supabaseClient.from('app_data').select('data').eq('user_id',currentUser.id).maybeSingle();
+   if(error)throw error;
+   const current=data?.data&&typeof data.data==='object'?data.data:{};
+   const patch={};
+   changedKeys.forEach(k=>{patch[k]=payload[k]});
+   const next={...current,...patch,schemaVersion:4};
+   const {error:upsertError}=await supabaseClient.from('app_data').upsert({user_id:currentUser.id,data:next},{onConflict:'user_id'});
+   if(upsertError)throw upsertError;
+   cloudShadow=JSON.parse(JSON.stringify(next));
+   state.cloudSyncError='';
+   if(cloudChangeRevision===writeRevision)cloudLocalDirty=false;
+   setSyncStatus('ok');
+   return true;
+  }catch(err){
+   console.error('No se han podido sincronizar los datos.',err);
+   state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+   setSyncStatus('error');
+   return false;
+  }
+ });
+ return cloudWriteChain;
+}
+async function syncMenuBundle(fields={menu:true,menuHistory:false,shoppingChecks:false}){
+ if(!supabaseClient||!currentUser)return false;
+ menuLocalDirty=true;
+ const modules=[];
+ if(fields.menu)modules.push('menu');
+ if(fields.menuHistory)modules.push('menuHistory');
+ if(fields.shoppingChecks)modules.push('shoppingChecks');
+ const run=async()=>{
+  for(const module of modules){
+   const ok=await syncFoodModule(module,foodModuleValue(module));
+   if(!ok)return false;
+  }
+  menuLocalDirty=false;
+  return true;
+ };
+ menuSyncChain=menuSyncChain.then(run);
+ return menuSyncChain;
+}
+async function syncMenuChoice(){
+ return syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
+}
+
+async function handleAuthSubmit(e){
+ e.preventDefault();
+ if(!supabaseClient){showAuthMessage('No se ha podido cargar el servicio de autenticación.','error');return}
+ const email=document.querySelector('#authEmail')?.value.trim();
+ const password=document.querySelector('#authPassword')?.value||'';
+ if(!email||password.length<6){showAuthMessage('Introduce un email y una contraseña de al menos 6 caracteres.','error');return}
+ const submit=document.querySelector('#authSubmit');
+ submit.disabled=true;showAuthMessage('Conectando…');
+ try{
+  let result;
+  if(authMode==='signup') result=await supabaseClient.auth.signUp({email,password,options:{emailRedirectTo:window.location.origin}});
+  else result=await supabaseClient.auth.signInWithPassword({email,password});
+  if(result.error)throw result.error;
+  if(authMode==='signup'&&!result.data.session){
+   showAuthMessage('Cuenta creada. Revisa tu email para confirmar la cuenta y después inicia sesión.','success');
+   document.querySelector('#authPassword').value='';
+  }else if(result.data.user){
+   currentUser=result.data.user;
+   await ensureCloudRow(currentUser);
+   await loadAllFromCloud();
+   await runRecipeAuditV85();
+   showApp();applyAppearance();render();checkNotifications();
+  }
+ }catch(err){showAuthMessage(authErrorText(err),'error')}
+ finally{submit.disabled=false}
+}
+function authErrorText(err){
+ const m=String(err?.message||err||'');
+ if(/invalid login credentials/i.test(m))return 'Email o contraseña incorrectos.';
+ if(/user already registered/i.test(m))return 'Este email ya tiene una cuenta. Inicia sesión.';
+ if(/password/i.test(m)&&/6|characters|length/i.test(m))return 'La contraseña debe tener al menos 6 caracteres.';
+ return m||'No se ha podido completar la operación.';
+}
+async function logout(){if(!supabaseClient)return;await supabaseClient.auth.signOut();currentUser=null;showAuth('login')}
+async function initAuth(){
+ if(!supabaseClient){showAuthMessage('No se ha podido cargar Supabase. Comprueba tu conexión.','error');showAuth('login');return}
+ document.querySelector('#authForm')?.addEventListener('submit',handleAuthSubmit);
+ document.querySelector('#authToggle')?.addEventListener('click',()=>showAuth(authMode==='login'?'signup':'login'));
+ const {data,error}=await supabaseClient.auth.getSession();
+ if(error){showAuthMessage(error.message,'error');showAuth('login');return}
+ if(data.session?.user){
+  currentUser=data.session.user;
+  try{await ensureCloudRow(currentUser);await loadAllFromCloud();await runRecipeAuditV85();showApp();applyAppearance();render();checkNotifications();setInterval(checkNotifications,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkNotifications(true)})}
+  catch(err){showAuthMessage('No se ha podido preparar tu espacio en la nube. '+authErrorText(err),'error');showAuth('login')}
+ }else showAuth('login');
+supabaseClient.auth.onAuthStateChange((_event,session)=>{
+  if(session?.user){
+   currentUser=session.user;
+   // Important: auth events can fire after the UI is already visible.
+   // Always load the cloud copy before exposing the app so a second device
+   // does not stay on an old localStorage snapshot.
+   void (async()=>{
+    try{
+     await ensureCloudRow(currentUser);
+     await loadAllFromCloud();
+     await runRecipeAuditV85();
+     showApp();applyAppearance();render();
+    }catch(err){
+     console.error('Error cargando datos tras cambio de sesión',err);
+     state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+     setSyncStatus('error');
+     showApp();
+    }
+   })();
+  }else{currentUser=null;showAuth('login')}
+});
+
+// When the PWA is resumed on mobile (or the tab regains focus), refresh from
+// Supabase. Wait for pending writes first, then read the latest cloud state.
+let cloudRefreshBusy=false;
+async function refreshCloudOnResume(){
+ if(!supabaseClient||!currentUser||cloudRefreshBusy||cloudLocalDirty||menuLocalDirty)return;
+ cloudRefreshBusy=true;
+ try{
+  await cloudWriteChain;
+  await loadAllFromCloud();
+  applyAppearance();render();
+ }catch(err){
+  console.error('Error actualizando desde la nube',err);
+  state.cloudSyncError=String(err?.message||err||'Error de sincronización');
+  setSyncStatus('error');
+ }finally{cloudRefreshBusy=false}
+}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshCloudOnResume()});
+window.addEventListener('focus',()=>void refreshCloudOnResume());
+window.addEventListener('pageshow',()=>void refreshCloudOnResume());
+
+// Cross-device sync: when both devices remain open, refresh periodically.
+// It is deliberately gentle and NEVER reads while there are local changes pending.
+let cloudPollingStarted=false;
+function startCloudPolling(){
+ if(cloudPollingStarted)return;
+ cloudPollingStarted=true;
+ setInterval(()=>{
+  if(document.hidden||cloudLocalDirty||menuLocalDirty||cloudRefreshBusy||!currentUser)return;
+  void refreshCloudOnResume();
+ },15000);
+}
+
+// Keep the current device connected to changes made on another device.
+// This is intentionally 15s rather than the old 5s polling.
+startCloudPolling();
+
+}
+const KEY='mis_cosas_';
+const SPORT_EXERCISE_GROUPS={
+ 'Abdominales':['Encogimiento','Patada','Elevación cadera','Máquina abdominales','Laterales','Crunch lateral','Leñador','Crunch codo rodilla','Crunch','Elevación tronco'],
+ 'Espalda':['Jalón polea','Polea tras nuca','Dominadas','Remo mancuernas','Remo Gironda','Remo una mano','Pull over','Pull over polea','Remo polea','Remo con barra','Lumbar'],
+ 'Pectoral':['Press de banca','Press inclinado','Press declinado','Press mancuernas','Inclinado','Declinado','Aperturas inclinados','Aperturas','Contractora','Fondos','Cruces polea'],
+ 'Hombro':['Press máquina','Press militar','Apertura','Elevación frontal','Pájaros','Press mancuernas','Polea frontal','Polea lateral','Remo con barra','Encogimientos'],
+ 'Biceps':['Curl de barra','Curl mancuernas','Concentrado','Banco Scott','Polea baja','Press francés','Patada tríceps','Press','Fondos','Jalón bíceps','Jalón cabeza'],
+ 'Brazos':['Curl de barra','Curl mancuernas','Concentrado','Banco Scott','Polea baja','Press francés','Patada tríceps','Press','Fondos','Jalón bíceps','Jalón cabeza'],
+ 'Piernas':['Sentadilla','Multipower','Prensa','Extensión','Flexión femoral','Zancada','Sentadilla búlgara','Aductores','Abductores','Glúteo'],
+ 'Movilidad':[]
+};
+const SPORT_EXERCISE_CATEGORIES=Object.keys(SPORT_EXERCISE_GROUPS);
+function mergeSportExerciseCatalog(existing=[]){
+ const result=Array.isArray(existing)?existing.filter(x=>x&&String(x.name||'').trim()).map(x=>({...x,categories:Array.isArray(x.categories)?x.categories:(x.category?[x.category]:[])})):[];
+ const keyOf=n=>String(n||'').trim().toLocaleLowerCase('es');
+ Object.entries(SPORT_EXERCISE_GROUPS).forEach(([category,names])=>names.forEach(name=>{
+  let item=result.find(x=>keyOf(x.name)===keyOf(name));
+  if(!item){item={id:crypto.randomUUID(),name,categories:[]};result.push(item)}
+  if(item.deleted)return;
+  item.categories=Array.isArray(item.categories)?item.categories:[];
+  if(!item.categories.includes(category))item.categories.push(category);
+ }));
+ result.forEach(x=>{if(!x.categories.length)x.categories=['Otros']});
+ return result;
+}
+function sportExercisesForCategory(category){return (state.sportExercises||[]).filter(x=>!x.deleted&&(x.categories||[x.category||'Otros']).includes(category)).sort((a,b)=>a.name.localeCompare(b.name,'es'))}
+function sportRefreshExerciseSelect(categorySelect){const entry=categorySelect.closest('.sport-entry'),select=entry.querySelector('.ssName'),category=categorySelect.value,old=select.value;select.innerHTML='<option value="">Selecciona un ejercicio</option>'+sportExercisesForCategory(category).map(x=>`<option value="${esc(x.name)}">${esc(x.name)}</option>`).join('');if([...select.options].some(o=>o.value===old))select.value=old;}
+function normalizeCleaningArray(value){
+ if(!Array.isArray(value))return [];
+ return value.filter(x=>x&&typeof x==='object'&&String(x.name||'').trim()).map(x=>({...x,completed:x.completed&&typeof x.completed==='object'?x.completed:{}}));
+}
+const state={
+ view:'home',
+ tasks:JSON.parse(localStorage.getItem(KEY+'tasks')||'[]'),
+ expenses:JSON.parse(localStorage.getItem(KEY+'expenses')||'[]'),
+ transactions:JSON.parse(localStorage.getItem(KEY+'transactions')||'[]'),
+ accounts:JSON.parse(localStorage.getItem(KEY+'accounts')||'null')||null,
+ budgets:JSON.parse(localStorage.getItem(KEY+'budgets')||'[]'),
+ events:JSON.parse(localStorage.getItem(KEY+'events')||'[]'),
+ habits:JSON.parse(localStorage.getItem(KEY+'habits')||'[]'),
+ cleaning:normalizeCleaningArray(JSON.parse(localStorage.getItem(KEY+'cleaning')||'[]')),
+ sportClasses:JSON.parse(localStorage.getItem(KEY+'sportClasses')||'[]'),sportSessions:JSON.parse(localStorage.getItem(KEY+'sportSessions')||'[]'),sportExercises:mergeSportExerciseCatalog(JSON.parse(localStorage.getItem(KEY+'sportExercises')||'[]')),sportRoutines:JSON.parse(localStorage.getItem(KEY+'sportRoutines')||'[]'),sportSteps:JSON.parse(localStorage.getItem(KEY+'sportSteps')||'[]'),sportStepGoal:Number(localStorage.getItem(KEY+'sportStepGoal'))||8000,sportMonth:localStorage.getItem(KEY+'sportMonth')||`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`,
+ recipes:JSON.parse(localStorage.getItem(KEY+'recipes')||'[]'),
+ inventory:JSON.parse(localStorage.getItem(KEY+'inventory')||'[]'),
+ preparations:JSON.parse(localStorage.getItem(KEY+'preparations')||'[]'),
+ shoppingChecks:JSON.parse(localStorage.getItem(KEY+'shoppingChecks')||'{}'),
+ prepDone:JSON.parse(localStorage.getItem(KEY+'prepDone')||'{}'),
+ menu:JSON.parse(localStorage.getItem(KEY+'menu')||'null')||null,
+ menuHistory:JSON.parse(localStorage.getItem(KEY+'menuHistory')||'[]'),
+ calendarMonth:localStorage.getItem(KEY+'calendarMonth')||`${new Date().getFullYear()}-${String(new Date().getMonth()+1).padStart(2,'0')}`
+};
+const cats={Casa:'#ab858f',Cumpleaños:'#a0acb9',Familia:'#9ebdb8',Médico:'#b3ad8c','Médicos familia':'#67a48b',Otros:'#7f9a7d',Social:'#9998b1',Vacaciones:'#cbafab',Viajes:'#9cabc8'};
+const habitColors=['#7F9A7D','#9CABC8','#A0ACB9','#9EBDB8','#B3AD8C','#CBAFAB','#9998B1','#8F9E92'];
+const foodTypes=['Comida','Cena','Desayuno','Merienda','Dulce','Pan','Preparación'];
+function recipeTypes(r){
+ const raw=Array.isArray(r?.types)?r.types:(r?.type?[r.type]:[]);
+ return raw.map(x=>({Comidas:'Comida',Cenas:'Cena',Dulces:'Dulce',Preparaciones:'Preparación'}[x]||x)).filter(Boolean);
+}
+function hasRecipeType(r,type){return recipeTypes(r).includes(type)}
+function currentFoodSeason(){const m=new Date().getMonth()+1;if(m>=6&&m<=9)return 'Verano';if(m===12||m<=2)return 'Invierno';return 'Intermedio'}
+function recipeInCurrentSeason(r){const seasons=Array.isArray(r?.seasons)?r.seasons:[];if(!seasons.length||seasons.includes('Todo el año'))return true;const current=currentFoodSeason();if(current==='Intermedio')return true;return seasons.includes(current)}
+function recipeTypeLabel(r){return recipeTypes(r).join(' · ')||'Receta'}
+function normalizeRecipes(){state.recipes=state.recipes.map(r=>{const types=recipeTypes(r);const seasons=Array.isArray(r.seasons)?r.seasons:[];const preparationIds=Array.isArray(r.preparationIds)?r.preparationIds.map(String):[];return {...r,types,seasons,preparationIds}});linkRecipePreparations()}
+function prepNorm(s=''){return normalizeIngredient(String(s||'')).replace(/\bcasera?\b/g,'').replace(/\bpara monsieur cuisine\b/g,'').replace(/\bmonsieur cuisine\b/g,'').replace(/\s+/g,' ').trim()}
+function recipePreparationText(r){return [r?.name,r?.description,r?.steps,r?.pairs,r?.ingredientsText,Array.isArray(r?.ingredients)?r.ingredients.map(i=>i?.ingredient).join(' '):''].filter(Boolean).join(' ')}
+function autoPreparationIdsForRecipe(r){
+ const text=prepNorm(recipePreparationText(r)); if(!text||!state.preparations?.length)return []; const ids=[];
+ state.preparations.forEach(p=>{
+  const pn=prepNorm(p.name);
+  if(pn&&text.includes(pn)) ids.push(String(p.id));
+  const uses=String(p.use||'').toLowerCase().split(',').map(x=>normalizeIngredient(x).trim()).filter(x=>x.length>=4);
+  if(uses.some(u=>normalizeIngredient(r?.name||'').includes(u))) ids.push(String(p.id));
+ });
+ return [...new Set(ids)];
+}
+function linkRecipePreparations(){
+ state.recipes=state.recipes.map(r=>{
+  const explicit=Array.isArray(r.preparationIds)?r.preparationIds.map(String).filter(id=>state.preparations.some(p=>String(p.id)===id)):[];
+  return {...r,preparationIds:[...new Set(explicit)]};
+ });
+}
+
+
+
+// V83 recipe/preparation audit.
+// The catalog below is a correction layer for the recipes previously supplied in Brain Dump.
+// It updates only recipes with a known stable ID, preserving user-specific flags such as
+// favorites and "receta divertida". Preparation IDs are also repaired by canonical name so
+// an older preparation dataset cannot make a recipe point to the wrong preparation.
+function normalizeAuditName(s=''){
+ return normalizeIngredient(String(s||'')).replace(/\b(casero|casera|basico|basica|suave|individual|para bowls y wraps|en monsieur cuisine)\b/g,'').replace(/\s+/g,' ').trim();
+}
+function auditPrepCanonicalize(){
+ const catalog=Array.isArray(window.MIS_COSAS_CANONICAL_PREPARATIONS_V83)?window.MIS_COSAS_CANONICAL_PREPARATIONS_V83:[];
+ if(!catalog.length)return false;
+ let changed=false;
+ const byName=new Map(state.preparations.map(p=>[normalizeIngredient(p?.name||''),p]));
+ const usedIds=new Set(state.preparations.map(p=>String(p.id)));
+ const idRemap=new Map();
+ const next=[];
+ // First align known preparations by name. If a canonical ID is occupied by a different
+ // custom preparation, move that custom item to a UUID rather than overwriting it.
+ for(const canonical of catalog){
+  const key=normalizeIngredient(canonical.name||'');
+  let existing=byName.get(key);
+  if(existing){
+   const oldId=String(existing.id), newId=String(canonical.id);
+   if(oldId!==newId){
+    if(usedIds.has(newId)){
+     const occupant=state.preparations.find(p=>String(p.id)===newId && p!==existing);
+     if(occupant && !catalog.some(c=>String(c.id)===String(occupant.id) && normalizeIngredient(c.name||'')===normalizeIngredient(occupant.name||''))){
+      occupant.id=crypto.randomUUID();
+      usedIds.delete(newId); usedIds.add(String(occupant.id)); changed=true;
+     }
+    }
+    idRemap.set(oldId,newId); existing.id=newId; changed=true;
+   }
+   // Restore missing canonical recipe/preparation detail without overwriting edits the user made.
+   ['quantity','use','freezable','ingredients','ingredientsText','steps','description'].forEach(k=>{
+    if((existing[k]===undefined||existing[k]===null||existing[k]==='') && canonical[k]!==undefined){existing[k]=canonical[k];changed=true;}
+   });
+  }else{
+   const copy=JSON.parse(JSON.stringify(canonical));
+   if(usedIds.has(String(copy.id)))copy.id=crypto.randomUUID();
+   state.preparations.push(copy);usedIds.add(String(copy.id));byName.set(key,copy);changed=true;
+  }
+ }
+ // Rewrite prepDone keys if an old ID was remapped.
+ if(idRemap.size){
+  const done={};
+  Object.entries(state.prepDone||{}).forEach(([id,v])=>{done[idRemap.get(String(id))||String(id)]=v});
+  state.prepDone=done;
+  state.recipes=state.recipes.map(r=>({...r,preparationIds:(Array.isArray(r.preparationIds)?r.preparationIds:[]).map(id=>idRemap.get(String(id))||String(id))}));
+ }
+ return changed;
+}
+function auditRecipeCorrections(){
+ const catalog=Array.isArray(window.MIS_COSAS_RECIPE_AUDIT_V83)?window.MIS_COSAS_RECIPE_AUDIT_V83:[];
+ if(!catalog.length)return false;
+ const byId=new Map(catalog.map(r=>[String(r.id),r]));
+ let changed=false;
+ state.recipes=state.recipes.map(r=>{
+  const c=byId.get(String(r.id)); if(!c)return r;
+  const next={...r};
+  ['name','types','seasons','time','servings','ingredients','ingredientsText','steps','description','pairs','preparationIds','method'].forEach(k=>{
+   if(c[k]!==undefined && JSON.stringify(next[k])!==JSON.stringify(c[k])){next[k]=JSON.parse(JSON.stringify(c[k]));changed=true;}
+  });
+  // Preserve user-controlled flags.
+  return next;
+ });
+ return changed;
+}
+async function runRecipeAuditV83(){
+ if(localStorage.getItem(KEY+'recipeAuditVersion')==='84')return false;
+ const prepChanged=auditPrepCanonicalize();
+ const recipeChanged=auditRecipeCorrections();
+ normalizeRecipes();
+ localCacheFromState();
+ localStorage.setItem(KEY+'recipeAuditVersion','84');
+ if((prepChanged||recipeChanged)&&supabaseClient&&currentUser&&foodModulesReady){
+  try{
+   if(prepChanged)await syncFoodModule('preparations',state.preparations);
+   if(recipeChanged||prepChanged)await syncFoodModule('recipes',state.recipes);
+   if(prepChanged)await syncFoodModule('prepDone',state.prepDone);
+  }catch(err){console.error('Error guardando auditoría V83',err)}
+ }
+ return prepChanged||recipeChanged;
+}
+const fmt=n=>new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(n||0);
+const todayKey=()=>{const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`};
+const today=new Date();
+let habitSelectedDate=todayKey();
+function save(){cloudChangeRevision++;cloudLocalDirty=true;localCacheFromState();queueCloudSave()}
+function go(v){state.view=v;document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===v));render()}
+function ensureBrainDumpBranding(){
+ document.title='Brain Dump';
+ const scopes=[document.querySelector('header'),document.querySelector('.sidebar'),document.querySelector('#authScreen')].filter(Boolean);
+ scopes.forEach(scope=>{const walker=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT);let node;while((node=walker.nextNode()))if(/mis cosas/i.test(node.nodeValue||''))node.nodeValue=node.nodeValue.replace(/mis cosas/gi,'Brain Dump');});
+ const title=document.querySelector('#appTitle,.app-title,.brand-name,.sidebar-brand strong,.logo-text');
+ if(title)title.textContent='Brain Dump';
+ const brand=document.querySelector('.sidebar .brand,.sidebar .app-brand,.app-brand,.brand');
+ if(brand)brand.setAttribute('aria-label','Brain Dump');
+}
+function ensureBrainDumpHomeStyles(){
+ if(document.getElementById('brain-dump-home-styles'))return;
+ const st=document.createElement('style');st.id='brain-dump-home-styles';st.textContent=`
+ .bd-home{display:grid;gap:18px;max-width:1240px;margin:0 auto;color:var(--text,#343832)}
+ .bd-welcome{position:relative;overflow:hidden;border-radius:22px;padding:24px 26px;background:linear-gradient(115deg,#e9e8dc 0%,#e5e9df 54%,#d9e2d7 100%);border:1px solid #d9ded3}
+ .bd-welcome:after{content:"";position:absolute;width:300px;height:170px;right:-65px;bottom:-95px;border-radius:50%;background:rgba(255,255,255,.32);filter:blur(2px)}
+ .bd-brandline{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:#657361;font-weight:750;margin-bottom:15px}
+ .bd-welcome h2{font-size:clamp(25px,4vw,34px);line-height:1.12;margin:0 0 7px;color:#30382f}.bd-welcome p{margin:0;color:#626d60}
+ .bd-quick{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+ .bd-quick button{min-height:82px;border:1px solid var(--border,#e8e5df);border-radius:16px;background:var(--surface,#fff);color:var(--text,#333);font-weight:650;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:7px;padding:14px;text-align:left;box-shadow:0 3px 12px rgba(40,45,35,.035)}
+ .bd-quick button span:first-child{font-size:20px;color:#71836d}.bd-quick button:hover,.bd-tile:hover{border-color:#aebca9;transform:translateY(-1px)}
+ .bd-overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+ .bd-tile{border:1px solid var(--border,#e8e5df);border-radius:18px;background:var(--surface,#fff);padding:17px;min-width:0;transition:transform .15s,border-color .15s}
+ .bd-tile-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#66735f;font-size:13px;font-weight:700}
+ .bd-tile-value{font-size:26px;line-height:1.2;font-weight:750;margin:12px 0 4px;color:var(--text,#30352f);overflow-wrap:anywhere}.bd-tile small{color:var(--muted,#777)}
+ .bd-section{border:1px solid var(--border,#e8e5df);border-radius:20px;background:var(--surface,#fff);padding:19px;min-width:0}
+ .bd-section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}.bd-section-head h3{margin:0;font-size:17px}.bd-section-head .muted{font-size:12px}
+ .bd-routine-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.bd-routine{background:var(--surface-soft,#f5f5f0);border:1px solid var(--border,#e8e5df);border-radius:14px;padding:13px;min-width:0}.bd-routine b,.bd-routine small{display:block}.bd-routine small{color:var(--muted,#777);margin:5px 0 10px}.bd-routine button{width:100%}
+ .bd-menu-days{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.bd-menu-day{background:var(--surface-soft,#f5f5f0);border-radius:13px;padding:11px;min-width:0}.bd-menu-day b{display:block;font-size:12px;margin-bottom:7px}.bd-menu-day span{display:block;font-size:12px;line-height:1.4;margin-top:5px;overflow-wrap:anywhere}.bd-menu-day em{display:block;font-style:normal;color:var(--muted,#777);font-size:10px}
+ .bd-habits{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.bd-habit{display:flex;align-items:center;gap:9px;text-align:left;padding:10px 12px;border:1px solid var(--border,#e8e5df);border-radius:12px;background:var(--surface-soft,#f7f6f2);color:var(--text,#333);min-width:0}.bd-habit.done{background:#edf2eb;border-color:#d3dfd0}.bd-habit i{width:21px;height:21px;flex:0 0 21px;border:1.5px solid #9eaa98;border-radius:6px;display:grid;place-items:center;font-style:normal;color:#fff}.bd-habit.done i{background:#71866c;border-color:#71866c}.bd-habit span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .bd-agenda{display:grid;gap:8px}.bd-agenda-row{display:grid;grid-template-columns:60px minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border-radius:12px;background:var(--surface-soft,#f7f6f2)}.bd-agenda-time{font-size:12px;color:var(--muted,#777);font-variant-numeric:tabular-nums}.bd-agenda-row small{color:var(--muted,#777)}
+ .bd-budget{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.bd-budget>div{padding:12px;border-radius:12px;background:var(--surface-soft,#f7f6f2)}.bd-budget span,.bd-budget b{display:block}.bd-budget span{font-size:11px;color:var(--muted,#777)}.bd-budget b{font-size:20px;margin-top:5px}
+ @media(max-width:760px){.bd-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-routine-list{grid-template-columns:1fr}.bd-menu-days{grid-template-columns:repeat(2,minmax(0,1fr))}.bd-menu-day:last-child{grid-column:span 2}}
+ @media(max-width:520px){.bd-home{gap:12px}.bd-welcome{padding:19px;border-radius:18px}.bd-quick{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.bd-quick button{min-height:72px;padding:11px}.bd-overview{gap:8px}.bd-tile{padding:13px;border-radius:15px}.bd-tile-value{font-size:23px}.bd-section{padding:14px;border-radius:17px}.bd-habits{grid-template-columns:1fr}.bd-agenda-row{grid-template-columns:48px minmax(0,1fr);}.bd-agenda-row .secondary{grid-column:2;justify-self:start}.bd-budget b{font-size:17px}}
+ `;document.head.appendChild(st);
+}
+function render(){
+ ensureSportStyles();ensureSportNavigation();ensureBrainDumpBranding();ensureBrainDumpHomeStyles();
+ const names={home:['Inicio',''],tasks:['Tareas','Pendientes y recordatorios'],expenses:['Gastos','Control mensual y cuentas'],food:['Comidas','Menú, inventario y recetas'],calendar:['Calendario','Eventos y cumpleaños'],habits:['Hábitos','Pequeños hábitos, todos los días'],cleaning:['Limpieza','Rutinas diarias, semanales y periódicas'],sport:['Deporte','Clases, entrenamientos y progreso personal'],settings:['Ajustes','Configura la aplicación']};
+ document.querySelector('#pageTitle').textContent=names[state.view][0];document.querySelector('#pageSubtitle').textContent=names[state.view][1];
+ const viewFn={home,tasks,expenses,food,calendar,habits,cleaning,sport,settings}[state.view]||home;viewFn(document.querySelector('#content'));
+}
+
+// DEPORTE
+let sportTab='calendar';
+function ensureSportNavigation(){
+ const nav=document.querySelector('#nav');
+ if(nav){
+  let b=nav.querySelector('[data-view="sport"]');
+  if(!b){b=document.createElement('button');b.type='button';b.className='nav-item';b.dataset.view='sport';b.textContent='Deporte';b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();go('sport');closeMobileMenu()});}
+  const food=nav.querySelector('[data-view="food"]');
+  if(food&&food.nextElementSibling!==b)food.insertAdjacentElement('afterend',b);
+  else if(!food&&!b.isConnected){const settings=nav.querySelector('[data-view="settings"]');settings?nav.insertBefore(b,settings):nav.appendChild(b)}
+ }
+ const bottom=document.querySelector('.bottom-nav, #bottomNav, .mobile-bottom-nav');
+ if(bottom){
+  const cleaning=bottom.querySelector('[data-view="cleaning"]');
+  const existing=bottom.querySelector('[data-view="sport"]');
+  if(cleaning){cleaning.dataset.view='sport';cleaning.setAttribute('aria-label','Deporte');cleaning.title='Deporte';const label=cleaning.querySelector('.nav-label, .label, span');if(label)label.textContent='Deporte';else cleaning.textContent='Deporte';}
+  if(existing&&cleaning&&existing!==cleaning)existing.remove();
+ }
+}
+function ensureSportStyles(){if(document.getElementById('sport-styles'))return;const st=document.createElement('style');st.id='sport-styles';st.textContent=`
+.sport-wrap{display:grid;gap:16px}.sport-tabs,.sport-month-nav,.sport-actions{display:flex;gap:8px;flex-wrap:wrap}.sport-tabs button{padding:10px 14px;border:1px solid var(--border,#e5e2dc);border-radius:12px;background:var(--surface,#fff);color:var(--text,#333)}.sport-tabs button.active{background:var(--accent-soft,#e8eee8);font-weight:650}
+.sport-weekdays,.sport-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}.sport-weekdays span{text-align:center;color:var(--muted,#777);font-size:12px;padding:5px}.sport-day{min-height:78px;min-width:0;padding:6px;border:1px solid var(--border,#e8e5df);border-radius:9px;background:var(--surface-soft,#f7f6f2)}.sport-day.today{border-color:var(--accent,#9aaf9e)}.sport-day.empty{border:0;background:transparent}.sport-day b{font-size:12px}.sport-event{display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;margin-top:5px;padding:4px;border:0;border-radius:5px;background:#e4eee7;color:#43594b;font-size:10px}.sport-event.gym{background:#e8eaf1;color:#4e5873}.sport-event.cardio{background:#e8eee9;color:#496451}
+.sport-row{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid var(--border,#e8e5df)}.sport-row span,.sport-row small{display:block;color:var(--muted,#777);font-size:12px}.sport-entry{padding:12px;border:1px solid var(--border,#e5e2dc);border-radius:10px;margin:10px 0}.sport-entry select{width:100%;min-width:0}.sport-exercise-group{border-top:1px solid var(--border,#e8e5df);padding:12px 0}.sport-exercise-group summary{display:flex;justify-content:space-between;cursor:pointer;list-style:none}.sport-exercise-group summary span{color:var(--muted,#777);font-size:12px}.sport-exercise-chips{display:flex;flex-wrap:wrap;gap:7px;padding-top:12px}.sport-exercise-chips span{background:var(--surface-soft,#f1f0eb);padding:6px 10px;border-radius:8px;font-size:13px}.sport-catalog-item{display:inline-flex;align-items:center;gap:6px}.sport-catalog-item .text-button{font-size:11px;padding:3px 5px;background:transparent}.sport-catalog-item>span:first-child{background:transparent;padding:0}.sport-set{display:grid;grid-template-columns:24px minmax(0,1fr) minmax(0,1fr) 24px;gap:8px;margin:6px 0;align-items:center}.sport-set input{min-width:0;width:100%}.sport-progress{display:grid;gap:4px;padding:12px 0;border-top:1px solid var(--border,#e8e5df)}.sport-step-track{height:9px;background:var(--surface-soft,#efeee9);border-radius:20px;overflow:hidden;margin-top:12px}.sport-step-track i{display:block;height:100%;background:var(--accent,#91aa98);border-radius:20px}.sport-step-large{height:12px}.sport-step-pct{display:block;margin-top:8px;font-size:12px}.sport-step-bar-row{display:grid;grid-template-columns:78px minmax(60px,1fr) 78px;gap:10px;align-items:center;padding:7px 0;font-size:12px}.sport-step-bar-row>span{color:var(--muted,#777)}.sport-step-bar-row>b{text-align:right;font-variant-numeric:tabular-nums}.sport-step-bar-row .sport-step-track{margin:0}.sport-steps-form{max-width:520px}@media(max-width:650px){.sport-day{min-height:60px;padding:4px}.sport-event{font-size:9px}.sport-row{flex-direction:column}}
+`;document.head.appendChild(st)}
+function sport(c){ensureSportRoutineCardStyles();const tabs=[['calendar','Calendario'],['workouts','Fuerza'],['routines','Rutinas'],['cardio','Cardio'],['steps','Pasos'],['progress','Progreso'],['exercises','Ejercicios']];c.innerHTML=`<div class="sport-wrap"><div class="sport-tabs">${tabs.map(([k,n])=>`<button class="${sportTab===k?'active':''}" onclick="sportTab='${k}';render()">${n}</button>`).join('')}</div>${sportTab==='calendar'?sportCalendar():sportTab==='workouts'?sportWorkouts():sportTab==='routines'?sportRoutinesView():sportTab==='cardio'?sportCardioView():sportTab==='steps'?sportStepsView():sportTab==='progress'?sportProgress():sportExerciseList()}</div>`}
+function sportCalendar(){
+ const month=state.sportMonth||todayKey().slice(0,7),[y,m]=month.split('-').map(Number),first=new Date(y,m-1,1),count=new Date(y,m,0).getDate(),offset=(first.getDay()+6)%7,items=sportMonthItems(month),cells=Array(offset).fill('<div class="sport-day empty"></div>');
+ for(let d=1;d<=count;d++){const date=`${month}-${String(d).padStart(2,'0')}`,ev=items.filter(x=>x.date===date);cells.push(`<div class="sport-day ${date===todayKey()?'today':''}"><b>${d}</b>${ev.map(x=>`<button class="sport-event ${x.kind==='gym'?'gym':x.kind==='cardio'?'cardio':''}" onclick="${x.kind==='gym'?`sportOpenGymDay('${x.date}')`:`editSportClass('${x.templateId||x.id}')`}">${esc(x.time||'')}${x.time?' ':''}${esc(x.name)}</button>`).join('')}</div>`)}
+ return `<div class="card"><div class="row"><div><h3>${first.toLocaleDateString('es-ES',{month:'long',year:'numeric'})}</h3><span class="muted">Clases puntuales y semanales.</span></div><button class="primary" onclick="openModal('Nueva clase',sportClassForm())">+ Añadir clase</button></div><div class="sport-month-nav"><button class="secondary small" onclick="sportShiftMonth(-1)">Anterior</button><button class="secondary small" onclick="state.sportMonth=todayKey().slice(0,7);save();render()">Este mes</button><button class="secondary small" onclick="sportShiftMonth(1)">Siguiente</button><button class="secondary small" onclick="openModal('Clase recurrente',sportClassForm(null,true))">+ Recurrente</button></div><div class="sport-weekdays">${'LMXJVSD'.split('').map(x=>`<span>${x}</span>`).join('')}</div><div class="sport-grid">${cells.join('')}</div></div><div class="card"><h3>Próximas clases</h3>${items.filter(x=>x.date>=todayKey()&&x.kind!=='gym').sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time)).slice(0,10).map(x=>`<div class="sport-row"><div><b>${esc(x.name)}</b><span>${sportDate(x.date)} · ${esc(x.time||'Sin hora')}</span></div><div class="sport-actions"><button class="text-button" onclick="sportAttend('${x.id}')">${x.status==='attended'?'Asistida':'Marcar asistida'}</button><button class="text-button" onclick="editSportClass('${x.templateId||x.id}')">Editar</button></div></div>`).join('')||'<p class="muted">No hay clases próximas.</p>'}</div>`
+}
+function sportOpenGymDay(date){const sessions=(state.sportSessions||[]).filter(x=>x.date===date);if(!sessions.length)return;if(sessions.length===1){const x=sessions[0];return x.kind==='cardio'?editSportCardio(x.id):editSportSession(x.id)}openModal('Gimnasio · '+sportDate(date),`<div class="form">${sessions.map(x=>`<div class="sport-row"><div><b>${x.kind==='cardio'?'Cardio':'Fuerza'}</b><span>${x.kind==='cardio'?esc(x.activity||'Actividad'):(x.exercises||[]).length+' ejercicios'}</span></div><button class="text-button" onclick="closeModal();${x.kind==='cardio'?`editSportCardio('${x.id}')`:`editSportSession('${x.id}')`}">Abrir</button></div>`).join('')}</div>`)}
+function sportDate(k){return new Date(k+'T12:00:00').toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short'})}
+function sportShiftMonth(n){const d=new Date((state.sportMonth||todayKey().slice(0,7))+'-01T12:00:00');d.setMonth(d.getMonth()+n);state.sportMonth=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;save();render()}
+function sportMonthItems(month){const [y,m]=month.split('-').map(Number),start=new Date(y,m-1,1),end=new Date(y,m,0),out=[];(state.sportClasses||[]).forEach(x=>{if(!x.recurring){if(x.date?.startsWith(month))out.push(x);return}const from=new Date((x.startDate||todayKey())+'T12:00:00'),to=x.endDate?new Date(x.endDate+'T12:00:00'):end;for(let d=new Date(Math.max(start,from));d<=end&&d<=to;d.setDate(d.getDate()+1)){if((x.weekdays||[]).includes((d.getDay()+6)%7)){const date=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`,ex=(x.exceptions||[]).find(a=>a.date===date);if(ex?.status==='cancelled')continue;out.push({...x,id:x.id+'@'+date,templateId:x.id,date,status:ex?.status||'planned'})}}});const gymDays=new Map();(state.sportSessions||[]).forEach(x=>{if(!x.date?.startsWith(month))return;const list=gymDays.get(x.date)||[];list.push(x);gymDays.set(x.date,list)});gymDays.forEach((sessions,date)=>out.push({id:'gym@'+date,date,kind:'gym',name:'Gimnasio',sessionIds:sessions.map(x=>x.id)}));return out}
+function sportClassForm(x=null,forceRepeat=false){x=x||{};return `<div class="form"><label>Nombre<input id="scName" value="${esc(x.name||'')}" placeholder="Pilates, yoga, spinning..."></label><div class="form-two"><label>${x.recurring?'Inicio':'Fecha'}<input id="scDate" type="date" value="${x.startDate||x.date||todayKey()}"></label><label>Hora<input id="scTime" type="time" value="${x.time||''}"></label></div><div class="form-two"><label>Duración (min)<input id="scDuration" type="number" value="${x.duration||45}"></label><label>Lugar<input id="scPlace" value="${esc(x.place||'')}"></label></div><label class="checkline"><input id="scRepeat" type="checkbox" ${x.recurring||forceRepeat?'checked':''} onchange="document.querySelector('#scDays').classList.toggle('hidden',!this.checked)"> Repetir cada semana</label><div id="scDays" class="${x.recurring||forceRepeat?'':'hidden'}"><div class="field-title">Días</div><div class="recipe-check-grid">${['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'].map((d,i)=>`<label class="checkline"><input class="scDay" type="checkbox" value="${i}" ${(x.weekdays||[]).includes(i)?'checked':''}> ${d}</label>`).join('')}</div><label>Hasta (opcional)<input id="scEnd" type="date" value="${x.endDate||''}"></label></div><label>Notas<textarea id="scNotes">${esc(x.notes||'')}</textarea></label><button class="primary" onclick="saveSportClass('${x.id||''}')">Guardar clase</button>${x.id?`<button class="danger-button" onclick="deleteSportClass('${x.id}')">Eliminar</button>`:''}</div>`}
+function saveSportClass(id){const old=state.sportClasses.find(x=>x.id===id),date=document.querySelector('#scDate').value,name=document.querySelector('#scName').value.trim(),repeat=document.querySelector('#scRepeat').checked;if(!name||!date){alert('Indica nombre y fecha.');return}const weekdays=repeat?[...document.querySelectorAll('.scDay:checked')].map(x=>+x.value):[];if(repeat&&!weekdays.length){alert('Selecciona al menos un día.');return}const x={id:id||crypto.randomUUID(),name,date,startDate:date,time:document.querySelector('#scTime').value,duration:+document.querySelector('#scDuration').value||45,place:document.querySelector('#scPlace').value,recurring:repeat,weekdays,endDate:document.querySelector('#scEnd')?.value||'',notes:document.querySelector('#scNotes').value,exceptions:old?.exceptions||[],status:old?.status||'planned'};if(id)state.sportClasses=state.sportClasses.map(a=>a.id===id?x:a);else state.sportClasses.push(x);save();closeModal();render()}
+function editSportClass(id){const x=state.sportClasses.find(a=>a.id===id);if(x)openModal('Editar clase',sportClassForm(x))}
+function deleteSportClass(id){if(!confirm('¿Eliminar esta clase?'))return;state.sportClasses=state.sportClasses.filter(x=>x.id!==id);save();closeModal();render()}
+function sportAttend(id){const x=state.sportClasses.find(a=>a.id===id.split('@')[0]);if(!x)return;if(id.includes('@')){const date=id.split('@')[1];x.exceptions=x.exceptions||[];const ex=x.exceptions.find(a=>a.date===date);if(ex)ex.status=ex.status==='attended'?'planned':'attended';else x.exceptions.push({date,status:'attended'})}else x.status=x.status==='attended'?'planned':'attended';save();render()}
+function sportWorkouts(){const arr=[...(state.sportSessions||[])].filter(x=>x.kind!=='cardio').sort((a,b)=>b.date.localeCompare(a.date));const draft=sportLoadActiveDraft();return `<div class="card"><div class="row"><div><h3>Diario de fuerza</h3><span class="muted">Guarda los kilos, las series y las repeticiones de cada ejercicio.</span></div><button class="primary" onclick="openModal('Nuevo entrenamiento',sportSessionForm())">+ Registrar</button></div>${draft?`<div class="sport-row sport-draft-row"><div><b>Entrenamiento sin terminar</b><span>${sportDate(draft.date)} · ${esc(draft.name||'Entrenamiento')} · Borrador guardado automáticamente en este dispositivo</span></div><div class="sport-actions"><button class="primary small" onclick="resumeSportDraft()">Continuar</button><button class="text-button" onclick="discardSportDraft()">Descartar</button></div></div>`:''}${arr.map(x=>`<div class="sport-row"><div><b>${sportDate(x.date)} · ${esc(x.name||'Entrenamiento')}</b><span>${(x.exercises||[]).filter(e=>e.completed).length}/${(x.exercises||[]).length} ejercicios completados ${x.duration?'· '+x.duration+' min':''}</span>${(x.exercises||[]).map(e=>`<small>${esc(e.name)}: ${(e.sets||[]).map(z=>`${z.reps} rep. × ${z.weight} kg`).join(' · ')}</small>`).join('')}</div><div class="sport-actions"><button class="text-button" onclick="editSportSession('${x.id}')">Editar</button><button class="text-button danger" onclick="deleteSportSession('${x.id}')">Eliminar</button></div></div>`).join('')||'<p class="muted">Todavía no hay entrenamientos registrados.</p>'}</div>`}
+function sportSessionForm(x=null){x=x||{};ensureIndividualSportRoutines();const sessionId=x.id||crypto.randomUUID();const routines=state.sportRoutines||[],selectedRoutine=x.routineId||'',routine=routines.find(r=>r.id===selectedRoutine);const es=x.exercises?.length?x.exercises:(routine?.exercises||[]).map(e=>({...e,sets:sportLastSets(e.name)}));const doneCount=es.filter(e=>e.completed).length;return `<div class="form sport-session-form" id="ssForm" data-session-id="${sessionId}"><div class="form-two"><label>Fecha<input id="ssDate" type="date" value="${x.date||todayKey()}"></label><label>Duración (min)<input id="ssDuration" type="number" value="${x.duration||''}"></label></div><label>Rutina (opcional)<select id="ssRoutine" onchange="sportSessionRoutineChanged();sportCaptureSessionDraft()"><option value="">Entrenamiento libre</option>${routines.map(r=>`<option value="${r.id}" ${r.id===selectedRoutine?'selected':''}>${esc(r.name)}</option>`).join('')}</select></label><label>Nombre de sesión<input id="ssName" value="${esc(x.name||routine?.name||'')}" placeholder="Ej. Día 1 · Tren superior"></label><div id="ssProgress" class="muted">${doneCount} de ${es.length} ejercicios completados · ${es.length-doneCount} pendientes</div><div id="ssExercises">${es.map(e=>sportExerciseRow(e)).join('')}</div><button class="secondary" onclick="document.querySelector('#ssExercises').insertAdjacentHTML('beforeend',sportExerciseRow({name:'',sets:[{reps:'',weight:''}]}));sportUpdateWorkoutProgress();sportCaptureSessionDraft()">+ Añadir ejercicio</button><label>Notas<textarea id="ssNotes">${esc(x.notes||'')}</textarea></label><p class="muted" id="ssDraftStatus">El progreso se guarda automáticamente en este dispositivo.</p><button class="primary" onclick="saveSportSession('${sessionId}')">Guardar entrenamiento</button></div>`}
+function sportUpdateWorkoutProgress(){const rows=[...(document.querySelectorAll('#ssExercises .sport-entry')||[])],done=rows.filter(el=>el.querySelector('.ssDone')?.checked).length,el=document.querySelector('#ssProgress');if(el)el.textContent=rows.length?`${done} de ${rows.length} ejercicios completados · ${rows.length-done} pendientes`: 'Añade los ejercicios de esta sesión.'}
+function sportLastSets(name){const previous=(state.sportSessions||[]).filter(x=>x.kind!=='cardio'&&(x.exercises||[]).some(e=>e.name===name)).sort((a,b)=>b.date.localeCompare(a.date))[0];const ex=previous?.exercises?.find(e=>e.name===name);return ex?.sets?.length?ex.sets.map(z=>({...z})): [{reps:'',weight:''}]}
+function sportSessionRoutineChanged(){const routine=(state.sportRoutines||[]).find(r=>r.id===document.querySelector('#ssRoutine')?.value);document.querySelector('#ssExercises').innerHTML=(routine?.exercises||[]).map(e=>sportExerciseRow({...e,sets:sportLastSets(e.name)})).join('');document.querySelector('#ssName').value=routine?.name||'';sportUpdateWorkoutProgress()}
+function sportSetRow(i,z={}){return `<div class="sport-set"><b>${i}</b><input class="ssReps" type="number" min="0" placeholder="Repeticiones" value="${z.reps??''}"><input class="ssWeight" type="number" min="0" step=".5" placeholder="Peso (kg)" value="${z.weight??''}"><button type="button" class="text-button" onclick="this.parentElement.remove()" aria-label="Quitar serie">×</button></div>`}
+function sportExerciseRow(e){const current=(state.sportExercises||[]).find(a=>a.name.toLocaleLowerCase('es')===String(e.name||'').toLocaleLowerCase('es'));const cats=current?.categories||[];const category=e.category&&((current?.categories||[]).includes(e.category))?e.category:(cats[0]||SPORT_EXERCISE_CATEGORIES[0]);return `<div class="sport-entry"><div class="form-two"><label>Tipo<select class="ssCategory" onchange="sportRefreshExerciseSelect(this);sportToggleMobilityComments(this)">${SPORT_EXERCISE_CATEGORIES.map(c=>`<option value="${c}" ${c===category?'selected':''}>${c}</option>`).join('')}</select></label><label>Ejercicio<select class="ssName"><option value="">Selecciona un ejercicio</option>${sportExercisesForCategory(category).map(a=>`<option value="${esc(a.name)}" ${a.name.toLocaleLowerCase('es')===String(e.name||'').toLocaleLowerCase('es')?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label></div><div class="ssMobilityComments" style="${category==='Movilidad'?'':'display:none'}"><label>Comentarios · repeticiones, tiempo, indicaciones<textarea class="ssComments" rows="2" placeholder="Ej. 10 repeticiones por lado o mantener 30 segundos">${esc(e.comments||'')}</textarea></label></div><label class="checkline"><input class="ssDone" type="checkbox" ${e.completed?'checked':''} onchange="sportUpdateWorkoutProgress()"> Hecho</label><div class="ssSets">${(e.sets||[{reps:'',weight:''}]).map((z,i)=>sportSetRow(i+1,z)).join('')}</div><button type="button" class="text-button" onclick="this.previousElementSibling.insertAdjacentHTML('beforeend',sportSetRow(this.previousElementSibling.children.length+1))">+ Añadir serie</button><button type="button" class="text-button" onclick="this.closest('.sport-entry').remove();sportUpdateWorkoutProgress()">Quitar ejercicio</button></div>`}
+function sportToggleMobilityComments(el){const box=el.closest('.sport-entry')?.querySelector('.ssMobilityComments');if(box)box.style.display=el.value==='Movilidad'?'':'none'}
+function saveSportSession(id){const form=document.querySelector('#ssForm');const date=document.querySelector('#ssDate')?.value;if(!date)return;const exercises=[...document.querySelectorAll('#ssExercises .sport-entry')].map(el=>({name:el.querySelector('.ssName')?.value.trim()||'',category:el.querySelector('.ssCategory')?.value||'',comments:el.querySelector('.ssComments')?.value.trim()||'',completed:!!el.querySelector('.ssDone')?.checked,sets:[...el.querySelectorAll('.ssReps')].map((r,i)=>({reps:+r.value||0,weight:+el.querySelectorAll('.ssWeight')[i]?.value||0}))})).filter(x=>x.name);const sessionId=id||form?.dataset.sessionId||crypto.randomUUID();const x={id:sessionId,date,name:document.querySelector('#ssName')?.value.trim()||'',duration:+document.querySelector('#ssDuration')?.value||0,notes:document.querySelector('#ssNotes')?.value||'',routineId:document.querySelector('#ssRoutine')?.value||'',routineDay:Number(document.querySelector('#ssRoutineDay')?.value||0),exercises};const existing=(state.sportSessions||[]).some(a=>a.id===sessionId);if(existing)state.sportSessions=state.sportSessions.map(a=>a.id===sessionId?x:a);else state.sportSessions.push(x);exercises.forEach(e=>{let a=state.sportExercises.find(a=>a.name.toLocaleLowerCase('es')===e.name.toLocaleLowerCase('es'));if(!a){a={id:crypto.randomUUID(),name:e.name,categories:[]};state.sportExercises.push(a)}a.categories=a.categories||[];if(e.category&&!a.categories.includes(e.category))a.categories.push(e.category)});sportClearActiveDraft(sessionId);save();closeModal();render()}
+function editSportSession(id){const x=state.sportSessions.find(a=>a.id===id);if(x)openModal('Editar entrenamiento',sportSessionForm(x))}
+function deleteSportSession(id){if(!confirm('¿Eliminar este entrenamiento registrado? Esta acción no se puede deshacer.'))return;state.sportSessions=state.sportSessions.filter(x=>x.id!==id);save();render()}
+function sportDraftStorageKey(){return KEY+'sportActiveDraft'+(currentUser?.id?'_'+currentUser.id:'')}
+function sportLoadActiveDraft(){try{const raw=localStorage.getItem(sportDraftStorageKey());return raw?JSON.parse(raw):null}catch(e){return null}}
+function sportClearActiveDraft(id){const draft=sportLoadActiveDraft();if(!draft||(id&&draft.id!==id))return;localStorage.removeItem(sportDraftStorageKey())}
+function sportCaptureSessionDraft(){const form=document.querySelector('#ssForm');if(!form)return;const id=form.dataset.sessionId;if(!id)return;const date=document.querySelector('#ssDate')?.value||todayKey();const exercises=[...document.querySelectorAll('#ssExercises .sport-entry')].map(el=>({name:el.querySelector('.ssName')?.value.trim()||'',category:el.querySelector('.ssCategory')?.value||'',comments:el.querySelector('.ssComments')?.value.trim()||'',completed:!!el.querySelector('.ssDone')?.checked,sets:[...el.querySelectorAll('.ssReps')].map((r,i)=>({reps:r.value,weight:el.querySelectorAll('.ssWeight')[i]?.value||''}))}));const draft={id,date,name:document.querySelector('#ssName')?.value.trim()||'',duration:document.querySelector('#ssDuration')?.value||'',notes:document.querySelector('#ssNotes')?.value||'',routineId:document.querySelector('#ssRoutine')?.value||'',exercises};try{localStorage.setItem(sportDraftStorageKey(),JSON.stringify(draft));const status=document.querySelector('#ssDraftStatus');if(status)status.textContent='Borrador guardado automáticamente en este dispositivo.'}catch(e){console.warn('No se pudo guardar el borrador del entrenamiento',e)}}
+function resumeSportDraft(){const draft=sportLoadActiveDraft();if(!draft)return;openModal('Continuar entrenamiento',sportSessionForm(draft))}
+function discardSportDraft(){if(!confirm('¿Descartar el entrenamiento sin terminar?'))return;localStorage.removeItem(sportDraftStorageKey());render()}
+function bindSportSessionDraftAutosave(){const form=document.querySelector('#ssForm');if(!form)return;sportCaptureSessionDraft();if(form.dataset.autosaveBound==='1')return;form.dataset.autosaveBound='1';form.addEventListener('input',sportCaptureSessionDraft);form.addEventListener('change',sportCaptureSessionDraft);if(typeof MutationObserver!=='undefined'){const observer=new MutationObserver(()=>sportCaptureSessionDraft());observer.observe(form.querySelector('#ssExercises'),{childList:true,subtree:true});form._sportDraftObserver=observer}}
+
+
+function sportRoutineExerciseRow(e={}){const category=e.category||((state.sportExercises||[]).find(a=>a.name===e.name)?.categories||[])[0]||SPORT_EXERCISE_CATEGORIES[0];return `<div class="sport-entry sr-entry"><div class="form-two"><label>Tipo<select class="sr-category" onchange="sportRoutineRefreshExercise(this)">${SPORT_EXERCISE_CATEGORIES.map(c=>`<option ${c===category?'selected':''}>${c}</option>`).join('')}</select></label><label>Ejercicio<select class="sr-name"><option value="">Selecciona un ejercicio</option>${sportExercisesForCategory(category).map(a=>`<option value="${esc(a.name)}" ${a.name===e.name?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label></div><button type="button" class="text-button" onclick="this.closest('.sr-entry').remove()">Quitar</button></div>`}
+function sportRoutineRefreshExercise(el){const entry=el.closest('.sr-entry'),sel=entry.querySelector('.sr-name');sel.innerHTML='<option value="">Selecciona un ejercicio</option>'+sportExercisesForCategory(el.value).map(a=>`<option value="${esc(a.name)}">${esc(a.name)}</option>`).join('')}
+function ensureIndividualSportRoutines(){
+ const list=state.sportRoutines||[];let changed=false;const normalized=[];
+ list.forEach(r=>{if(Array.isArray(r.exercises)){normalized.push(r);return}if(Array.isArray(r.days)){changed=true;r.days.forEach((d,i)=>normalized.push({id:i===0?r.id:crypto.randomUUID(),name:r.days.length===1?(r.name||d.name):(d.name||`${r.name} · Día ${i+1}`),exercises:d.exercises||[]}));return}normalized.push({...r,exercises:[]});changed=true});
+ if(changed){state.sportRoutines=normalized;save()}
+}
+function sportRoutineForm(x=null){x=x||{};ensureIndividualSportRoutines();return `<div class="form"><label>Nombre de la rutina<input id="srName" value="${esc(x.name||'')}" placeholder="Ej. Pierna, Torso, Full body, Movilidad"></label><p class="muted">Esta rutina es independiente. Puedes crear tantas como quieras y añadir los ejercicios que necesites.</p><div class="sr-day-exercises">${(x.exercises||[]).map(e=>sportRoutineExerciseRow(e)).join('')}</div><button type="button" class="secondary" onclick="this.previousElementSibling.insertAdjacentHTML('beforeend',sportRoutineExerciseRow())">+ Añadir ejercicio</button><button class="primary" onclick="saveSportRoutine('${x.id||''}')">Guardar rutina</button></div>`}
+function saveSportRoutine(id){const name=document.querySelector('#srName').value.trim();if(!name){alert('Pon un nombre a la rutina.');return}const exercises=[...document.querySelectorAll('.sr-entry')].map(row=>({category:row.querySelector('.sr-category').value,name:row.querySelector('.sr-name').value})).filter(e=>e.name);const routine={id:id||crypto.randomUUID(),name,exercises};if(id)state.sportRoutines=state.sportRoutines.map(r=>r.id===id?routine:r);else state.sportRoutines.push(routine);save();closeModal();render()}
+function sportRoutinesView(){
+ ensureIndividualSportRoutines();const routines=state.sportRoutines||[];
+ const cardHtml=routines.map(r=>`<section class="sport-routine-card"><div class="sport-routine-card-top"><span class="sport-routine-kicker">Rutina individual</span><span class="sport-routine-count">${(r.exercises||[]).length} ejercicios</span></div><h3>${esc(r.name)}</h3><p class="sport-routine-preview">${(r.exercises||[]).slice(0,6).map(e=>esc(e.name)).join(' · ')}${(r.exercises||[]).length>6?' · …':''}</p><div class="sport-routine-card-actions"><button class="primary" onclick="startSportRoutine('${r.id}')" ${!(r.exercises||[]).length?'disabled':''}>Entrenar</button><button class="secondary" onclick="openModal('Editar rutina',sportRoutineForm(state.sportRoutines.find(a=>a.id==='${r.id}')))">Editar</button><button class="text-button" onclick="deleteSportRoutine('${r.id}')">Eliminar</button></div></section>`).join('');
+ const content=routines.length?`<div class="sport-routine-grid">${cardHtml}</div>`:`<div class="empty-state"><p>Todavía no has creado rutinas.</p><button class="primary" onclick="openModal('Nueva rutina',sportRoutineForm())">Crear mi primera rutina</button></div>`;
+ return `<div class="sport-routines-page"><div class="sport-routines-heading"><div><h3>Mis rutinas</h3><span class="muted">Crea rutinas independientes y elige libremente cuál entrenar.</span></div><button class="primary" onclick="openModal('Nueva rutina',sportRoutineForm())">+ Crear rutina</button></div>${content}</div>`;
+}
+function startSportRoutine(routineId){const routine=(state.sportRoutines||[]).find(r=>r.id===routineId);if(!routine)return;if(!(routine.exercises||[]).length){alert('Añade ejercicios a esta rutina primero.');return}const draft={date:todayKey(),routineId:routine.id,name:routine.name,exercises:routine.exercises.map(e=>({...e,completed:false,sets:sportLastSets(e.name)}))};openModal('Entrenar · '+routine.name,sportSessionForm(draft))}
+function deleteSportRoutine(id){if(!confirm('¿Eliminar esta rutina? Los entrenamientos ya registrados no se borrarán.'))return;state.sportRoutines=state.sportRoutines.filter(r=>r.id!==id);save();render()}
+function ensureSportRoutineCardStyles(){if(document.getElementById('sport-routine-card-styles'))return;const st=document.createElement('style');st.id='sport-routine-card-styles';st.textContent=`.sport-routines-page{display:grid;gap:16px}.sport-routines-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:4px 2px}.sport-routines-heading h3{margin:0 0 5px}.sport-routine-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.sport-routine-card{display:flex;flex-direction:column;gap:12px;min-width:0;padding:18px;border:1px solid var(--border,#e7e5de);border-radius:18px;background:var(--surface,#fff);box-shadow:0 3px 14px rgba(35,40,30,.035)}.sport-routine-card-top{display:flex;justify-content:space-between;align-items:center;gap:8px}.sport-routine-kicker{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted,#777)}.sport-routine-count{font-size:11px;padding:5px 8px;border-radius:999px;background:var(--surface-soft,#f3f3ed);color:var(--muted,#666)}.sport-routine-card h3{font-size:19px;margin:0}.sport-routine-preview{font-size:13px;line-height:1.5;color:var(--muted,#777);margin:0;min-height:40px}.sport-routine-card-actions{display:flex;gap:8px;margin-top:auto}.sport-routine-card-actions button:first-child{flex:1}.sport-routines-manage{display:grid;gap:7px;margin-top:4px}.sport-routine-manage-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--border,#e7e5de);border-radius:12px;background:var(--surface,#fff)}.sport-routine-manage-row span,.sport-routine-manage-row small{display:block}.sport-routine-manage-row small{font-size:11px;color:var(--muted,#777);margin-top:3px}@media(max-width:850px){.sport-routine-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.sport-routines-heading{align-items:flex-start;flex-direction:column}.sport-routines-heading button{width:100%}.sport-routine-grid{grid-template-columns:1fr}.sport-routine-card{padding:16px}}`;document.head.appendChild(st)}
+function startSportRoutineDay(routineId,dayIndex){const routine=(state.sportRoutines||[]).find(r=>r.id===routineId);if(!routine)return;const day=routine.days?.[dayIndex];if(!day)return;if(!(day.exercises||[]).length){alert('Este día todavía no tiene ejercicios. Añádelos primero a la rutina.');return}const draft={date:todayKey(),routineId:routine.id,routineDay:dayIndex,name:day.name||'Día '+(dayIndex+1),exercises:day.exercises.map(e=>({...e,completed:false,sets:sportLastSets(e.name)}))};openModal('Entrenar · '+(day.name||'Día '+(dayIndex+1)),sportSessionForm(draft))}
+function deleteSportRoutine(id){if(!confirm('¿Eliminar esta rutina? Los entrenamientos ya registrados no se borrarán.'))return;state.sportRoutines=state.sportRoutines.filter(r=>r.id!==id);save();render()}
+function sportCardioView(){
+ const arr=(state.sportSessions||[]).filter(x=>x.kind==='cardio').sort((a,b)=>b.date.localeCompare(a.date));
+ return `<div class="card"><div class="row"><div><h3>Diario de cardio</h3><span class="muted">Registra paseos, elíptica, bicicleta y otras actividades.</span></div><button class="primary" onclick="openModal('Nueva actividad',sportCardioForm())">+ Registrar actividad</button></div>${arr.map(x=>`<div class="sport-row"><div><b>${sportDate(x.date)} · ${esc(x.activity||'Actividad')}</b><span>${x.duration?x.duration+' min':''}${x.distance?' · '+x.distance+' km':''}${x.notes?' · '+esc(x.notes):''}</span></div><div class="sport-actions"><button class="text-button" onclick="editSportCardio('${x.id}')">Editar</button><button class="text-button" onclick="deleteSportSession('${x.id}')">Eliminar</button></div></div>`).join('')||'<p class="muted">Todavía no has registrado actividades.</p>'}</div>`;
+}
+function sportCardioForm(x=null){x=x||{};return `<div class="form"><div class="form-two"><label>Actividad<select id="scActivity">${['Andar','Elíptica','Bicicleta estática','Bicicleta al aire libre','Cinta de correr','Natación','Otra'].map(a=>`<option ${x.activity===a?'selected':''}>${a}</option>`).join('')}</select></label><label>Fecha<input id="scDate" type="date" value="${x.date||todayKey()}"></label></div><div class="form-two"><label>Duración (minutos)<input id="scDuration" type="number" min="0" value="${x.duration||''}" placeholder="Ej. 30"></label><label>Distancia (km)<input id="scDistance" type="number" min="0" step="0.1" value="${x.distance||''}" placeholder="Opcional"></label></div><label>Notas<textarea id="scNotes">${esc(x.notes||'')}</textarea></label><button class="primary" onclick="saveSportCardio('${x.id||''}')">Guardar actividad</button></div>`}
+function saveSportCardio(id){const date=document.querySelector('#scDate').value,activity=document.querySelector('#scActivity').value;if(!date){alert('Indica la fecha.');return}const x={id:id||crypto.randomUUID(),kind:'cardio',date,activity,duration:Number(document.querySelector('#scDuration').value)||0,distance:Number(document.querySelector('#scDistance').value)||0,notes:document.querySelector('#scNotes').value};if(id)state.sportSessions=state.sportSessions.map(a=>a.id===id?x:a);else state.sportSessions.push(x);save();closeModal();render()}
+function editSportCardio(id){const x=state.sportSessions.find(a=>a.id===id);if(x)openModal('Editar actividad',sportCardioForm(x))}
+
+function sportStepsView(){
+ const goal=Number(state.sportStepGoal)||8000,records=[...(state.sportSteps||[])].sort((a,b)=>b.date.localeCompare(a.date));
+ const todayRecord=records.find(x=>x.date===todayKey()),todaySteps=Number(todayRecord?.steps)||0;
+ const pct=Math.min(100,Math.round(todaySteps/goal*100));
+ const now=new Date(),monday=new Date(now);monday.setDate(now.getDate()-((now.getDay()+6)%7));monday.setHours(0,0,0,0);
+ const week=records.filter(x=>{const d=new Date(x.date+'T12:00:00');return d>=monday&&d<=now});
+ const weekTotal=week.reduce((a,x)=>a+Number(x.steps||0),0),weekAvg=week.length?Math.round(weekTotal/((now.getDay()+6)%7+1)):0;
+ const month=todayKey().slice(0,7),monthRecords=records.filter(x=>x.date.startsWith(month));
+ const bars=monthRecords.slice(0,14).reverse().map(x=>`<div class="sport-step-bar-row"><span>${sportDate(x.date)}</span><div class="sport-step-track"><i style="width:${Math.min(100,Math.round(Number(x.steps||0)/goal*100))}%"></i></div><b>${Number(x.steps||0).toLocaleString('es-ES')}</b></div>`).join('');
+ return `<div class="grid"><div class="card span-4"><span class="muted">Pasos de hoy</span><div class="metric">${todaySteps.toLocaleString('es-ES')}</div><span class="muted">Objetivo: ${goal.toLocaleString('es-ES')}</span><div class="sport-step-track sport-step-large"><i style="width:${pct}%"></i></div><b class="sport-step-pct">${pct}% del objetivo</b></div><div class="card span-4"><span class="muted">Media diaria esta semana</span><div class="metric">${weekAvg.toLocaleString('es-ES')}</div><span class="muted">${weekTotal.toLocaleString('es-ES')} pasos registrados</span></div><div class="card span-4"><span class="muted">Días registrados este mes</span><div class="metric">${monthRecords.length}</div><span class="muted">${monthRecords.reduce((a,x)=>a+Number(x.steps||0),0).toLocaleString('es-ES')} pasos en total</span></div></div>
+ <div class="card"><div class="row"><div><h3>Registrar pasos</h3><span class="muted">Puedes introducir el total del día manualmente.</span></div></div><div class="form sport-steps-form"><div class="form-two"><label>Fecha<input id="sportStepsDate" type="date" value="${todayKey()}"></label><label>Pasos del día<input id="sportStepsCount" type="number" min="0" step="1" placeholder="Ej. 8450" value="${todayRecord?todayRecord.steps:''}"></label></div><label>Objetivo diario<input id="sportStepsGoal" type="number" min="1" step="500" value="${goal}"></label><button class="primary" onclick="saveSportSteps()">Guardar pasos</button></div></div>
+ <div class="card"><h3>Actividad de este mes</h3>${bars||'<p class="muted">Todavía no has registrado pasos este mes.</p>'}</div>
+ <div class="card"><div class="row"><h3>Historial</h3><span class="muted">${records.length} días registrados</span></div>${records.slice(0,30).map(x=>`<div class="sport-row"><div><b>${sportDate(x.date)}</b><span>${Number(x.steps||0).toLocaleString('es-ES')} pasos ${Number(x.steps)>=goal?'· Objetivo alcanzado':''}</span></div><div class="sport-actions"><button class="text-button" onclick="editSportSteps('${x.date}')">Editar</button><button class="text-button" onclick="deleteSportSteps('${x.date}')">Eliminar</button></div></div>`).join('')||'<p class="muted">El historial aparecerá aquí.</p>'}</div>`;
+}
+function saveSportSteps(){
+ const date=document.querySelector('#sportStepsDate')?.value,count=Number(document.querySelector('#sportStepsCount')?.value),goal=Number(document.querySelector('#sportStepsGoal')?.value);
+ if(!date||!Number.isFinite(count)||count<0||!Number.isInteger(count)){alert('Introduce una fecha y un número de pasos válido.');return}
+ if(!Number.isFinite(goal)||goal<1){alert('El objetivo diario debe ser mayor que cero.');return}
+ const existing=(state.sportSteps||[]).find(x=>x.date===date);
+ if(existing)existing.steps=count;else state.sportSteps.push({id:crypto.randomUUID(),date,steps:count});
+ state.sportStepGoal=goal;save();render();
+}
+function editSportSteps(date){
+ const x=(state.sportSteps||[]).find(a=>a.date===date);if(!x)return;
+ sportTab='steps';render();
+ const d=document.querySelector('#sportStepsDate'),n=document.querySelector('#sportStepsCount');
+ if(d)d.value=x.date;if(n)n.value=x.steps;
+ document.querySelector('#sportStepsCount')?.focus();
+}
+function deleteSportSteps(date){
+ if(!confirm('¿Eliminar el registro de pasos de este día?'))return;
+ state.sportSteps=(state.sportSteps||[]).filter(x=>x.date!==date);save();render();
+}
+
+function sportProgress(){const month=todayKey().slice(0,7),sessions=(state.sportSessions||[]).filter(x=>x.kind!=='cardio'),classes=sportMonthItems(month).filter(x=>x.status==='attended');const names=[...new Set(sessions.flatMap(x=>(x.exercises||[]).map(e=>e.name)))];return `<div class="grid"><div class="card span-4"><span class="muted">Entrenos este mes</span><div class="metric">${sessions.filter(x=>x.date.startsWith(month)).length}</div></div><div class="card span-4"><span class="muted">Clases asistidas</span><div class="metric">${classes.length}</div></div><div class="card span-4"><span class="muted">Entrenos totales</span><div class="metric">${sessions.length}</div></div></div><div class="card"><h3>Progreso por ejercicio</h3>${names.map(n=>{const hist=sessions.flatMap(x=>(x.exercises||[]).filter(e=>e.name===n).flatMap(e=>(e.sets||[]).map(z=>({date:x.date,weight:+z.weight||0})))).filter(z=>z.weight).sort((a,b)=>a.date.localeCompare(b.date));return `<div class="sport-progress"><b>${esc(n)}</b><span class="muted">${hist.length?`Último registro: ${hist.at(-1).weight} kg · Máximo: ${Math.max(...hist.map(z=>z.weight))} kg`:'Sin pesos registrados'}</span></div>`}).join('')||'<p class="muted">Registra entrenamientos para ver tu evolución.</p>'}</div>`}
+function sportExerciseList(){return `<div class="card"><div class="row"><div><h3>Catálogo de ejercicios</h3><span class="muted">Puedes editar el nombre y las categorías o eliminar ejercicios que ya no utilices.</span></div><button class="primary" onclick="openModal('Añadir ejercicio',sportExerciseForm())">+ Añadir</button></div>${SPORT_EXERCISE_CATEGORIES.map(c=>`<details class="sport-exercise-group" ${c==='Pectoral'?'open':''}><summary><b>${c}</b><span>${sportExercisesForCategory(c).length} ejercicios</span></summary><div class="sport-exercise-chips">${sportExercisesForCategory(c).map(x=>`<span class="sport-catalog-item"><span>${esc(x.name)}</span><button class="text-button" onclick="openModal('Editar ejercicio',sportExerciseForm(state.sportExercises.find(a=>a.id==='${x.id}')))" aria-label="Editar ${esc(x.name)}">Editar</button><button class="text-button" onclick="deleteSportExercise('${x.id}')" aria-label="Eliminar ${esc(x.name)}">Eliminar</button></span>`).join('')||'<small class="muted">Sin ejercicios</small>'}</div></details>`).join('')}<details class="sport-exercise-group"><summary><b>Otros</b><span>${sportExercisesForCategory('Otros').length} ejercicios</span></summary><div class="sport-exercise-chips">${sportExercisesForCategory('Otros').map(x=>`<span class="sport-catalog-item"><span>${esc(x.name)}</span><button class="text-button" onclick="openModal('Editar ejercicio',sportExerciseForm(state.sportExercises.find(a=>a.id==='${x.id}')))" >Editar</button><button class="text-button" onclick="deleteSportExercise('${x.id}')">Eliminar</button></span>`).join('')||'<small class="muted">Sin ejercicios</small>'}</div></details></div>`}
+function sportExerciseForm(x=null){x=x||{};const cats=x.categories?.length?x.categories:[];return `<div class="form"><label>Nombre<input id="sportExName" value="${esc(x.name||'')}" placeholder="Nombre del ejercicio"></label><div><b>Tipos de ejercicio</b><div class="form-two">${SPORT_EXERCISE_CATEGORIES.map(c=>`<label class="check-label"><input type="checkbox" class="sport-ex-category" value="${c}" ${cats.includes(c)?'checked':''}> ${c}</label>`).join('')}</div></div><button class="primary" onclick="saveSportExercise('${x.id||''}')">Guardar</button></div>`}
+function saveSportExercise(id){const name=document.querySelector('#sportExName').value.trim(),categories=[...document.querySelectorAll('.sport-ex-category:checked')].map(el=>el.value);if(!name){alert('Escribe el nombre del ejercicio.');return}if(!categories.length){alert('Selecciona al menos un tipo.');return}let item=id?state.sportExercises.find(a=>a.id===id):state.sportExercises.find(a=>a.name.toLocaleLowerCase('es')===name.toLocaleLowerCase('es'));if(!item){item={id:crypto.randomUUID(),name,categories:[]};state.sportExercises.push(item)}const oldName=item.name;item.name=name;item.categories=categories;item.deleted=false;if(oldName!==name){(state.sportRoutines||[]).forEach(r=>(r.exercises||[]).forEach(e=>{if(e.name===oldName)e.name=name}));}save();closeModal();render()}
+function deleteSportExercise(id){const item=(state.sportExercises||[]).find(a=>a.id===id);if(!item)return;if(!confirm(`¿Eliminar «${item.name}» del catálogo? Se quitará de las rutinas, pero se conservarán los entrenamientos ya registrados.`))return;item.deleted=true;item.categories=[];(state.sportRoutines||[]).forEach(r=>{r.exercises=(r.exercises||[]).filter(e=>e.name!==item.name)});save();render()}
+
+function home(c){
+ const now=new Date(),dateLabel=now.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'});
+ const pending=state.tasks.filter(x=>!x.done).length;
+ const spent=state.transactions.filter(x=>x.type==='expense'&&sameMonth(x.date)).reduce((a,x)=>a+Number(x.amount||0),0);
+ const budget=state.budgets.reduce((a,x)=>a+Number(x.amount||0),0),remaining=budget?Math.max(0,budget-spent):null;
+ const doneHabits=state.habits.filter(h=>isHabitDone(h,todayKey())).length;
+ const routines=state.sportRoutines||[];
+ const agenda=[...eventsForDate(todayKey()).map(e=>({time:e.startTime||'',title:e.title,sub:e.category||'Evento',action:`editEvent('${e.id}')`,kind:'event'})),...(state.sportSessions||[]).filter(x=>x.date===todayKey()).map(x=>({time:'',title:'Gimnasio',sub:x.kind==='cardio'?(x.activity||'Cardio'):(x.name||'Entrenamiento'),action:"go('sport')",kind:'sport'}))].sort((a,b)=>a.time.localeCompare(b.time));
+ const weekdays=['Lun','Mar','Mié','Jue','Vie'];
+ const menuDays=state.menu?.days||[];
+ const menuPreview=weekdays.map((label,i)=>{const day=menuDays[i]||{};return `<div class="bd-menu-day"><b>${label}</b><em>Comida</em><span>${day.lunch?esc(day.lunch):'Sin planificar'}</span><em>Cena</em><span>${day.dinner?esc(day.dinner):'Sin planificar'}</span></div>`}).join('');
+ c.innerHTML=`<div class="bd-home">
+  <section class="bd-welcome"><div class="bd-brandline">Brain Dump</div><h2>Buenos días</h2><p>${cap(dateLabel)}</p></section>
+  <section class="bd-quick" aria-label="Accesos rápidos">
+   <button onclick="openModal('Nueva tarea',taskForm())"><span>＋</span>Añadir tarea</button>
+   <button onclick="openModal('Nuevo gasto',expenseForm())"><span>＋</span>Añadir gasto</button>
+   <button onclick="go('sport');sportTab='routines';render()"><span>↗</span>Entrenar</button>
+   <button onclick="go('food')"><span>＋</span>Planificar menú</button>
+  </section>
+  <section class="bd-overview">
+   <button class="bd-tile" onclick="go('tasks')"><div class="bd-tile-head">Tareas <span>↗</span></div><div class="bd-tile-value">${pending}</div><small>Pendientes</small></button>
+   <button class="bd-tile" onclick="go('sport')"><div class="bd-tile-head">Deporte <span>↗</span></div><div class="bd-tile-value">${routines.length?`${routines.length} rutinas`:'Sin rutinas'}</div><small>${state.sportSessions?.length||0} entrenamientos registrados</small></button>
+   <button class="bd-tile" onclick="go('expenses')"><div class="bd-tile-head">Gastos <span>↗</span></div><div class="bd-tile-value">${fmt(spent)}</div><small>Gastado este mes</small></button>
+   <button class="bd-tile" onclick="go('food')"><div class="bd-tile-head">Comidas <span>↗</span></div><div class="bd-tile-value">${state.menu?'Menú listo':'Sin menú'}</div><small>${state.recipes.length} recetas guardadas</small></button>
+   <button class="bd-tile" onclick="go('habits')"><div class="bd-tile-head">Hábitos <span>↗</span></div><div class="bd-tile-value">${doneHabits}/${state.habits.length}</div><small>Completados hoy</small></button>
+   <button class="bd-tile" onclick="go('calendar')"><div class="bd-tile-head">Calendario <span>↗</span></div><div class="bd-tile-value">${agenda.length}</div><small>Elementos de hoy</small></button>
+  </section>
+  ${routines.length?`<section class="bd-section"><div class="bd-section-head"><div><h3>Tu entrenamiento</h3><span class="muted">Elige una rutina para empezar.</span></div><button class="secondary small" onclick="go('sport');sportTab='routines';render()">Ver rutinas</button></div><div class="bd-routine-list">${routines.slice(0,3).map(r=>`<div class="bd-routine"><b>${esc(r.name)}</b><small>${(r.exercises||[]).length} ejercicios</small><button class="primary small" onclick="go('sport');sportTab='routines';render()">Abrir rutina</button></div>`).join('')}</div></section>`:`<section class="bd-section"><div class="bd-section-head"><div><h3>Tu entrenamiento</h3><span class="muted">Prepara tus rutinas de gimnasio.</span></div></div><button class="primary" onclick="go('sport');sportTab='routines';render()">Crear rutina</button></section>`}
+  <section class="bd-section"><div class="bd-section-head"><div><h3>Menú de la semana</h3><span class="muted">Tu planificación de comidas.</span></div><button class="secondary small" onclick="go('food')">Ver menú</button></div>${menuDays.length?`<div class="bd-menu-days">${menuPreview}</div>`:'<p class="muted">Todavía no tienes un menú semanal.</p><button class="secondary small" onclick="go(\'food\')">Planificar comidas</button>'}</section>
+  <section class="bd-section"><div class="bd-section-head"><div><h3>Tus hábitos de hoy</h3><span class="muted">${doneHabits} de ${state.habits.length} completados</span></div><button class="secondary small" onclick="go('habits')">Ver hábitos</button></div><div class="bd-habits">${state.habits.slice(0,8).map(h=>{const done=isHabitDone(h,todayKey());return `<button class="bd-habit ${done?'done':''}" onclick="toggleHabit('${h.id}','${todayKey()}')"><i>${done?'✓':''}</i><span>${esc(h.name)}</span></button>`}).join('')||'<span class="muted">Aún no tienes hábitos configurados.</span>'}</div>${state.habits.length>8?'<button class="text-button" onclick="go(\'habits\')">Ver todos →</button>':''}</section>
+  <section class="bd-section"><div class="bd-section-head"><div><h3>Hoy en tu agenda</h3><span class="muted">Eventos y entrenamientos de hoy.</span></div><button class="secondary small" onclick="go('calendar')">Ver calendario</button></div><div class="bd-agenda">${agenda.map(x=>`<div class="bd-agenda-row"><span class="bd-agenda-time">${x.time||'Hoy'}</span><div><b>${esc(x.title)}</b><br><small>${esc(x.sub)}</small></div>${x.kind==='event'?`<button class="secondary small" onclick="${x.action}">Ver</button>`:''}</div>`).join('')||'<span class="muted">No tienes nada programado para hoy.</span>'}</div></section>
+  <section class="bd-section"><div class="bd-section-head"><div><h3>Resumen del mes</h3><span class="muted">Control de gastos</span></div><button class="secondary small" onclick="go('expenses')">Ver gastos</button></div><div class="bd-budget"><div><span>Gastos</span><b>${fmt(spent)}</b></div><div><span>Presupuesto</span><b>${budget?fmt(budget):'—'}</b></div><div><span>Restante</span><b>${remaining===null?'—':fmt(remaining)}</b></div></div></section>
+ </div>`;
+}
+function homeTodayMeal(){
+ const menu=state.menu?.days;
+ if(!menu)return '<div class="home-food-empty">Todavía no tienes un menú semanal. <button class="text-button" onclick="go(\'food\')">Ir a Comidas →</button></div>';
+ const i=(today.getDay()+6)%7, day=menu[i];
+ if(!day)return '<div class="home-food-empty">Todavía no hay menú para hoy.</div>';
+ return `<div class="home-today-meal"><div class="eyebrow">Hoy</div><div><span>Comida</span>${day.lunch?menuRecipeTitle(day.lunch,'home-menu-recipe-title',day.lunchId):(state.menu?.outsideSlots?.[`${i}:lunch`]?'<strong class="home-menu-recipe-title home-menu-outside">🍴 Comer fuera</strong>':'<strong class="home-menu-recipe-title">Sin planificar</strong>')}</div><div><span>Cena</span>${day.dinner?menuRecipeTitle(day.dinner,'home-menu-recipe-title',day.dinnerId):(state.menu?.outsideSlots?.[`${i}:dinner`]?'<strong class="home-menu-recipe-title home-menu-outside">🍴 Comer fuera</strong>':'<strong class="home-menu-recipe-title">Sin planificar</strong>')}</div>${day.tupper?'<span class="pill home-tupper">Tupper</span>':''}</div>`;
+}
+function homeRecipes(){
+ const recipes=[...state.recipes].sort((a,b)=>(b.favorite?1:0)-(a.favorite?1:0)).slice(0,4);
+ if(!recipes.length)return '<div class="home-recipes-empty"><span>Aún no tienes recetas guardadas.</span><button class="text-button" onclick="go(\'food\')">Añadir una →</button></div>';
+ return `<div class="home-recipes"><div class="home-section-title"><b>Mis recetas</b><button class="text-button" onclick="go(\'food\')">Ver todas →</button></div>${recipes.map(r=>`<button class="home-recipe-row" onclick="viewRecipe(\'${r.id}\')"><span class="home-recipe-type">${esc(recipeTypeLabel(r))}</span><span class="home-recipe-name">${esc(r.name)}</span>${r.favorite?'<span class="favorite-mark">★</span>':''}</button>`).join('')}</div>`;
+}
+function homePreparations(){
+ const pending=menuPreparations().filter(x=>!state.prepDone[x.id]).slice(0,3);
+ if(!pending.length)return '<div class="home-prep-empty">Todo preparado. 🎉</div>';
+ return `<div class="home-prep-list">${pending.map(x=>`<div class="home-prep-row"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')" aria-label="Marcar preparación"></button><button class="home-prep-content" onclick="viewPreparation('${x.id}')"><span>${esc(x.name)}</span><small>${esc(x.quantity||'')} ${x.freezable?'· Congelable':''}</small></button></div>`).join('')}</div>${state.preparations.length>3?'<button class="text-button" onclick="go(\'food\')">Ver todas →</button>':''}`;
+}
+function homePendingTasks(){const list=state.tasks.filter(x=>!x.done).sort(taskSort).slice(0,3);if(!list.length)return '<div class="item muted">No hay tareas pendientes.</div>';return list.map(t=>`<button class="home-task" onclick="go('tasks')"><span>${esc(t.title)}</span>${isOverdue(t)?'<span class="overdue-label">Atrasada</span>':''}</button>`).join('')}
+function todayHabitsSummary(){const n=state.habits.length;if(!n)return 'Aún no tienes hábitos';const done=state.habits.filter(h=>isHabitDone(h,todayKey())).length;return `${done} de ${n} hábitos completados`}
+function habitButtons(){if(!state.habits.length)return `<div class="empty-state"><span>No hay hábitos todavía.</span><button class="secondary" onclick="openModal('Nuevo hábito',habitForm())">+ Añadir hábito</button></div>`;return state.habits.map(h=>habitButton(h,true)).join('')}
+function habitButton(h,home=false,dateKey=todayKey()){const done=isHabitDone(h,dateKey);return `<button class="habit-button ${done?'done':''}" style="--habit-color:${h.color||habitColors[0]}" onclick="toggleHabit('${h.id}','${dateKey}')" aria-label="${esc(h.name)} ${done?'completado':'pendiente'}"><span class="habit-check">${done?'✓':''}</span><span class="habit-name">${esc(h.name)}</span>${h.reminder?`<span class="habit-reminder">${h.reminderTime||''}</span>`:''}<span class="habit-frequency">${frequencyLabel(h)}</span></button>`}
+function habitDateLabel(key){const d=new Date(`${key}T12:00:00`);return d.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'});}
+function habitHistoryDays(){return Array.from({length:7},(_,i)=>dateKeyOffset(-i));}
+function habits(c){
+ const selected=habitSelectedDate||todayKey();
+ const done=state.habits.filter(h=>isHabitDone(h,selected)).length;
+ const total=state.habits.length;
+ const isToday=selected===todayKey();
+ const history=habitHistoryDays().map(k=>{const d=new Date(`${k}T12:00:00`);const label=k===todayKey()?'Hoy':d.toLocaleDateString('es-ES',{weekday:'short'}).replace('.','');const count=state.habits.filter(h=>isHabitDone(h,k)).length;return `<button type="button" class="habit-history-day ${k===selected?'selected':''}" onclick="selectHabitDate('${k}')"><b>${label}</b><span>${count}/${total||0}</span><small>${d.getDate()}</small></button>`}).join('');
+ c.innerHTML=`<div class="grid">
+ <div class="card span-12"><div class="row"><div><div class="eyebrow">${isToday?'Hoy':'Editar historial'}</div><h2>${done}/${total} hábitos completados</h2><span class="muted">${isToday?'Toca cada botón para marcarlo.':'Editando '+habitDateLabel(selected)+'. Puedes corregir un día anterior aunque se te olvidara registrarlo.'}</span></div><div class="actions"><button class="secondary small" onclick="selectHabitDate('${todayKey()}')">Ir a hoy</button><button class="primary" onclick="openModal('Nuevo hábito',habitForm())">+ Añadir hábito</button></div></div><div class="habit-history-picker"><label>Seleccionar día<input type="date" value="${selected}" max="${todayKey()}" onchange="selectHabitDate(this.value)"></label><div class="habit-history-days">${history}</div></div><div class="habit-grid">${total?state.habits.map(h=>habitButton(h,false,selected)).join(''):'<div class="empty-state"><span>Crea tu primer hábito.</span></div>'}</div></div>
+ <div class="card span-8"><div class="row"><div><h3>Mi progreso</h3><span class="muted">Resumen de los últimos 7 días.</span></div></div><div class="habit-progress-grid">${state.habits.map(h=>{const count=habitLastDaysCount(h,7);const pct=Math.round(count/7*100);return `<div class="habit-progress-row"><div class="habit-progress-head"><b>${esc(h.name)}</b><span>${count}/7</span></div><div class="progress"><i style="width:${pct}%;background:${h.color||habitColors[0]}"></i></div><span class="muted small-text">${habitStreak(h)} racha actual</span></div>`}).join('')||'<div class="muted">Cuando tengas hábitos aparecerá aquí su progreso.</div>'}</div></div>
+ <div class="card span-4"><h3>Recordatorios</h3><p class="muted">${notificationStatusText()}</p><button class="secondary" onclick="requestNotificationPermission()">Activar notificaciones</button></div>
+ <div class="card span-12"><h3>Mis hábitos</h3><div class="list">${state.habits.map(h=>`<div class="habit-row"><span class="color-dot" style="background:${h.color||habitColors[0]}"></span><div class="habit-row-main"><b>${esc(h.name)}</b><span class="muted">${frequencyLabel(h)}${h.reminder?' · Recordatorio '+(h.reminderTime||''):''}</span><span class="muted small-text">${habitStreak(h)} días seguidos · ${habitLastDaysCount(h,7)}/7 esta semana</span></div><button class="secondary small" onclick="editHabit('${h.id}')">Editar</button></div>`).join('')||'<div class="muted">Aquí aparecerán tus hábitos.</div>'}</div></div></div>`;
+}
+function selectHabitDate(key){const max=todayKey();if(!/^\d{4}-\d{2}-\d{2}$/.test(key)||key>max)return;habitSelectedDate=key;render()}
+function dateKeyOffset(days){const d=new Date();d.setHours(12,0,0,0);d.setDate(d.getDate()+days);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+function habitLastDaysCount(h,n=7){let count=0;for(let i=0;i<n;i++)if(isHabitDone(h,dateKeyOffset(-i)))count++;return count}
+function habitStreak(h){let streak=0;for(let i=0;i<365;i++){if(isHabitDone(h,dateKeyOffset(-i)))streak++;else break}return streak}
+function notificationStatusText(){if(!('Notification' in window))return 'Este navegador no permite notificaciones.';if(Notification.permission==='granted')return 'Notificaciones activadas. Los recordatorios se comprobarán cuando la app esté abierta.';if(Notification.permission==='denied')return 'Las notificaciones están bloqueadas en el navegador. Puedes reactivarlas desde los permisos del sitio.';return 'Activa los permisos para recibir recordatorios.'}
+async function requestNotificationPermission(){if(!('Notification' in window)){alert('Este navegador no permite notificaciones.');return}try{const permission=await Notification.requestPermission();state.settings.notifications=state.settings.notifications||{};state.settings.notifications.browserPermission=permission;save();render();if(permission==='granted')checkNotifications(true)}catch(e){alert('No se ha podido solicitar el permiso de notificaciones.')}}
+function notify(title,body,tag){if(!('Notification' in window)||Notification.permission!=='granted')return;if(navigator.serviceWorker?.controller){navigator.serviceWorker.controller.postMessage({type:'NOTIFY',title,body,tag});}else{try{new Notification(title,{body,tag})}catch(e){}}}
+function notificationOnce(id,title,body){state.settings.notificationLog=state.settings.notificationLog||{};const todayKeyValue=todayKey();if(state.settings.notificationLog[id]===todayKeyValue)return;state.settings.notificationLog[id]=todayKeyValue;save();notify(title,body,id)}
+function checkNotifications(force=false){const now=new Date();const n=state.settings.notifications||{};if(!('Notification' in window)||Notification.permission!=='granted')return;
+ if(n.tasks!==false){state.tasks.filter(t=>!t.done&&t.date).forEach(t=>{const when=new Date(`${t.date}T${t.reminderTime||'09:00'}`);if(t.reminder==='1h')when.setHours(when.getHours()-1);else if(t.reminder==='1d')when.setDate(when.getDate()-1);if(when<=now&&now-when<70*60*1000)notificationOnce('task-'+t.id,'Tarea: '+t.title,'Tienes una tarea pendiente.')});}
+ if(n.calendar!==false){state.events.filter(e=>(e.startDate||e.date)&&e.reminder).forEach(e=>{const when=new Date(`${e.startDate||e.date}T${e.startTime||'09:00'}`);when.setMinutes(when.getMinutes()-Number(e.reminderLead||0));if(when<=now&&now-when<70*60*1000)notificationOnce('event-'+e.id,'Calendario: '+e.title,'Tienes un evento programado.')});}
+ if(n.food!==false){state.inventory.filter(x=>x.expiry).forEach(x=>{const exp=new Date(`${x.expiry}T12:00`);const diff=(exp-now)/(86400000);if(diff>=0&&diff<=1)notificationOnce('food-exp-'+x.id,'Comidas: '+(x.name||'Producto'),'Caduca hoy o mañana.')});}
+ state.habits.filter(h=>h.reminder&&h.reminderTime&&!isHabitDone(h,todayKey())).forEach(h=>{const [hh,mm]=h.reminderTime.split(':').map(Number);const when=new Date();when.setHours(hh,mm,0,0);if(when<=now&&now-when<70*60*1000)notificationOnce('habit-'+h.id,'Hábito: '+h.name,'Es hora de hacerlo.')});
+}
+function frequencyLabel(h){if(h.frequency==='daily')return 'Todos los días';return `${h.daysPerWeek||5} días/semana`}
+function isHabitDone(h,key){return Array.isArray(h.completed)&&h.completed.includes(key)}
+async function toggleHabit(id,dateKey=todayKey()){const h=state.habits.find(x=>x.id===id);if(!h)return;const k=dateKey||todayKey();if(k>todayKey())return;h.completed=Array.isArray(h.completed)?h.completed:[];const i=h.completed.indexOf(k);if(i>=0)h.completed.splice(i,1);else h.completed.push(k);localCacheFromState();render();if(supabaseClient&&currentUser){await syncCloudField('habits',state.habits)}}
+function habitForm(h=null){const color=h?.color||habitColors[0];return `<div class="form"><label>Nombre del hábito<input id="fHabitName" value="${esc(h?.name||'')}" placeholder="Ej. Beber agua"></label><label>Frecuencia<select id="fHabitFreq"><option value="daily" ${h?.frequency==='daily'?'selected':''}>Todos los días</option><option value="weekly" ${h?.frequency!=='daily'?'selected':''}>Días por semana</option></select></label><label id="daysLabel">¿Cuántos días a la semana?<select id="fHabitDays">${[1,2,3,4,5,6].map(n=>`<option value="${n}" ${Number(h?.daysPerWeek||5)===n?'selected':''}>${n} días</option>`).join('')}</select></label><label class="checkline"><input id="fHabitReminder" type="checkbox" ${h?.reminder?'checked':''}> Quiero un recordatorio</label><label id="timeLabel">Hora del recordatorio<input id="fHabitTime" type="time" value="${h?.reminderTime||'09:00'}"></label><div><div class="field-title">Color del botón</div><div class="color-picker">${habitColors.map(col=>`<button type="button" class="color-choice ${color===col?'selected':''}" style="background:${col}" onclick="selectHabitColor('${col}')" data-color="${col}" aria-label="Color"></button>`).join('')}</div><input type="hidden" id="fHabitColor" value="${color}"></div><button class="primary" onclick="saveHabit('${h?.id||''}')">Guardar hábito</button>${h?`<button class="danger-button" onclick="deleteHabit('${h.id}')">Eliminar hábito</button>`:''}</div>`}
+function selectHabitColor(col){document.querySelector('#fHabitColor').value=col;document.querySelectorAll('.color-choice').forEach(b=>b.classList.toggle('selected',b.dataset.color===col))}
+async function saveHabit(id){const name=document.querySelector('#fHabitName').value.trim();if(!name)return;const existing=id&&state.habits.find(x=>x.id===id);const h=existing||{id:crypto.randomUUID(),completed:[]};h.name=name;h.frequency=document.querySelector('#fHabitFreq').value;h.daysPerWeek=h.frequency==='daily'?7:Number(document.querySelector('#fHabitDays').value);h.reminder=document.querySelector('#fHabitReminder').checked;h.reminderTime=h.reminder?document.querySelector('#fHabitTime').value:'';h.color=document.querySelector('#fHabitColor').value;if(!existing)state.habits.push(h);localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncCloudField('habits',state.habits)}}
+function editHabit(id){const h=state.habits.find(x=>x.id===id);if(h)openModal('Editar hábito',habitForm(h))}
+async function deleteHabit(id){state.habits=state.habits.filter(x=>x.id!==id);localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncCloudField('habits',state.habits)}}
+function renderHomeCalendar(el){
+ const base=calendarMonthDate();const y=base.getFullYear(),m=base.getMonth();
+ const monthLabel=base.toLocaleDateString('es-ES',{month:'long',year:'numeric'});
+ const first=(new Date(y,m,1).getDay()+6)%7,days=new Date(y,m+1,0).getDate();
+ const monthEvents=monthEventsFor(y,m);
+ let grid=['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('');
+ for(let i=0;i<first;i++)grid+='<div class="day empty-day"></div>';
+ for(let d=1;d<=days;d++){
+   const date=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+   const evs=eventsForDate(date);
+   const bars=evs.slice(0,4).map(e=>calendarBar(e,date,monthEvents)).join('');
+   grid+=`<button class="day calendar-day ${date===todayKey()?'today':''} ${evs.length?'has-events':''}" onclick="openNewEventForDate('${date}')"><b>${d}</b><div class="calendar-event-lanes">${bars}</div></button>`;
+ }
+ el.innerHTML=`<div class="home-calendar-header"><div><h2>${cap(monthLabel)}</h2><span class="muted">Planifica eventos, cumpleaños y recordatorios.</span></div><div class="calendar-actions"><button class="secondary month-arrow" onclick="changeCalendarMonth(-1)" aria-label="Mes anterior">‹</button><button class="secondary" onclick="goCalendarToday()">Hoy</button><button class="secondary month-arrow" onclick="changeCalendarMonth(1)" aria-label="Mes siguiente">›</button><button class="primary" onclick="openModal('Nuevo evento',eventForm())">+ Evento</button></div></div><section class="calendar-card home-calendar-inner"><div class="calendar-grid">${grid}</div></section>`;
+}
+
+const taskCategories={
+  Casas:["Mi casa","Casa mamá","Casa Suances","Casa pueblo","Casa Ara"],
+  Coches:["Mercedes","Peugeot"],
+  Personal:["Personal"]
+};
+const taskCategoryLabels=["Casas","Coches","Personal"];
+
+function normalizeTask(t){
+  if(!Array.isArray(t.categories)){
+    t.categories=t.category?[t.category]:[];
+  }
+  t.subtasks=Array.isArray(t.subtasks)?t.subtasks:[];
+  t.attachments=Array.isArray(t.attachments)?t.attachments:[];
+  t.priority=t.priority||"Normal";
+  t.status=t.done?"done":"pending";
+  return t;
+}
+state.tasks=state.tasks.map(normalizeTask);
+
+function isOverdue(t){
+  if(t.done || !t.date)return false;
+  const end=new Date(t.date+"T"+(t.time||"23:59"));
+  return end < new Date();
+}
+function taskSort(a,b){
+  const rank=t=>t.done?4:(isOverdue(t)?0:(t.date===todayKey()?1:(t.date?2:3)));
+  return rank(a)-rank(b) || ((a.date||"9999")+(a.time||"")).localeCompare((b.date||"9999")+(b.time||""));
+}
+function taskCategoryPills(t){
+  return (t.categories||[]).map(x=>`<span class="pill task-cat">${esc(x)}</span>`).join("");
+}
+function taskProgress(t){
+  const total=t.subtasks?.length||0;
+  if(!total)return "";
+  const done=t.subtasks.filter(s=>s.done).length;
+  return `<div class="subprogress"><span>${done}/${total} subtareas</span><div><i style="width:${done/total*100}%"></i></div></div>`;
+}
+function tasks(c){
+  const all=state.tasks.map(normalizeTask);
+  const pending=all.filter(t=>!t.done).sort(taskSort);
+  const overdue=pending.filter(isOverdue).length;
+  const todayCount=pending.filter(t=>t.date===todayKey()&&!isOverdue(t)).length;
+  c.innerHTML=`<div class="grid">
+    <div class="card span-12">
+      <div class="row task-toolbar">
+        <div><h3>Mis tareas</h3><span class="muted">${pending.length} pendientes${overdue?` · ${overdue} atrasadas`:''}</span></div>
+        <button class="primary" onclick="openModal('Nueva tarea',taskForm())">+ Nueva tarea</button>
+      </div>
+      <div class="task-filters">
+        <button class="filter active" onclick="filterTasks('all',this)">Todas <span>${pending.length}</span></button>
+        <button class="filter" onclick="filterTasks('today',this)">Hoy <span>${todayCount}</span></button>
+        <button class="filter" onclick="filterTasks('upcoming',this)">Próximas</button>
+        <button class="filter" onclick="filterTasks('overdue',this)">Atrasadas <span>${overdue}</span></button>
+        <button class="filter" onclick="filterTasks('nodate',this)">Sin fecha</button>
+      </div>
+      <div id="taskList" class="list task-list">${pending.length?pending.map(taskCard).join(""):'<div class="empty-state"><span>No tienes tareas pendientes.</span><button class="secondary" onclick="newTaskFromEmpty()">+ Añadir tarea</button></div>'}</div>
+      <details class="completed-tasks"><summary>Tareas completadas (${all.filter(t=>t.done).length})</summary><div class="list">${all.filter(t=>t.done).sort((a,b)=>(b.completedAt||"").localeCompare(a.completedAt||"")).slice(0,20).map(t=>`<div class="completed-task-row"><span class="completed-mark">✓</span><span>${esc(t.title)}</span><button class="secondary small" onclick="restoreTask('${t.id}')">Reabrir</button></div>`).join("")||'<div class="muted">Todavía no hay tareas completadas.</div>'}</div></details>
+    </div>
+    <div class="card span-12">
+      <div class="row"><div><h3>Categorías</h3><span class="muted">Una tarea puede pertenecer a varias.</span></div></div>
+      <div class="task-category-groups">${taskCategoryLabels.map(g=>`<div><b>${g}</b><div class="actions">${taskCategories[g].map(x=>`<span class="pill">${x}</span>`).join("")}</div></div>`).join("")}</div>
+    </div>
+  </div>`;
+}
+function taskCard(t){
+  const date=t.date?new Date(t.date+"T12:00").toLocaleDateString("es-ES",{day:"numeric",month:"short"}):"Sin fecha";
+  const meta=[date,t.time||"",t.priority||"Normal"].filter(Boolean).join(" · ");
+  const subs=(t.subtasks||[]).filter(s=>s.title);
+  return `<div class="item task-card ${isOverdue(t)?"overdue":""}">
+    <div class="task-main">
+      <label class="task-check" title="Marcar como completada"><input type="checkbox" onchange="completeTask('${t.id}')"><span></span></label>
+      <div class="task-body">
+        <button class="task-title" onclick="editTask('${t.id}')">${esc(t.title)}</button>
+        <div class="task-meta">${taskCategoryPills(t)}<span>${esc(meta)}</span>${t.reminder?`<span class="reminder-tag">Recordatorio${t.reminderTime?" · "+t.reminderTime:""}</span>`:""}${t.repeat?`<span class="repeat-tag">↻ ${esc(t.repeat.label||"Repite")}</span>`:""}</div>
+        ${t.notes?`<div class="muted task-notes">${esc(t.notes)}</div>`:""}
+        ${subs.length?`<div class="subtask-list">${subs.map(s=>`<label class="subtask-row"><input type="checkbox" ${s.done?'checked':''} onchange="toggleSubtask('${t.id}','${s.id}')"><span class="subtask-box"></span><span class="subtask-title ${s.done?'completed':''}">${esc(s.title)}</span></label>`).join("")}</div>`:""}
+        ${taskProgress(t)}
+        ${t.attachments?.length?`<div class="attachment-count">📎 ${t.attachments.length} ${t.attachments.length===1?"archivo":"archivos"}</div>`:""}
+      </div>
+      <button class="icon-button" onclick="editTask('${t.id}')" aria-label="Editar">⋯</button>
+    </div>
+  </div>`;
+}
+function filterTasks(kind,btn){
+  document.querySelectorAll(".task-filters .filter").forEach(x=>x.classList.remove("active"));
+  if(btn)btn.classList.add("active");
+  let list=state.tasks.map(normalizeTask).filter(t=>!t.done);
+  if(kind==="today")list=list.filter(t=>t.date===todayKey()&&!isOverdue(t));
+  if(kind==="upcoming")list=list.filter(t=>t.date&&t.date>todayKey());
+  if(kind==="overdue")list=list.filter(isOverdue);
+  if(kind==="nodate")list=list.filter(t=>!t.date);
+  list.sort(taskSort);
+  document.querySelector("#taskList").innerHTML=list.length?list.map(taskCard).join(""):'<div class="empty-state"><span>No hay tareas en este filtro.</span></div>';
+}
+function taskCategoryOptions(selected=[]){
+  return taskCategoryLabels.map(g=>`<div class="category-group"><div class="muted category-group-title">${g}</div>${taskCategories[g].map(x=>`<label class="checkline category-option"><input type="checkbox" class="task-category" value="${esc(x)}" ${selected.includes(x)?"checked":""}> ${esc(x)}</label>`).join("")}</div>`).join("");
+}
+function taskSubtasksHtml(items=[]){
+  return `<div id="subtaskEditor" class="subtask-editor">${items.map((s,i)=>`<div class="subtask-input"><input data-subtask-index="${i}" value="${esc(s.title||"")}"><button type="button" onclick="this.parentElement.remove()">×</button></div>`).join("")}</div>
+  <button type="button" class="secondary small" onclick="addSubtaskInput()">+ Añadir subtarea</button>`;
+}
+function addSubtaskInput(){
+  const box=document.querySelector("#subtaskEditor");
+  const i=box.children.length;
+  const row=document.createElement("div");
+  row.className="subtask-input";
+  row.innerHTML=`<input data-subtask-index="${i}" placeholder="Nueva subtarea"><button type="button" onclick="this.parentElement.remove()">×</button>`;
+  box.appendChild(row);
+}
+function taskForm(t=null){
+  const selected=t?.categories||[];
+  const repeat=t?.repeat?.type||"none";
+  return `<div class="form task-form">
+    <label>Título<input id="fTaskTitle" required value="${esc(t?.title||"")}" placeholder="Ej. Llevar el coche al taller"></label>
+    <div class="form-two">
+      <label>Fecha<input id="fTaskDate" type="date" value="${t?.date||""}"></label>
+      <label>Hora<input id="fTaskTime" type="time" value="${t?.time||""}"></label>
+    </div>
+    <label>Prioridad<select id="fTaskPriority">${["Normal","Importante","Urgente"].map(x=>`<option ${t?.priority===x?"selected":""}>${x}</option>`).join("")}</select></label>
+    <div><div class="field-title">Categorías</div><div class="category-picker">${taskCategoryOptions(selected)}</div></div>
+    <div><div class="field-title">Subtareas</div>${taskSubtasksHtml(t?.subtasks||[])}</div>
+    <label>Recordatorio<select id="fTaskReminder"><option value="">Sin recordatorio</option><option value="at_time" ${t?.reminder==="at_time"?"selected":""}>A la hora de la tarea</option><option value="1h" ${t?.reminder==="1h"?"selected":""}>1 hora antes</option><option value="1d" ${t?.reminder==="1d"?"selected":""}>1 día antes</option></select></label>
+    <div class="form-two">
+      <label>Repetir<select id="fTaskRepeat">${[
+        ["none","No repetir"],["daily","Cada día"],["weekly","Cada semana"],["monthly","Cada mes"],["yearly","Cada año"],["custom","Cada X días"]
+      ].map(x=>`<option value="${x[0]}" ${repeat===x[0]?"selected":""}>${x[1]}</option>`).join("")}</select></label>
+      <label id="customRepeatLabel" class="${repeat==="custom"?"":"hidden"}">Cada cuántos días<input id="fTaskRepeatDays" type="number" min="1" value="${t?.repeat?.days||2}"></label>
+    </div>
+    <label>Notas<textarea id="fTaskNotes" placeholder="Detalles, instrucciones...">${esc(t?.notes||"")}</textarea></label>
+    <label>Fotos / archivos<input id="fTaskFiles" type="file" accept="image/*" multiple></label>
+    ${t?.attachments?.length?`<div class="attachment-preview">${t.attachments.map((a,i)=>`<div>📎 ${esc(a.name||"Foto")} <button type="button" onclick="removeTaskAttachment('${t.id}',${i})">×</button></div>`).join("")}</div>`:""}
+    <button class="primary" onclick="saveTask('${t?.id||""}')">Guardar tarea</button>
+    ${t?`<button class="danger-button" onclick="deleteTask('${t.id}')">Eliminar tarea</button>`:""}
+  </div>`;
+}
+async function saveTask(id){
+  const title=document.querySelector("#fTaskTitle").value.trim();
+  if(!title)return;
+  const existing=id&&state.tasks.find(x=>x.id===id);
+  const t=existing||{id:crypto.randomUUID(),done:false,created:new Date().toISOString(),subtasks:[],attachments:[]};
+  t.title=title;
+  t.date=document.querySelector("#fTaskDate").value;
+  t.time=document.querySelector("#fTaskTime").value;
+  t.priority=document.querySelector("#fTaskPriority").value;
+  t.categories=[...document.querySelectorAll(".task-category:checked")].map(x=>x.value);t.category=t.categories[0]||'';
+  t.notes=document.querySelector("#fTaskNotes").value.trim();
+  t.reminder=document.querySelector("#fTaskReminder").value;
+  const rt=document.querySelector("#fTaskRepeat").value;
+  t.repeat=rt==="none"?null:{type:rt,label:rt==="custom"?`Cada ${document.querySelector("#fTaskRepeatDays").value} días`:({daily:"Cada día",weekly:"Cada semana",monthly:"Cada mes",yearly:"Cada año"}[rt]||"Repite"),days:rt==="custom"?Number(document.querySelector("#fTaskRepeatDays").value):null};
+  const subInputs=[...document.querySelectorAll("#subtaskEditor input")];
+  const old=t.subtasks||[];
+  t.subtasks=subInputs.map((el,i)=>({id:old[i]?.id||crypto.randomUUID(),title:el.value.trim(),done:old[i]?.done||false})).filter(x=>x.title);
+  const files=[...document.querySelector("#fTaskFiles").files];
+  if(files.length){
+    const added=await Promise.all(files.map(fileToData));
+    t.attachments=[...(t.attachments||[]),...added];
+  }
+  t.status=t.done?"done":"pending";
+  if(!existing)state.tasks.push(t);
+  save();closeModal();render();
+}
+function fileToData(file){
+  return new Promise(resolve=>{const r=new FileReader();r.onload=()=>resolve({name:file.name,type:file.type,data:r.result});r.readAsDataURL(file);});
+}
+function editTask(id){const t=state.tasks.find(x=>x.id===id);if(t)openModal("Editar tarea",taskForm(t));}
+function removeTaskAttachment(id,index){const t=state.tasks.find(x=>x.id===id);if(!t)return;t.attachments.splice(index,1);save();openModal("Editar tarea",taskForm(t));}
+function toggleSubtask(taskId,subtaskId){
+  const t=state.tasks.find(x=>x.id===taskId);if(!t)return;
+  const sub=(t.subtasks||[]).find(x=>x.id===subtaskId);if(!sub)return;
+  sub.done=!sub.done;
+  save();render();
+}
+function deleteTask(id){state.tasks=state.tasks.filter(x=>x.id!==id);save();closeModal();render();}
+function restoreTask(id){const t=state.tasks.find(x=>x.id===id);if(!t)return;t.done=false;t.status='pending';t.completedAt=null;save();render()}
+function nextTaskDate(date,type,days){
+  const d=new Date(date+"T12:00");
+  if(type==="daily")d.setDate(d.getDate()+1);
+  if(type==="weekly")d.setDate(d.getDate()+7);
+  if(type==="monthly")d.setMonth(d.getMonth()+1);
+  if(type==="yearly")d.setFullYear(d.getFullYear()+1);
+  if(type==="custom")d.setDate(d.getDate()+days);
+  return d.toISOString().slice(0,10);
+}
+function completeTask(id){
+  const t=state.tasks.find(x=>x.id===id);if(!t)return;
+  t.done=true;t.status="done";t.completedAt=new Date().toISOString();
+  if(t.repeat&&t.date){
+    const next={...t,id:crypto.randomUUID(),date:nextTaskDate(t.date,t.repeat.type,t.repeat.days),done:false,status:"pending",completedAt:null,created:new Date().toISOString(),subtasks:(t.subtasks||[]).map(s=>({...s,id:crypto.randomUUID(),done:false})),attachments:[]};
+    state.tasks.push(next);
+  }
+  save();render();
+}
+
+function newTaskFromEmpty(){openModal('Nueva tarea',taskForm())}
+let expenseCategories=JSON.parse(localStorage.getItem(KEY+'expenseCategories')||'null')||{"Gastos fijos":["Alquiler","Seguro"],"Suministros":["Agua","Luz","Aerotermia","Móvil","Internet"],"Suscripciones":["Spotify","Podomo","ACNUR"],"Otros gastos":["Comida","Paga","Transporte","Otros gastos"],"Ingresos":["Nómina","Otros ingresos"]};
+// Compatibilidad con la categoría original de la V7.
+if(expenseCategories.Suscripciones?.includes('Podomo') && !expenseCategories.Suscripciones.includes('Podimo')){expenseCategories.Suscripciones=expenseCategories.Suscripciones.map(x=>x==='Podomo'?'Podimo':x);localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));}
+const defaultAccounts=["Cuenta de gastos","Cuenta nómina","Cuenta ahorro","Revolut"];
+if(!Array.isArray(state.accounts))state.accounts=defaultAccounts.map(name=>({id:crypto.randomUUID(),name,startingBalance:0,active:true}));
+if(!Array.isArray(state.transactions))state.transactions=[];
+normalizeExpenseReferences();
+if(!Array.isArray(state.budgets))state.budgets=[];
+if(!state.settings || typeof state.settings!=='object')state.settings={};
+state.settings.notifications=state.settings.notifications||{tasks:true,calendar:true,expenses:true,food:true};
+state.settings.notifications.notificationLog=state.settings.notifications.notificationLog||{};
+state.settings.food=state.settings.food||{cookingDays:4,weekdayMinutes:30,useInventory:true,quickMeals:true,vegetables:true,twoTuppers:true,fridayFun:true,snacks:true,sweet:false,bread:false,breakfast:'Café con leche + tostada con aceite y tomate'};
+state.recipes.forEach(r=>{if(typeof r.ingredients==='string'){r.ingredientsText=r.ingredients;r.ingredients=parseIngredients(r.ingredients)}});
+
+// Migración de gastos de versiones anteriores: conserva los datos y los integra en Movimientos.
+(function migrateLegacyExpenses(){
+ if(!Array.isArray(state.expenses)||!state.expenses.length)return;
+ const accountByName=Object.fromEntries(state.accounts.map(a=>[a.name,a.id]));
+ let changed=false;
+ state.expenses.forEach(old=>{
+   const exists=state.transactions.some(t=>t.legacyId===old.id);
+   if(exists)return;
+   state.transactions.push({id:crypto.randomUUID(),legacyId:old.id,type:'expense',amount:Number(old.amount)||0,category:old.category||'Otros gastos',concept:old.concept||'',date:(old.date||todayKey()).slice(0,10),account:accountByName[old.account]||state.accounts[0].id,notes:old.notes||'',ticket:old.ticket||''});
+   changed=true;
+ });
+ if(changed)save();
+})();
+
+function ensureRecurringTransactions(){
+ const key=state.expenseMonth||monthKey();
+ let changed=false;
+ const templates=state.transactions.filter(t=>t.recurring && !t.recurringFrom);
+ templates.forEach(t=>{
+   if(!t.recurringMonths||!Array.isArray(t.recurringMonths))t.recurringMonths=[];
+   const templateMonth=monthKey(new Date((t.date||todayKey())+'T12:00'));
+   // Nunca generar una recurrencia antes de la fecha en la que se creó/inició.
+   if(key<templateMonth)return;
+   if(templateMonth===key){if(!t.recurringMonths.includes(key))t.recurringMonths.push(key);return;}
+   if(t.recurringMonths.includes(key))return;
+   const day=Math.min(Number(t.recurringDay||String(t.date||todayKey()).slice(8,10))||1,new Date(Number(key.slice(0,4)),Number(key.slice(5,7)),0).getDate());
+   const copy={...t,id:crypto.randomUUID(),date:`${key}-${String(day).padStart(2,'0')}`,recurring:false,recurringFrom:t.id,recurringMonths:undefined};
+   delete copy.recurringMonths;
+   state.transactions.push(copy);
+   t.recurringMonths.push(key);
+   changed=true;
+ });
+ if(changed)save();
+}
+function resolveAccountRef(ref){
+ const accounts=state.accounts||[];
+ if(ref==null)return null;
+ const raw=String(ref);
+ let a=accounts.find(x=>String(x.id)===raw);
+ if(a)return a.id;
+ a=accounts.find(x=>String(x.name).trim().toLowerCase()===raw.trim().toLowerCase());
+ return a?a.id:null;
+}
+function normalizeExpenseReferences(){
+ let changed=false;
+ const seen=new Set();
+ state.transactions.forEach(t=>{
+   if(!t.id){t.id=crypto.randomUUID();changed=true}
+   if(seen.has(t.id)){t.id=crypto.randomUUID();changed=true}
+   seen.add(t.id);
+   if(t.type==='transfer'){
+     const from=t.from??t.fromAccount??t.sourceAccount??t.origin??t.source;
+     const to=t.to??t.toAccount??t.destinationAccount??t.destination??t.target;
+     const rf=resolveAccountRef(from), rt=resolveAccountRef(to);
+     if(rf && t.from!==rf){t.from=rf;changed=true}
+     if(rt && t.to!==rt){t.to=rt;changed=true}
+     const amount=Number(t.amount);
+     if(Number.isFinite(amount) && amount<0){t.amount=Math.abs(amount);changed=true}
+   }else if(t.account){
+     const ra=resolveAccountRef(t.account);
+     if(ra && t.account!==ra){t.account=ra;changed=true}
+   }
+ });
+ if(changed)save();
+}
+function expenseReconciliation(){
+ const accounts=state.accounts||[], ids=new Set(accounts.map(a=>a.id)), tx=state.transactions||[];
+ let income=0,expense=0,transferIn=0,transferOut=0,invalid=0,invalidTransfer=0,nonPositive=0;
+ const issues=[];
+ const seen=new Set();
+ tx.forEach(t=>{
+   const amount=Number(t.amount);
+   if(!Number.isFinite(amount)||amount<=0){nonPositive++;issues.push({t,reason:'Importe no válido o igual a 0'});return}
+   if(seen.has(t.id)){issues.push({t,reason:'ID duplicado'});}else seen.add(t.id);
+   if(t.type==='transfer'){
+     if(!ids.has(t.from)||!ids.has(t.to)||t.from===t.to){invalidTransfer++;issues.push({t,reason:'Transferencia con cuenta de origen/destino no válida'});return}
+     transferOut+=amount;transferIn+=amount;
+   }else if(t.type==='income'){
+     if(!ids.has(t.account)){invalid++;issues.push({t,reason:'Ingreso asociado a una cuenta que no existe'});return}
+     income+=amount;
+   }else if(t.type==='expense'){
+     if(!ids.has(t.account)){invalid++;issues.push({t,reason:'Gasto asociado a una cuenta que no existe'});return}
+     expense+=amount;
+   }
+ });
+ const starting=accounts.reduce((s,a)=>s+Number(a.startingBalance||0),0);
+ const totalBalances=accounts.reduce((s,a)=>s+accountBalance(a),0);
+ const expected=starting+income-expense+transferIn-transferOut;
+ const difference=totalBalances-expected;
+ return {starting,income,expense,transferIn,transferOut,totalBalances,expected,difference,invalid,invalidTransfer,nonPositive,issues,ok:Math.abs(difference)<0.005&&invalid===0&&invalidTransfer===0&&nonPositive===0};
+}
+function reconciliationForm(){
+ const r=expenseReconciliation();
+ const status=r.ok?'<div class="reconcile-ok"><b>✓ Las cuentas cuadran</b><span>Los saldos actuales son coherentes con los saldos iniciales y todos los movimientos registrados.</span></div>':'<div class="reconcile-warn"><b>⚠ Hay algo que revisar</b><span>La diferencia calculada es '+money(r.difference)+' o hay movimientos con referencias inválidas.</span></div>';
+ const issues=r.issues.slice(0,20).map(x=>`<div class="reconcile-issue"><b>${esc(x.t.concept||x.t.category||x.t.type||'Movimiento')}</b><span>${esc(x.reason)} · ${money(x.t.amount||0)} · ${esc(x.t.date||'Sin fecha')}</span></div>`).join('');
+ return `<div class="form reconciliation-form">${status}<div class="reconcile-grid"><div><span>Saldo inicial total</span><b>${money(r.starting)}</b></div><div><span>Ingresos</span><b>${money(r.income)}</b></div><div><span>Gastos</span><b>${money(r.expense)}</b></div><div><span>Transferencias salientes</span><b>${money(r.transferOut)}</b></div><div><span>Transferencias entrantes</span><b>${money(r.transferIn)}</b></div><div><span>Saldos actuales</span><b>${money(r.totalBalances)}</b></div></div><p class="muted">El saldo inicial debe ser el saldo de la cuenta justo antes del primer movimiento que tienes registrado. Si introdujiste el saldo actual como “saldo inicial”, los movimientos históricos se volverán a sumar/restar y el saldo no cuadrará.</p>${issues?`<div class="reconcile-issues"><h4>Movimientos que revisar</h4>${issues}</div>`:''}<button class="secondary" onclick="closeModal();openModal('Configurar cuentas',accountsForm())">Revisar saldos iniciales</button></div>`;
+}
+function monthKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`}
+function weekKey(d=new Date()){const x=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));const day=x.getUTCDay()||7;x.setUTCDate(x.getUTCDate()+4-day);const y=x.getUTCFullYear();const yearStart=new Date(Date.UTC(y,0,1));const w=Math.ceil((((x-yearStart)/86400000)+1)/7);return `${y}-W${String(w).padStart(2,'0')}`}
+function money(n){return new Intl.NumberFormat('es-ES',{style:'currency',currency:(state.settings?.currency||'EUR')}).format(Number(n)||0)}
+function accountOptions(sel){return state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${a.id===sel?'selected':''}>${esc(a.name)}</option>`).join('')}
+function accountBalance(a){return Number(a.startingBalance||0)+state.transactions.reduce((s,t)=>{if(t.type==='transfer'){if(t.from===a.id)s-=+t.amount;if(t.to===a.id)s+=+t.amount}else if(t.account===a.id)s+=(t.type==='income'?1:-1)*(+t.amount);return s},0)}
+let expenseAccountFilter='all';
+function setExpenseAccountFilter(accountId){
+ expenseAccountFilter=accountId||'all';
+ render();
+}
+function expenses(c){
+ ensureRecurringTransactions();
+ ensureRecurringPocketContributions();
+ const key=state.expenseMonth||monthKey();
+ const allMonthTx=state.transactions.filter(t=>(t.date||'').startsWith(key));
+ const accountFilter=expenseAccountFilter;
+ const tx=allMonthTx.filter(t=>accountFilter==='all' ? true : (t.type==='transfer' ? (t.from===accountFilter||t.to===accountFilter) : t.account===accountFilter));
+ const income=tx.filter(t=>t.type==='income').reduce((s,t)=>s+ +t.amount,0), spent=tx.filter(t=>t.type==='expense').reduce((s,t)=>s+ +t.amount,0);
+ const transfers=tx.filter(t=>t.type==='transfer').length;
+ const budgets=state.budgets.filter(b=>b.recurring||b.month===key), totalBudget=budgets.reduce((s,b)=>s+Number(b.amount||0),0);
+ const byCat={};tx.filter(t=>t.type==='expense').forEach(t=>byCat[t.category]=(byCat[t.category]||0)+ +t.amount);
+ const budgetCategories=new Set(budgets.map(b=>b.category));
+ const budgetedSpent=[...budgetCategories].reduce((s,cat)=>s+(byCat[cat]||0),0);
+ const title=new Date(key+'-01T12:00').toLocaleDateString('es-ES',{month:'long',year:'numeric'});
+ c.innerHTML=`<div class="expenses-page">
+  <section class="expense-header">
+   <div><span class="eyebrow">Finanzas</span><h2>Gastos</h2><p>Controla tus cuentas, movimientos y presupuesto sin complicarte.</p></div>
+   <div class="actions"><button class="secondary" onclick="openModal('Nueva transferencia',transferForm())">Transferir</button><button class="primary" onclick="openModal('Nuevo gasto',expenseForm())">+ Nuevo movimiento</button></div>
+  </section>
+  <section class="expense-monthbar"><button class="month-arrow" onclick="changeExpenseMonth(-1)">‹</button><div><span>Mes seleccionado</span><strong>${title}</strong></div><button class="month-arrow" onclick="changeExpenseMonth(1)">›</button></section>
+  <section class="expense-kpis"><div><span>Ingresos</span><strong>${money(income)}</strong></div><div><span>Gastos</span><strong>${money(spent)}</strong></div><div><span>Balance</span><strong>${money(income-spent)}</strong></div><div><span>Presupuesto disponible</span><strong>${totalBudget?money(totalBudget-budgetedSpent):'—'}</strong><small>${totalBudget?money(totalBudget)+' presupuestados':'Sin presupuestos este mes'}</small></div></section>
+  <div class="expense-layout">
+   <section class="expense-panel movements-panel">
+    <div class="movement-filter" style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+     <label for="expenseAccountFilter" style="margin:0">Filtrar movimientos por cuenta</label>
+     <select id="expenseAccountFilter" onchange="setExpenseAccountFilter(this.value)">
+      <option value="all" ${accountFilter==='all'?'selected':''}>Todas las cuentas</option>
+      ${state.accounts.filter(a=>a.active!==false).map(a=>`<option value="${a.id}" ${accountFilter===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}
+     </select>
+    </div>
+    <div class="panel-heading"><div><h3>Movimientos</h3><span>${tx.length} movimientos ${accountFilter==='all'?'en '+title:'de '+esc(state.accounts.find(a=>a.id===accountFilter)?.name||'la cuenta seleccionada')+' en '+title}</span></div><div class="movement-legend"><span><i class="dot-income"></i>Ingreso</span><span><i class="dot-expense"></i>Gasto</span><span><i class="dot-transfer"></i>Transferencia</span></div></div>
+    <div class="movement-list">${tx.sort((a,b)=>{const dateDiff=(b.date||'').localeCompare(a.date||'');if(dateDiff)return dateDiff;return state.transactions.indexOf(b)-state.transactions.indexOf(a)}).map(expenseRow).join('')||'<div class="empty-state">No hay movimientos para esta cuenta en el mes seleccionado.<button class="secondary small" onclick="openModal(\'Nuevo gasto\',expenseForm())">Añadir gasto</button></div>'}</div>
+   </section>
+   <aside class="expense-side"><section class="expense-panel"><div class="panel-heading"><div><h3>Cuentas</h3><span>Saldo actual y dinero reservado</span></div><div class="actions"><button class="secondary small" onclick="openModal('Cuadre de cuentas',reconciliationForm())">Cuadrar</button><button class="secondary small" onclick="openModal('Configurar cuentas',accountsForm())">Editar</button><button class="danger-button small" onclick="openModal('Reiniciar Gastos',resetExpensesForm())">Reiniciar</button></div></div><div class="account-cards">${state.accounts.map(a=>{
+    const total=accountBalance(a);
+    const accountNameKey=String(a.name||'').trim().toLowerCase();
+    const supportsPockets=accountNameKey==='cuenta nómina'||accountNameKey==='revolut';
+    const isPayroll=supportsPockets;
+    const reserved=isPayroll?pocketTotal(a):0;
+    const available=total-reserved;
+    const pockets=supportsPockets?(Array.isArray(a.pockets)?a.pockets:[]):[];
+    const accountTx=state.transactions.filter(t=>{
+      if(!(t.date||'').startsWith(key))return false;
+      return t.type==='transfer' ? (t.from===a.id||t.to===a.id) : t.account===a.id;
+    });
+    const beforeTx=state.transactions.filter(t=>{
+      if(!t.date||t.date.slice(0,7)>=key)return false;
+      return t.type==='transfer' ? (t.from===a.id||t.to===a.id) : t.account===a.id;
+    });
+    const movementDelta=t=>{
+      if(t.type==='transfer')return (t.to===a.id?1:0)*Number(t.amount||0)-(t.from===a.id?1:0)*Number(t.amount||0);
+      return (t.type==='income'?1:-1)*Number(t.amount||0);
+    };
+    const opening=Number(a.startingBalance||0)+beforeTx.reduce((sum,t)=>sum+movementDelta(t),0);
+    const monthIncome=accountTx.filter(t=>t.type==='income').reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthExpenses=accountTx.filter(t=>t.type==='expense').reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthTransfersIn=accountTx.filter(t=>t.type==='transfer'&&t.to===a.id).reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthTransfersOut=accountTx.filter(t=>t.type==='transfer'&&t.from===a.id).reduce((sum,t)=>sum+Number(t.amount||0),0);
+    const monthNet=monthIncome-monthExpenses+monthTransfersIn-monthTransfersOut;
+    const monthClose=opening+monthNet;
+    return `<div class="account-card" style="display:block;padding:16px 18px">
+      <div class="account-card-main" style="display:flex;align-items:center;justify-content:space-between;gap:14px;min-width:0">
+        <div style="min-width:0;flex:1"><span>${esc(a.name)}</span><small>Saldo inicial ${money(a.startingBalance||0)}</small></div>
+        <strong style="text-align:right;white-space:nowrap">${money(total)}</strong>
+      </div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border,#e7e3dc)">
+        <div style="font-weight:600;font-size:0.9em;margin-bottom:7px">Resumen de ${esc(title)}</div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:6px 12px;font-size:0.86em">
+          <span style="color:var(--muted,#777)">Saldo al inicio del mes</span><span>${money(opening)}</span>
+          <span style="color:var(--muted,#777)">Ingresos</span><span>${money(monthIncome)}</span>
+          <span style="color:var(--muted,#777)">Gastos</span><span>${money(monthExpenses)}</span>
+          <span style="color:var(--muted,#777)">Transferencias recibidas</span><span>${money(monthTransfersIn)}</span>
+          <span style="color:var(--muted,#777)">Transferencias enviadas</span><span>${money(monthTransfersOut)}</span>
+          <span style="font-weight:600;padding-top:5px;border-top:1px solid var(--border,#e7e3dc)">Balance del mes</span><strong style="padding-top:5px;border-top:1px solid var(--border,#e7e3dc);color:${monthNet<0?'var(--danger,#a33)':'var(--success,#416b50)'}">${money(monthNet)}</strong>
+          <span style="font-weight:600">Saldo con movimientos registrados</span><strong>${money(monthClose)}</strong>
+        </div>
+        <small style="display:block;margin-top:7px;color:var(--muted,#777)">Incluye solo los movimientos registrados hasta ahora en ${esc(title)}.</small>
+      </div>
+      ${supportsPockets?`<div class="payroll-pocket-area" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border,#e7e3dc)">
+        ${pockets.length?pockets.map(p=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0">
+          <div style="min-width:0"><b style="display:block;font-size:0.95em">${esc(p.name||'Pocket')}</b><small style="color:var(--muted,#777)">Dinero reservado</small></div>
+          <strong style="white-space:nowrap">${money(p.amount)}</strong>
+          <div style="display:flex;gap:4px;flex-shrink:0"><button class="icon-button" aria-label="Editar pocket" title="Editar" onclick="openModal('Editar pocket',pocketForm('${a.id}','${p.id}'))">✎</button><button class="icon-button" aria-label="Eliminar pocket" title="Eliminar" onclick="deletePocket('${a.id}','${p.id}')">×</button></div>
+        </div>`).join(''):`<div style="padding:6px 0;color:var(--muted,#777);font-size:0.9em">Todavía no tienes dinero reservado para objetivos.</div>`}
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;padding:11px 12px;border-radius:12px;background:var(--surface-soft,#eeeee8)">
+          <span style="font-weight:600">Disponible para gastar</span><strong style="white-space:nowrap">${money(available)}</strong>
+        </div>
+        <button class="secondary" style="display:block;width:100%;margin-top:10px" onclick="openModal('Pockets · ${esc(a.name)}',pocketsForm('${a.id}'))">+ Gestionar pockets</button>
+      </div>`:''}
+    </div>`;
+  }).join('')}</div></section>
+    <section class="expense-panel"><div class="panel-heading"><div><h3>Por categoría</h3><span>Gasto real del mes</span></div></div><div class="category-totals">${Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div><span>${esc(k)}</span><b>${money(v)}</b></div>`).join('')||'<span class="muted">Todavía no hay gastos.</span>'}</div></section></aside>
+  </div>
+  <div class="expense-bottom"><section class="expense-panel"><div class="panel-heading"><div><h3>Presupuestos</h3><span>Límite mensual por categoría · se repiten cada mes</span></div><button class="secondary small" onclick="openModal('Nuevo presupuesto',budgetForm())">+ Añadir</button></div><div class="budget-list">${budgets.map(b=>{let s=byCat[b.category]||0,p=Math.min(100,s/b.amount*100),over=s>b.amount;return `<div class="budget-item"><div class="row"><div><b>${esc(b.category)}</b><small>${money(s)} de ${money(b.amount)}</small></div><div class="budget-actions"><strong class="${over?'over-budget':''}">${over?'Excedido':money(b.amount-s)+' disponible'}</strong><button class="icon-button" onclick="openModal('Editar presupuesto',budgetForm(${JSON.stringify(b).replace(/"/g,'&quot;')}))">⋯</button></div></div><div class="budget-bar"><i class="${over?'over':''}" style="width:${p}%"></i></div></div>`}).join('')||'<div class="empty-state">No tienes presupuestos configurados.</div>'}</div></section>
+   <section class="expense-panel recurring-panel"><div class="panel-heading"><div><h3>Recurrentes</h3><span>Se generan automáticamente cada mes</span></div><button class="secondary small" onclick="openModal('Nuevo gasto recurrente',expenseForm())">+ Añadir</button></div><div class="recurring-list">${state.transactions.filter(t=>t.recurring&&!t.recurringFrom).map(t=>`<div class="recurring-row"><div><b>${esc(t.concept||t.category||'Movimiento')}</b><span>${t.type==='transfer'?`${esc(state.accounts.find(a=>a.id===t.from)?.name||'')} → ${esc(state.accounts.find(a=>a.id===t.to)?.name||'')}`:esc(t.category||'')} · día ${t.recurringDay||'—'}</span></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="${t.type==='transfer'?`editTransfer('${t.id}')`:`editExpense('${t.id}')`}">Editar</button></div>`).join('')||'<div class="muted">Todavía no hay movimientos recurrentes.</div>'}</div></section>
+  </div>
+ </div>`;
+}
+function accountBalanceAfterTransaction(accountId, transaction){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return 0;
+ const targetDate=String(transaction.date||'');
+ const targetIndex=state.transactions.indexOf(transaction);
+ let balance=Number(account.startingBalance||0);
+ state.transactions.forEach((t,index)=>{
+  const date=String(t.date||'');
+  if(!date||date>targetDate||(date===targetDate&&index>targetIndex))return;
+  const amount=Number(t.amount||0);
+  if(t.type==='transfer'){
+   if(String(t.from)===String(accountId))balance-=amount;
+   if(String(t.to)===String(accountId))balance+=amount;
+  }else if(String(t.account)===String(accountId)){
+   balance+=(t.type==='income'?1:-1)*amount;
+  }
+ });
+ return balance;
+}
+function expenseRow(t){
+ if(t.type==='transfer'){
+  const fromName=state.accounts.find(a=>String(a.id)===String(t.from))?.name||'Cuenta origen';
+  const toName=state.accounts.find(a=>String(a.id)===String(t.to))?.name||'Cuenta destino';
+  const fromBalance=accountBalanceAfterTransaction(t.from,t);
+  const toBalance=accountBalanceAfterTransaction(t.to,t);
+  return `<div class="movement-row transfer"><div class="movement-icon">↔</div><div class="movement-main"><b>${esc(t.concept||'Transferencia')}</b><span>${esc(fromName)} → ${esc(toName)} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}</span><small style="display:block;margin-top:5px;color:var(--muted,#777)">Saldo tras transferencia: ${esc(fromName)} ${money(fromBalance)} · ${esc(toName)} ${money(toBalance)}</small></div><strong>${money(t.amount)}</strong><button class="secondary small" onclick="editTransfer('${t.id}')">Editar</button></div>`;
+ }
+ const income=t.type==='income';
+ const accountName=state.accounts.find(a=>String(a.id)===String(t.account))?.name||'Cuenta';
+ const balance=accountBalanceAfterTransaction(t.account,t);
+ return `<div class="movement-row ${income?'income':'expense'}"><div class="movement-icon">${income?'↓':'−'}</div><div class="movement-main"><b>${esc(t.concept||t.category)}</b><span>${esc(t.category||'')} · ${esc(accountName)} · ${new Date(t.date+'T12:00').toLocaleDateString('es-ES')}${t.recurring?' · Recurrente':''}${t.ticket?' · Ticket':''}</span><small style="display:block;margin-top:5px;color:var(--muted,#777)">Saldo tras movimiento: ${money(balance)}</small></div><strong>${income?'+':'−'}${money(t.amount)}</strong><button class="secondary small" onclick="editExpense('${t.id}')">Editar</button></div>`;
+}
+function expenseForm(t=null){const cat=t?.category||'Comida';return `<div class="form"><label>Tipo<select id="fExpenseType"><option value="expense" ${t?.type!=='income'?'selected':''}>Gasto</option><option value="income" ${t?.type==='income'?'selected':''}>Ingreso</option></select></label><label>Importe<input id="fExpenseAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Categoría<select id="fExpenseCategory">${categoryOptions(cat)}</select></label><label>Concepto<input id="fExpenseConcept" value="${esc(t?.concept||'')}" placeholder="Ej. Compra semanal"></label><div class="form-two"><label>Fecha<input id="fExpenseDate" type="date" value="${t?.date||todayKey()}"></label><label>Cuenta<select id="fExpenseAccount">${accountOptions(t?.account)}</select></label></div><label>Notas<textarea id="fExpenseNotes">${esc(t?.notes||'')}</textarea></label><label>Foto del ticket<input id="fExpenseTicket" type="file" accept="image/*">${t?.ticket?'<small>Ya hay un ticket guardado. Si eliges otro, lo sustituirá.</small>':''}</label><label class="checkline"><input id="fExpenseRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label>Día del mes<input id="fExpenseRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveExpense('${t?.id||''}')">${t?'Guardar cambios':'Guardar movimiento'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
+function categoryOptions(sel=''){return Object.entries(expenseCategories).map(([g,arr])=>`<optgroup label="${g}">${arr.map(x=>`<option value="${esc(x)}" ${x===sel?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}
+async function saveExpense(id){const amount=+document.querySelector('#fExpenseAmount').value;if(!amount)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type=document.querySelector('#fExpenseType').value;t.amount=amount;t.category=document.querySelector('#fExpenseCategory').value;t.concept=document.querySelector('#fExpenseConcept').value.trim();t.date=document.querySelector('#fExpenseDate').value;t.account=document.querySelector('#fExpenseAccount').value;t.notes=document.querySelector('#fExpenseNotes').value.trim();const f=document.querySelector('#fExpenseTicket').files[0];if(f)t.ticket=await fileToData(f);t.recurring=document.querySelector('#fExpenseRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fExpenseRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
+function editExpense(id){const t=state.transactions.find(x=>x.id===id);if(t)openModal(t.type==='income'?'Editar ingreso':'Editar gasto',expenseForm(t))}
+function deleteTransaction(id){state.transactions=state.transactions.filter(x=>x.id!==id);save();closeModal();render()}
+function resetExpensesForm(){return `<div class="form"><p><b>Esto borrará todos los datos introducidos en Gastos.</b></p><p class="muted">Se eliminarán todos los movimientos, transferencias, ingresos, gastos, movimientos recurrentes y presupuestos. También se pondrán a 0 los saldos iniciales de las cuentas. Se conservarán los nombres de las cuentas y las categorías para que puedas empezar de nuevo.</p><p class="muted">Esta acción no afecta a Tareas, Comidas, Calendario, Hábitos ni Limpieza.</p><div class="actions"><button class="secondary" onclick="closeModal()">Cancelar</button><button class="danger-button" onclick="resetExpensesData()">Sí, borrar y empezar de nuevo</button></div></div>`}
+function resetExpensesData(){
+ state.transactions=[];
+ state.expenses=[];
+ state.budgets=[];
+ state.accounts.forEach(a=>a.startingBalance=0);
+ save();
+ closeModal();
+ render();
+}
+function transferForm(t=null){return `<div class="form"><label>De<select id="fTransferFrom">${accountOptions(t?.from)}</select></label><label>A<select id="fTransferTo">${accountOptions(t?.to)}</select></label><label>Importe<input id="fTransferAmount" type="number" step="0.01" min="0" value="${t?.amount??''}"></label><label>Fecha<input id="fTransferDate" type="date" value="${t?.date||todayKey()}"></label><label>Concepto<input id="fTransferConcept" value="${esc(t?.concept||'')}"></label><label class="checkline"><input id="fTransferRecurring" type="checkbox" ${t?.recurring?'checked':''}> Repetir mensualmente</label><label>Día del mes<input id="fTransferRecurringDay" type="number" min="1" max="31" value="${t?.recurringDay||String(t?.date||todayKey()).slice(8,10)}"></label><button class="primary" onclick="saveTransfer('${t?.id||''}')">${t?'Guardar cambios':'Guardar transferencia'}</button>${t&&!t.recurringFrom?`<button class="danger-button" onclick="deleteTransaction('${t.id}')">Eliminar</button>`:''}</div>`}
+function saveTransfer(id=''){const from=document.querySelector('#fTransferFrom').value,to=document.querySelector('#fTransferTo').value,amount=+document.querySelector('#fTransferAmount').value;if(!amount||from===to)return;let t=id?state.transactions.find(x=>x.id===id):null;if(!t){t={id:crypto.randomUUID()};state.transactions.push(t)}t.type='transfer';t.from=from;t.to=to;t.amount=amount;t.date=document.querySelector('#fTransferDate').value;t.concept=document.querySelector('#fTransferConcept').value.trim()||'Transferencia';t.recurring=document.querySelector('#fTransferRecurring').checked;t.recurringDay=Math.min(31,Math.max(1,+document.querySelector('#fTransferRecurringDay').value||+t.date.slice(8,10)||1));if(t.recurring&&!t.recurringFrom){t.recurringMonths=Array.isArray(t.recurringMonths)?t.recurringMonths:[];t.recurringMonths=t.recurringMonths.filter(m=>m!==monthKey(new Date(t.date+'T12:00')))}save();closeModal();render()}
+function editTransfer(id){const t=state.transactions.find(x=>x.id===id);if(t)openModal('Editar transferencia',transferForm(t))}
+function budgetForm(b=null){return `<div class="form"><label>Categoría<select id="fBudgetCategory">${Object.entries(expenseCategories).filter(([g])=>g!=='Ingresos').map(([g,a])=>`<optgroup label="${g}">${a.map(x=>`<option value="${esc(x)}" ${x===b?.category?'selected':''}>${esc(x)}</option>`).join('')}</optgroup>`).join('')}</select></label><label>Importe mensual<input id="fBudgetAmount" type="number" min="0.01" step="0.01" value="${b?.amount??''}"></label><p class="muted">Este presupuesto se mantendrá automáticamente en todos los meses.</p><button class="primary" onclick="saveBudget('${b?.id||''}')">${b?'Guardar cambios':'Guardar presupuesto'}</button>${b?`<button class="danger-button" onclick="deleteBudget('${b.id}')">Eliminar presupuesto</button>`:''}</div>`}
+function saveBudget(id=''){
+ const category=document.querySelector('#fBudgetCategory').value;
+ const amount=Number(document.querySelector('#fBudgetAmount').value);
+ if(!Number.isFinite(amount)||amount<=0)return;
+ // Mantener un único presupuesto por categoría. Migrar los antiguos mensuales
+ // de esa categoría al presupuesto recurrente sin perder el importe actualizado.
+ const matches=state.budgets.filter(x=>x.category===category);
+ let b=id?state.budgets.find(x=>x.id===id):matches[0];
+ if(b){
+  b.category=category;b.amount=amount;b.recurring=true;delete b.month;
+  // Unificar presupuestos históricos de la misma categoría.
+  state.budgets=state.budgets.filter(x=>x===b||x.category!==category);
+ }else{
+  state.budgets=state.budgets.filter(x=>x.category!==category);
+  state.budgets.push({id:crypto.randomUUID(),category,amount,recurring:true});
+ }
+ save();closeModal();render();
+}
+function deleteBudget(id){state.budgets=state.budgets.filter(x=>x.id!==id);save();closeModal();render()}
+function pocketTotal(account){return (Array.isArray(account?.pockets)?account.pockets:[]).reduce((sum,p)=>sum+Math.max(0,Number(p.amount)||0),0)}
+function ensureRecurringPocketContributions(){
+ const key=monthKey();
+ let changed=false;
+ (state.accounts||[]).forEach(account=>{
+  if(String(account.name||'').trim().toLowerCase()!=='cuenta nómina')return;
+  (Array.isArray(account.pockets)?account.pockets:[]).forEach(pocket=>{
+   const monthly=Math.max(0,Number(pocket.monthlyContribution)||0);
+   if(!monthly)return;
+   pocket.contributionMonths=Array.isArray(pocket.contributionMonths)?pocket.contributionMonths:[];
+   const start=String(pocket.contributionStartMonth||key);
+   if(key<start||pocket.contributionMonths.includes(key))return;
+   pocket.amount=Math.max(0,Number(pocket.amount)||0)+monthly;
+   pocket.contributionMonths.push(key);
+   changed=true;
+  });
+ });
+ if(changed)save();
+}
+
+function pocketsForm(accountId){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return '<p>No se encuentra la cuenta.</p>';
+ account.pockets=Array.isArray(account.pockets)?account.pockets:[];
+ const pockets=account.pockets.map(p=>`<div class="account-edit"><div><b>${esc(p.name||'Pocket')}</b><span>Reservado: ${money(p.amount)}${Number(p.monthlyContribution)>0?` · +${money(p.monthlyContribution)}/mes`:""}</span></div><strong>${money(p.amount)}</strong><div class="actions"><button class="secondary small" onclick="openModal('Editar pocket',pocketForm('${account.id}','${p.id}'))">Editar</button><button class="danger-button small" onclick="deletePocket('${account.id}','${p.id}')">Eliminar</button></div></div>`).join('');
+ return `<div class="form accounts-form"><p class="muted">Los pockets separan mentalmente el dinero reservado sin crear gastos, movimientos ni transferencias. El saldo bancario sigue siendo el mismo; el disponible se calcula restando lo reservado.</p><div class="list">${pockets||'<p class="muted">Todavía no tienes pockets en esta cuenta.</p>'}</div><button class="primary" onclick="openModal('Nuevo pocket',pocketForm('${account.id}'))">+ Añadir pocket</button></div>`;
+}
+function pocketForm(accountId,pocketId=''){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return '<p>No se encuentra la cuenta.</p>';
+ if(!['cuenta nómina','revolut'].includes(String(account.name||'').trim().toLowerCase()))return '<p>Los pockets están disponibles únicamente en Cuenta nómina y Revolut.</p>';
+ account.pockets=Array.isArray(account.pockets)?account.pockets:[];
+ const pocket=pocketId?account.pockets.find(p=>String(p.id)===String(pocketId)):null;
+ const nextMonthDate=new Date();nextMonthDate.setDate(1);nextMonthDate.setMonth(nextMonthDate.getMonth()+1);
+ const nextMonth=monthKey(nextMonthDate);
+ return `<div class="form"><p class="muted">El saldo reservado no cuenta como gasto. Puedes añadir una cantidad fija cada mes desde Cuenta nómina; se reservará automáticamente una vez por mes.</p><label>Nombre del pocket<input id="fPocketName" required value="${esc(pocket?.name||'')}" placeholder="Ej. Viaje a China"></label><label>Importe ya reservado<input id="fPocketAmount" type="number" min="0" step="0.01" required value="${pocket?.amount??''}"></label><div class="form-two"><label>Aportación mensual<input id="fPocketMonthly" type="number" min="0" step="0.01" value="${pocket?.monthlyContribution??0}" placeholder="Ej. 150"></label><label>Empezar en<input id="fPocketStartMonth" type="month" value="${pocket?.contributionStartMonth||nextMonth}"></label></div><p class="muted">La aportación mensual no se registra como gasto ni como movimiento bancario. Solo aumenta el importe reservado y reduce el disponible para gastar.</p><button class="primary" onclick="savePocket('${account.id}','${pocket?.id||''}')">Guardar pocket</button></div>`;
+}
+function savePocket(accountId,pocketId=''){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account||!['cuenta nómina','revolut'].includes(String(account.name||'').trim().toLowerCase()))return;
+ const name=document.querySelector('#fPocketName')?.value.trim();
+ const amount=Number(document.querySelector('#fPocketAmount')?.value);
+ const monthly=Number(document.querySelector('#fPocketMonthly')?.value||0);
+ const startMonth=document.querySelector('#fPocketStartMonth')?.value||monthKey();
+ if(!name||!Number.isFinite(amount)||amount<0||!Number.isFinite(monthly)||monthly<0||!/^\d{4}-\d{2}$/.test(startMonth))return;
+ account.pockets=Array.isArray(account.pockets)?account.pockets:[];
+ let pocket=pocketId?account.pockets.find(p=>String(p.id)===String(pocketId)):null;
+ if(pocket){
+  pocket.name=name;pocket.amount=amount;pocket.monthlyContribution=monthly;pocket.contributionStartMonth=startMonth;
+  pocket.contributionMonths=Array.isArray(pocket.contributionMonths)?pocket.contributionMonths:[];
+ }else account.pockets.push({id:crypto.randomUUID(),name,amount,monthlyContribution:monthly,contributionStartMonth:startMonth,contributionMonths:[]});
+ save();
+ openModal('Pockets · '+account.name,pocketsForm(account.id));
+ render();
+}
+function deletePocket(accountId,pocketId){
+ const account=state.accounts.find(a=>String(a.id)===String(accountId));
+ if(!account)return;
+ account.pockets=(Array.isArray(account.pockets)?account.pockets:[]).filter(p=>String(p.id)!==String(pocketId));
+ save();
+ openModal('Pockets · '+account.name,pocketsForm(account.id));
+ render();
+}
+function accountsForm(){return `<div class="form accounts-form">${state.accounts.map(a=>`<div class="account-edit"><div><b>${esc(a.name)}</b><span>Saldo inicial</span></div><input id="acc-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></div>`).join('')}<div class="account-edit" style="align-items:center"><div><b>Añadir cuenta</b><span>Crear una cuenta nueva</span></div><button class="secondary small" onclick="addN26Account()">+ Añadir N26</button></div><button class="primary" onclick="saveAccounts()">Guardar saldos</button></div>`}
+function addN26Account(){if(state.accounts.some(a=>String(a.name||'').trim().toLowerCase()==='n26')){alert('La cuenta N26 ya existe.');return}state.accounts.push({id:crypto.randomUUID(),name:'N26',startingBalance:0,active:true});save();openModal('Configurar cuentas',accountsForm());render()}
+function saveAccounts(){state.accounts.forEach(a=>{const el=document.querySelector('#acc-'+a.id);if(el)a.startingBalance=Number(el.value)||0});save();closeModal();render()}
+function expiringInventory(){
+ const limit=new Date(); limit.setHours(23,59,59,999); limit.setDate(limit.getDate()+7);
+ return state.inventory.filter(x=>x.expiry&&new Date(x.expiry+'T12:00:00')<=limit&&new Date(x.expiry+'T12:00:00')>=new Date(todayKey()+'T00:00:00')).sort((a,b)=>String(a.expiry).localeCompare(String(b.expiry)));
+}
+function menuRecipeTitle(name,extraClass='',recipeId=null){
+ const recipe=(recipeId?state.recipes.find(r=>String(r.id)===String(recipeId)):null)||state.recipes.find(r=>r.name===name);
+ if(!recipe)return `<strong class="${extraClass}">${esc(name||'Sin planificar')}</strong>`;
+ if(extraClass.includes('home-menu-recipe-title')) return `<strong class="${extraClass} home-menu-recipe-click" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</strong>`;
+ return `<button class="menu-recipe-link ${extraClass}" onclick="viewRecipe('${recipe.id}')" title="Ver receta completa">${esc(name)}</button>`;
+}
+function food(c){
+ const inv=state.inventory, prep=state.preparations, menu=state.menu;
+ const counts={freezer:inv.filter(x=>x.storage==='freezer').length,pantry:inv.filter(x=>x.storage==='pantry').length,fresh:inv.filter(x=>x.storage==='fresh').length};
+ const days=['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo']; const slots=menu?.days||{}; const f=state.settings.food||{};
+ const shopping=shoppingItems(), weeklyPrep=menuPreparations(), pendingShop=shopping.filter(x=>!state.shoppingChecks[x.key]).length, pendingPrep=weeklyPrep.filter(x=>!state.prepDone[x.id]).length;
+ c.innerHTML=`<div class="food-page">
+ <section class="food-hero"><div><span class="eyebrow">Organización de comidas</span><h2>Comidas</h2><p>Planifica la semana aprovechando lo que ya tienes, sin obligarte a usarlo todo.</p></div><div class="actions"><button class="secondary" onclick="openModal('Añadir a Comidas',foodQuickForm())">+ Añadir</button><button class="primary" onclick="generateMenu()">Generar propuesta</button></div></section>
+ <section class="food-preferences"><button class="pref-chip ${f.useInventory!==false?'active':''}" onclick="toggleFoodPref('useInventory')">Aprovechar lo que tengo</button><button class="pref-chip ${f.quickMeals!==false?'active':''}" onclick="toggleFoodPref('quickMeals')">Comidas rápidas</button><button class="pref-chip ${f.vegetables!==false?'active':''}" onclick="toggleFoodPref('vegetables')">Más verduras</button><button class="pref-chip ${f.twoTuppers!==false?'active':''}" onclick="toggleFoodPref('twoTuppers')">2 tuppers</button><button class="pref-chip ${f.sweet?'active':''}" onclick="toggleFoodPref('sweet')">Incluir dulce</button><button class="pref-chip ${f.bread?'active':''}" onclick="toggleFoodPref('bread')">Hacer pan</button></section>
+ <section class="food-stats"><div><span>Congelador</span><strong>${counts.freezer}</strong><small>productos</small></div><div><span>Despensa</span><strong>${counts.pantry}</strong><small>productos</small></div><div><span>Frescos</span><strong>${counts.fresh}</strong><small>productos</small></div><div><span>Recetas</span><strong>${state.recipes.length}</strong><small>guardadas</small></div></section>
+ <div class="food-layout"><section class="food-panel menu-panel"><div class="panel-heading"><div><h3>Menú semanal</h3><span>${menu?.status==='accepted'?'Menú aceptado':'Propuesta pendiente de revisar'}</span></div>${menu?`<div class="actions"><button class="secondary small" onclick="generateMenu()">Regenerar</button><button class="primary small" onclick="acceptMenu()">Aceptar menú</button></div>`:''}</div>
+ <div class="weekly-menu">${days.map((d,i)=>{const x=slots[i]||{};const manualLunch=!!state.menu?.manualSlots?.[`${i}:lunch`];const manualDinner=!!state.menu?.manualSlots?.[`${i}:dinner`];const outsideLunch=!!state.menu?.outsideSlots?.[`${i}:lunch`];const outsideDinner=!!state.menu?.outsideSlots?.[`${i}:dinner`];return `<div class="menu-day"><div class="menu-day-head"><b>${d}</b><div class="menu-day-actions"><button class="menu-day-action ${manualLunch?'selected':''}" onclick="openMenuRecipePicker(${i},'lunch')" title="Elegir o cambiar la comida">Comida${manualLunch?' ✓':' ↻'}</button><button class="menu-day-action ${manualDinner?'selected':''}" onclick="openMenuRecipePicker(${i},'dinner')" title="Elegir o cambiar la cena">Cena${manualDinner?' ✓':' ↻'}</button></div>${x.tupper?'<span class="pill">Tupper</span>':''}</div><div class="meal-line"><span>Comida</span>${outsideLunch?'<span class="menu-outside">🍴 Comer fuera</span>':menuRecipeTitle(x.lunch,'menu-meal-title',x.lunchId)}</div><div class="meal-line"><span>Cena</span>${outsideDinner?'<span class="menu-outside">🍴 Comer fuera</span>':menuRecipeTitle(x.dinner,'menu-meal-title',x.dinnerId)}</div><div class="meal-line breakfast"><span>Desayuno</span>${menuRecipeTitle(x.breakfast,'menu-meal-title',x.breakfastId)}</div></div>`}).join('')||'<div class="empty-state">Genera una propuesta para empezar.</div>'}</div>
+ <section class="food-panel weekly-sweet-card"><div class="panel-heading"><div><h3>🍰 Dulce de la semana</h3><span>Una vez a la semana, sin merienda diaria</span></div>${menu?.sweet?`<button class="secondary small" onclick="changeWeeklySweet()">Cambiar dulce</button>`:''}</div>${menu?.sweet?menuRecipeTitle(menu.sweet,'menu-sweet-title'):'<span class="muted">Activa “Incluir dulce” y genera un menú.</span>'}</section>
+ ${menu?.status==='proposal'?'<div class="menu-hint">Revisa el menú y usa los botones <b>Comida</b> y <b>Cena</b> de cada día para elegir o cambiar una receta. Las elecciones manuales se mantienen mientras revisas este menú, pero al regenerarlo se crea una propuesta nueva. Cuando te guste, pulsa <b>Aceptar menú</b>.</div>':''}<div class="menu-history-inline"><div><b>Historial de menús</b><span>${(state.menuHistory||[]).length} guardados</span></div>${(state.menuHistory||[]).length?`<button class="text-button" onclick="openModal('Historial de menús',menuHistoryForm())">Ver historial →</button>`:'<span class="muted">Al aceptar un menú se guardará aquí.</span>'}</div></section>
+ <aside class="food-side"><section class="food-panel"><div class="panel-heading"><div><h3>Inventario</h3><span>Lo que tienes ahora</span></div><div class="actions"><button class="secondary small" onclick="exportPantryFreezerExcel()">Exportar Excel</button><button class="secondary small" onclick="document.querySelector('#inventoryImportInput').click()">Importar</button><input id="inventoryImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importInventory(this)"><button class="secondary small" onclick="openModal('Nuevo producto',inventoryForm())">+ Añadir</button></div></div><div class="inventory-mini"><div><b>Congelador</b><span>${counts.freezer}</span></div><div><b>Despensa</b><span>${counts.pantry}</span></div><div><b>Frescos</b><span>${counts.fresh}</span></div></div>${expiringInventory().length?`<div class="food-alert"><b>Próximo a caducar</b><span>${expiringInventory().map(x=>esc(x.name)).join(', ')}</span></div>`:''}<button class="text-button" onclick="openModal('Inventario',inventoryListForm())">Ver y gestionar inventario →</button></section>
+ <section class="food-panel"><div class="panel-heading"><div><h3>Preparar esta semana</h3><span>${state.menu?`${pendingPrep} pendientes`:'Según el menú semanal'}</span></div><div class="actions"><button class="secondary small" onclick="openModal('Nueva preparación',preparationForm())">+ Añadir</button>${state.preparations.length?'<button class="secondary small" onclick="openModal(\'Preparaciones\',preparationsListForm())">Gestionar</button>':''}</div></div><div class="prep-list">${weeklyPrep.slice(0,6).map(x=>`<div class="prep-row ${state.prepDone[x.id]?'done':''}"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')" aria-label="Marcar preparación">${state.prepDone[x.id]?'✓':''}</button><button class="prep-content" onclick="viewPreparation('${x.id}')"><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${x.freezable?'Congelable':'Para consumir'}</small></button></div>`).join('')||(state.menu?'<div class="muted">Este menú no necesita ninguna preparación guardada.</div>':'<div class="muted">Genera un menú para ver solo las preparaciones que realmente necesitan tus recetas.</div>')}</div>${weeklyPrep.length>6?`<button class="text-button" onclick="openModal('Preparaciones del menú',preparationsListForm(weeklyPrep))">Ver todas →</button>`:''}</section></aside></div>
+ <section class="food-panel shopping-panel"><div class="panel-heading"><div><h3>Lista de la compra</h3><span>${pendingShop} pendientes · ${shopping.length} en total</span></div><button class="secondary small" onclick="openModal('Lista de la compra',shoppingForm())">Ver lista</button></div><div class="shopping-progress"><div><span style="width:${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}%"></span></div><small>${shopping.length?Math.round((shopping.length-pendingShop)/shopping.length*100):0}% completada</small></div><div class="shopping-preview">${shopping.slice(0,8).map(x=>`<button class="shopping-item ${state.shoppingChecks[x.key]?'done':''}" onclick="toggleShopping('${x.key}')"><span>${state.shoppingChecks[x.key]?'✓':'○'}</span>${esc(x.name)}</button>`).join('')||'<span class="muted">Se calculará al aceptar un menú.</span>'}</div></section>
+ ${menu?.status==='accepted'?`<section class="food-panel consumption-panel"><div class="panel-heading"><div><h3>Consumo del menú</h3><span>Revisa antes de descontar el inventario</span></div><button class="secondary small" onclick="openModal('Consumo del menú',menuConsumptionForm())">${menu.consumptionRegistered?'Consumo registrado':'Revisar consumo'}</button></div><p class="muted">${menu.consumptionRegistered?'Este menú ya se ha descontado del inventario.':'Tus productos no se descuentan automáticamente; tú decides cuándo hacerlo.'}</p></section>`:''}
+ <section class="food-panel recipes-panel"><div class="panel-heading"><div><h3>Mis recetas</h3><span>${state.recipes.length} guardadas</span></div><div class="actions"><button class="secondary small" onclick="document.querySelector('#recipeImportInput').click()">Importar recetas</button><input id="recipeImportInput" type="file" accept=".json,.csv,application/json,text/csv" hidden onchange="importRecipes(this)"><button class="primary small" onclick="openModal('Añadir receta',recipeForm())">+ Añadir receta</button></div></div><div class="recipe-grid">${state.recipes.map(r=>`<article class="recipe-card"><div class="recipe-card-top"><span class="pill">${esc(recipeTypeLabel(r))}</span><div class="recipe-card-marks">${r.funRecipe?'<span class="recipe-mark fun" title="Receta divertida" aria-label="Receta divertida">🎉</span>':''}${r.freezable?'<span class="recipe-mark freeze" title="Se puede congelar" aria-label="Se puede congelar">❄️</span>':''}${r.favorite?'<span class="favorite-mark" title="Favorita">★</span>':''}</div></div><h4>${esc(r.name)}</h4><p>${esc(r.description||'Sin descripción')}</p><div class="recipe-meta"><span>${r.servings||1} raciones</span><span>${esc(r.time||'Tiempo no indicado')}</span>${r.freezable?'<span>Congelable</span>':''}</div><div class="actions"><button class="secondary small" onclick="viewRecipe('${r.id}')">Ver</button><button class="secondary small" onclick="editRecipe('${r.id}')">Editar</button></div></article>`).join('')||'<div class="empty-state">Todavía no tienes recetas. Añade la primera.</div>'}</div></section></div>`;
+}
+function foodQuickForm(){return `<div class="actions food-quick"><button class="primary" onclick="closeModal();openModal('Nuevo producto',inventoryForm())">Producto de inventario</button><button class="secondary" onclick="closeModal();openModal('Añadir receta',recipeForm())">Receta</button><button class="secondary" onclick="closeModal();openModal('Nueva preparación',preparationForm())">Preparación</button></div>`}
+function toggleFoodPref(key){state.settings.food=state.settings.food||{};state.settings.food[key]=!state.settings.food[key];save();render()}
+
+function exportPantryFreezerExcel(){
+ const escXml=v=>String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
+ const sheets=[{name:'Despensa',storage:'pantry'},{name:'Congelador',storage:'freezer'}];
+ const sheetXml=sheets.map(({name,storage})=>{
+  const rows=state.inventory.filter(x=>normalizeStorageValue(x.storage,'pantry')===storage)
+   .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'es'))
+   .map(x=>[x.name||'',x.quantity||'',x.expiry||'',x.notes||'']);
+  const data=[['Producto','Cantidad','Fecha de caducidad','Notas'],...rows];
+  return `<Worksheet ss:Name="${name}"><Table>${data.map((row,i)=>`<Row>${row.map(v=>`<Cell${i===0?' ss:StyleID="Header"':''}><Data ss:Type="String">${escXml(v)}</Data></Cell>`).join('')}</Row>`).join('')}</Table><WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel"><FreezePanes/><FrozenNoSplit/><SplitHorizontal>1</SplitHorizontal><TopRowBottomPane>1</TopRowBottomPane><ActivePane>2</ActivePane></WorksheetOptions></Worksheet>`;
+ }).join('');
+ const xml=`<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" xmlns:x="urn:schemas-microsoft-com:office:excel"><Styles><Style ss:ID="Header"><Font ss:Bold="1"/><Interior ss:Color="#E8EEE8" ss:Pattern="Solid"/></Style></Styles>${sheetXml}</Workbook>`;
+ const blob=new Blob(['\\ufeff',xml],{type:'application/vnd.ms-excel;charset=utf-8'});
+ const url=URL.createObjectURL(blob),a=document.createElement('a');
+ a.href=url;a.download=`inventario-despensa-congelador-${todayKey()}.xls`;
+ document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);
+}
+
+function normalizeInventoryImportName(n){return String(n||'').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ')}
+async function importInventory(input){
+ const file=input.files?.[0];if(!file)return;
+ try{
+  const text=await file.text();let incoming=[];
+  if(file.name.toLowerCase().endsWith('.csv')){
+   const lines=text.split(/\r?\n/).filter(Boolean);const headers=lines.shift().split(',').map(x=>x.trim().replace(/^"|"$/g,''));
+   incoming=lines.map(line=>{const cols=line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(x=>x.trim().replace(/^"|"$/g,''));const o={};headers.forEach((h,i)=>o[h]=cols[i]??'');return o})
+  }else{incoming=JSON.parse(text)}
+  if(!Array.isArray(incoming))throw new Error('El archivo debe contener una lista de productos.');
+  const filename=file.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const forcedStorage=filename.includes('congelador')||filename.includes('freezer')?'freezer':(filename.includes('despensa')||filename.includes('pantry')?'pantry':null);
+  const valid=incoming.map(x=>({
+    id:x.id||crypto.randomUUID(),
+    name:String(x.name||'').trim(),
+    quantity:String(x.quantity??'').trim(),
+    storage:forcedStorage||normalizeStorageValue(x.storage,'pantry'),
+    expiry:String(x.expiry||'').trim(),
+    notes:String(x.notes||'').trim()
+  })).filter(x=>x.name);
+  if(!valid.length){input.value='';alert('No se han encontrado productos válidos.');return}
+  const byId=new Map(state.inventory.map(x=>[String(x.id||''),x]));
+  const byNameStorage=new Map(state.inventory.map(x=>[normalizeInventoryImportName(x.name)+'|'+normalizeStorageValue(x.storage,'pantry'),x]));
+  let updated=0;
+  const incomingIds=new Set();
+  valid.forEach(x=>{
+    // Prefer ID, but also match by product name + destination storage.
+    // This fixes old imports where freezer products were incorrectly saved as pantry.
+    const key=normalizeInventoryImportName(x.name)+'|'+x.storage;
+    const existing=byId.get(String(x.id))||byNameStorage.get(key);
+    if(existing){
+      Object.assign(existing,x);
+      updated++;
+      incomingIds.add(String(existing.id));
+      byNameStorage.set(key,existing);
+    }
+  });
+  const keys=new Set(state.inventory.map(x=>normalizeInventoryImportName(x.name)+'|'+(x.storage||'pantry')));
+  const additions=valid.filter(x=>{
+    if(incomingIds.has(String(x.id)))return false;
+    const key=normalizeInventoryImportName(x.name)+'|'+x.storage;
+    if(keys.has(key))return false;
+    keys.add(key);return true;
+  });
+  const skipped=valid.length-additions.length-updated;
+  if(!updated&&!additions.length){input.value='';alert(`No se ha añadido ningún producto. ${skipped} ya estaban en ese almacenamiento.`);return}
+  const locations={freezer:'Congelador',pantry:'Despensa',fresh:'Frescos'};
+  const summary=[...new Set(valid.map(x=>locations[x.storage]))].join(', ');
+  if(!confirm(`Se van a importar ${valid.length} productos (${summary}).\n\nNuevos: ${additions.length} · Actualizados: ${updated} · Sin cambios: ${Math.max(0,skipped)}.\n\n¿Continuar?`)){input.value='';return}
+  state.inventory.push(...additions);delete state.inventoryClearedAt;localCacheFromState();render();await syncFoodModule('inventory',state.inventory);input.value='';
+  alert(`Importación completada: ${additions.length} añadidos, ${updated} actualizados y ${Math.max(0,skipped)} sin cambios.`)
+ }catch(err){input.value='';alert('No se ha podido importar el inventario. Revisa que el JSON o CSV tenga un formato válido.')}
+}
+function inventoryForm(item=null){return `<div class="form"><label>Producto<input id="fInvName" value="${esc(item?.name||'')}" placeholder="Ej. pechuga de pollo"></label><div class="form-two"><label>Cantidad<input id="fInvQty" value="${esc(item?.quantity||'')}" placeholder="Ej. 2 unidades"></label><label>Ubicación<select id="fInvStorage"><option value="freezer" ${item?.storage==='freezer'?'selected':''}>Congelador</option><option value="pantry" ${item?.storage==='pantry'?'selected':''}>Despensa</option><option value="fresh" ${item?.storage==='fresh'?'selected':''}>Frescos</option></select></label></div><label>Fecha de caducidad / consumo preferente<input id="fInvExpiry" type="date" value="${item?.expiry||''}"></label><label>Notas<textarea id="fInvNotes">${esc(item?.notes||'')}</textarea></label><button class="primary" onclick="saveInventory('${item?.id||''}')">${item?'Guardar cambios':'Añadir producto'}</button>${item?`<button class="danger-button" onclick="deleteInventory('${item.id}')">Eliminar</button>`:''}</div>`}
+async function clearAllInventory(){
+ if(!confirm('Vas a borrar TODO el inventario: Congelador, Despensa y Frescos.\n\nNo se borrarán recetas, preparaciones, menús, gastos, tareas ni calendario.\n\n¿Quieres continuar?'))return;
+ state.inventory=[];state.inventoryClearedAt=new Date().toISOString();localCacheFromState();render();
+ if(supabaseClient&&currentUser){
+  await syncFoodModule('inventory',[]);
+  alert('Inventario borrado correctamente en este dispositivo y en la nube.');
+ }else alert('Inventario borrado de este dispositivo.');
+}
+
+function saveInventory(id=''){const name=document.querySelector('#fInvName')?.value.trim();if(!name)return;let x=id?state.inventory.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.inventory.push(x)}x.name=name;x.quantity=document.querySelector('#fInvQty')?.value.trim()||'';x.storage=document.querySelector('#fInvStorage')?.value||'fresh';x.expiry=document.querySelector('#fInvExpiry')?.value||'';x.notes=document.querySelector('#fInvNotes')?.value.trim()||'';delete state.inventoryClearedAt;localCacheFromState();closeModal();render();void syncFoodModule('inventory',state.inventory)}
+function deleteInventory(id){state.inventory=state.inventory.filter(x=>x.id!==id);if(!state.inventory.length)state.inventoryClearedAt=new Date().toISOString();localCacheFromState();closeModal();render();void syncFoodModule('inventory',state.inventory)}
+function inventoryListForm(){return `<div class="inventory-full-list">${state.inventory.map(x=>`<div class="inventory-row"><div><b>${esc(x.name)}</b><span>${esc(x.quantity||'')} · ${x.storage==='freezer'?'Congelador':x.storage==='pantry'?'Despensa':'Frescos'}${x.expiry?' · '+new Date(x.expiry+'T12:00').toLocaleDateString('es-ES'):''}</span></div><button class="secondary small" onclick="openModal('Editar producto',inventoryForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button></div>`).join('')||'<div class="muted">Inventario vacío.</div>'}</div>`}
+function preparationForm(item=null){return `<div class="form"><label>Preparación<input id="fPrepName" value="${esc(item?.name||'')}" placeholder="Ej. sofrito casero"></label><label>Cantidad<input id="fPrepQty" value="${esc(item?.quantity||'')}" placeholder="Ej. 3 raciones"></label><label>Uso previsto<input id="fPrepUse" value="${esc(item?.use||'')}" placeholder="Ej. arroz, pasta, guisos"></label><label class="checkline"><input id="fPrepFreeze" type="checkbox" ${item?.freezable?'checked':''}> Se puede congelar</label><button class="primary" onclick="savePreparation('${item?.id||''}')">${item?'Guardar cambios':'Guardar preparación'}</button>${item?`<button class="danger-button" onclick="deletePreparation('${item.id}')">Eliminar</button>`:''}</div>`}
+async function savePreparation(id=''){const name=document.querySelector('#fPrepName')?.value.trim();if(!name)return;let x=id?state.preparations.find(i=>i.id===id):null;if(!x){x={id:crypto.randomUUID()};state.preparations.push(x)}x.name=name;x.quantity=document.querySelector('#fPrepQty')?.value.trim()||'';x.use=document.querySelector('#fPrepUse')?.value.trim()||'';x.freezable=!!document.querySelector('#fPrepFreeze')?.checked;const snapshot=JSON.parse(JSON.stringify(x));linkRecipePreparations();localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){const ok=await syncPreparationMutation('upsert',snapshot);if(ok)render();await syncFoodModule('recipes',state.recipes)}else save()}
+async function deletePreparation(id){if(!confirm('¿Eliminar esta preparación?'))return;state.preparations=state.preparations.filter(x=>String(x.id)!==String(id));delete state.prepDone[id];state.recipes=state.recipes.map(r=>({...r,preparationIds:(Array.isArray(r.preparationIds)?r.preparationIds:[]).filter(pid=>String(pid)!==String(id))}));localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){const ok=await syncPreparationMutation('delete',id);if(ok)await syncFoodModule('prepDone',state.prepDone);await syncFoodModule('recipes',state.recipes)}else save()}
+function recipeForm(r=null){const selectedTypes=recipeTypes(r);const selectedSeasons=Array.isArray(r?.seasons)?r.seasons:[];return `<div class="form"><label>Nombre de la receta<input id="fRecipeName" value="${esc(r?.name||'')}" placeholder="Ej. Pollo al horno"></label><div><div class="field-title">¿Cuándo puedo tomarla?</div><div class="recipe-check-grid">${foodTypes.map(x=>`<label class="checkline"><input class="fRecipeType" type="checkbox" value="${x}" ${selectedTypes.includes(x)?'checked':''}> ${x}</label>`).join('')}</div><small class="muted">Puedes marcar varias opciones. Así el menú sabrá qué recetas sirven para comida, cena, desayuno, etc.</small></div><div><div class="field-title">Temporada</div><div class="recipe-check-grid"><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Verano" ${selectedSeasons.includes('Verano')?'checked':''}> Verano</label><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Invierno" ${selectedSeasons.includes('Invierno')?'checked':''}> Invierno</label><label class="checkline"><input class="fRecipeSeason" type="checkbox" value="Todo el año" ${selectedSeasons.includes('Todo el año')?'checked':''}> Todo el año</label></div><small class="muted">Si no marcas ninguna, se considera válida todo el año.</small></div><div class="form-two"><label>Raciones<input id="fRecipeServings" type="number" min="1" value="${r?.servings||2}"></label><label>Tiempo<input id="fRecipeTime" value="${esc(r?.time||'')}" placeholder="30 min"></label></div><label>Ingredientes <small>uno por línea: ingrediente | cantidad | unidad</small><textarea id="fRecipeIngredients" placeholder="Tomate | 150 | g\nArroz | 80 | g\nAceite de oliva | 10 | ml">${esc(r?.ingredientsText||'')}</textarea><label>Preparación<textarea id="fRecipeSteps" placeholder="Pasos de elaboración">${esc(r?.steps||'')}</textarea></label><label>Descripción<textarea id="fRecipeDesc" placeholder="Cómo es y cuándo te gusta prepararla">${esc(r?.description||'')}</textarea></label><label>Combina con<input id="fRecipePairs" value="${esc(r?.pairs||'')}" placeholder="Ej. ensalada verde"></label><div><div class="field-title">Preparaciones que utiliza</div><div class="recipe-check-grid prep-link-grid">${state.preparations.map(p=>{const ids=Array.isArray(r?.preparationIds)?r.preparationIds.map(String):[];return `<label class="checkline"><input class="fRecipePrep" type="checkbox" value="${esc(p.id)}" ${ids.includes(String(p.id))?'checked':''}> ${esc(p.name)}</label>`}).join('')||'<small class="muted">Aún no tienes preparaciones.</small>'}</div><small class="muted">Solo aparecerán en “Preparar esta semana” las preparaciones vinculadas a las recetas del menú.</small></div><label class="checkline"><input id="fRecipeFav" type="checkbox" ${r?.favorite?'checked':''}> Marcar como favorita</label><label class="checkline"><input id="fRecipeFreezable" type="checkbox" ${r?.freezable?'checked':''}> Se puede congelar</label><label class="checkline"><input id="fRecipeFun" type="checkbox" ${r?.funRecipe?'checked':''}> 🎉 Receta divertida</label><button class="primary" onclick="saveRecipe('${r?.id||''}')">${r?'Guardar cambios':'Guardar receta'}</button>${r?`<button class="danger-button" onclick="deleteRecipe('${r.id}')">Eliminar receta</button>`:''}</div>`}
+function parseIngredients(text=''){return text.split(/\n+/).map(line=>line.trim()).filter(Boolean).map(line=>{const p=line.split('|').map(x=>x.trim());return {ingredient:p[0],quantity:p[1]||'',unit:p[2]||''}})}
+function normalizeRecipeImportName(name=''){return String(name).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()}
+function parseImportedIngredients(text=''){
+ const raw=String(text||'').trim();
+ if(!raw)return [];
+ const lines=raw.split(/\r?\n+/).map(x=>x.trim()).filter(Boolean);
+ if(lines.length>1)return parseIngredients(raw);
+ const parts=raw.split('|').map(x=>x.trim()).filter((x,i)=>i%3!==0||x!=='');
+ const out=[];
+ for(let i=0;i<parts.length;i+=3){if(parts[i])out.push({ingredient:parts[i],quantity:parts[i+1]||'',unit:parts[i+2]||''})}
+ return out.length?out:parseIngredients(raw);
+}
+function importedIngredientText(ingredients,text=''){
+ if(Array.isArray(ingredients)&&ingredients.length)return ingredients.map(i=>[i.ingredient||'',i.quantity||'',i.unit||''].join(' | ')).join('\n');
+ const parsed=parseImportedIngredients(text);return parsed.map(i=>[i.ingredient||'',i.quantity||'',i.unit||''].join(' | ')).join('\n');
+}
+function normalizeImportedRecipe(raw={}){
+ const types=Array.isArray(raw.types)?raw.types:(typeof raw.types==='string'?raw.types.split(/[;,]/).map(x=>x.trim()).filter(Boolean):[]);
+ const seasons=Array.isArray(raw.seasons)?raw.seasons:(typeof raw.seasons==='string'?raw.seasons.split(/[;,]/).map(x=>x.trim()).filter(Boolean):[]);
+ const ingredients=Array.isArray(raw.ingredients)?raw.ingredients:parseImportedIngredients(raw.ingredientsText||raw.ingredients||'');
+ const typeMap={Comidas:'Comida',Cenas:'Cena',Dulces:'Dulce',Preparaciones:'Preparación'};
+ const cleanTypes=[...new Set(types.map(x=>typeMap[x]||x).filter(x=>foodTypes.includes(x)))];
+ const cleanSeasons=[...new Set(seasons.filter(x=>['Verano','Invierno','Todo el año'].includes(x)))];
+ const name=String(raw.name||'').trim();
+ if(!name)throw new Error('Hay una receta sin nombre.');
+ return {id:String(raw.id||crypto.randomUUID()),name,types:cleanTypes.length?cleanTypes:['Comida'],type:(cleanTypes[0]||'Comida'),seasons:cleanSeasons,servings:Number(raw.servings)||1,time:String(raw.time||'').trim(),ingredients,ingredientsText:importedIngredientText(ingredients,raw.ingredientsText),steps:String(raw.steps||'').trim(),description:String(raw.description||'').trim(),pairs:String(raw.pairs||'').trim(),favorite:Boolean(raw.favorite),freezable:Boolean(raw.freezable),preparationIds:Array.isArray(raw.preparationIds)?raw.preparationIds.map(String):[]};
+}
+function parseRecipeCsv(text=''){
+ const rows=[];let row=[],cell='',quoted=false;
+ for(let i=0;i<text.length;i++){const ch=text[i];if(ch==='"'){if(quoted&&text[i+1]==='"'){cell+='"';i++;}else quoted=!quoted}else if(ch===','&&!quoted){row.push(cell);cell=''}else if((ch==='\n'||ch==='\r')&&!quoted){if(ch==='\r'&&text[i+1]==='\n')i++;row.push(cell);cell='';if(row.some(x=>String(x).trim()))rows.push(row);row=[]}else cell+=ch}
+ if(cell||row.length){row.push(cell);rows.push(row)}
+ if(!rows.length)return [];
+ const headers=rows.shift().map(x=>String(x).trim());
+ return rows.map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??''])));
+}
+async function importRecipes(input){
+ const file=input.files?.[0];if(!file)return;
+ try{
+  const text=await file.text();let raw;
+  if(file.name.toLowerCase().endsWith('.csv'))raw=parseRecipeCsv(text);else raw=JSON.parse(text);
+  if(!Array.isArray(raw))throw new Error('El archivo no contiene una lista de recetas.');
+  const incoming=raw.map(normalizeImportedRecipe);
+  const existingIds=new Map(state.recipes.map(r=>[String(r.id),r]));
+  const existingNames=new Map(state.recipes.map(r=>[normalizeRecipeImportName(r.name),r]));
+  const additions=[];const updates=[];
+  for(const incomingRecipe of incoming){
+   const nameKey=normalizeRecipeImportName(incomingRecipe.name);
+   const current=existingIds.get(String(incomingRecipe.id))||existingNames.get(nameKey);
+   if(current){
+    const favorite=current.favorite;
+    const localId=current.id;
+    Object.assign(current,incomingRecipe,{id:localId,favorite});
+    updates.push(current);
+   }else{
+    additions.push(incomingRecipe);
+    existingIds.set(String(incomingRecipe.id),incomingRecipe);
+    existingNames.set(nameKey,incomingRecipe);
+   }
+  }
+  if(!additions.length&&!updates.length){input.value='';alert('No hay recetas que importar.');return}
+  if(!confirm(`Se van a añadir ${additions.length} recetas nuevas y actualizar ${updates.length} recetas existentes con sus preparaciones detalladas. No se borrará ninguna otra receta. ¿Continuar?`)){input.value='';return}
+  state.recipes.push(...additions);normalizeRecipes();localCacheFromState();render();
+  if(supabaseClient&&currentUser)await syncFoodModule('recipes',state.recipes);
+  input.value='';alert(`Importación completada: ${additions.length} nuevas y ${updates.length} actualizadas.`);
+ }catch(e){input.value='';console.error('Error importando recetas',e);alert('No se han podido importar las recetas. Comprueba que sea un JSON/CSV de recetas válido.');}
+}
+async function saveRecipe(id=''){const name=document.querySelector('#fRecipeName')?.value.trim();if(!name)return;let r=id?state.recipes.find(x=>x.id===id):null;if(!r){r={id:crypto.randomUUID()};state.recipes.push(r)}const types=[...document.querySelectorAll('.fRecipeType:checked')].map(x=>x.value);const seasons=[...document.querySelectorAll('.fRecipeSeason:checked')].map(x=>x.value);r.name=name;r.types=types.length?types:['Comida'];r.type=r.types[0];r.seasons=seasons;r.servings=Number(document.querySelector('#fRecipeServings').value)||1;r.time=document.querySelector('#fRecipeTime').value.trim();r.ingredients=parseIngredients(document.querySelector('#fRecipeIngredients').value);r.ingredientsText=document.querySelector('#fRecipeIngredients').value;r.steps=document.querySelector('#fRecipeSteps').value;r.description=document.querySelector('#fRecipeDesc').value;r.pairs=document.querySelector('#fRecipePairs').value;r.favorite=document.querySelector('#fRecipeFav').checked;r.preparationIds=[...document.querySelectorAll('.fRecipePrep:checked')].map(x=>String(x.value));r.freezable=document.querySelector('#fRecipeFreezable').checked;r.funRecipe=document.querySelector('#fRecipeFun')?.checked||false;localCacheFromState();closeModal();render();if(supabaseClient&&currentUser){await syncFoodModule('recipes',state.recipes)}}
+function editRecipe(id){const r=state.recipes.find(x=>x.id===id);if(r)openModal('Editar receta',recipeForm(r))}
+function deleteRecipe(id){state.recipes=state.recipes.filter(x=>x.id!==id);localCacheFromState();closeModal();render();void syncFoodModule('recipes',state.recipes)}
+function cookRecipe(id,stepIndex=0){
+ const r=state.recipes.find(x=>x.id===id);if(!r)return;
+ const steps=String(r.steps||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+ const index=Math.max(0,Math.min(stepIndex,Math.max(0,steps.length-1)));
+ const step=steps[index]||'Revisa los ingredientes y prepara todo.';
+ const next=index<steps.length-1?`<button class="primary" onclick="cookRecipe('${r.id}',${index+1})">Siguiente →</button>`:'<button class="primary" onclick="closeModal()">Terminar</button>';
+ const prev=index>0?`<button class="secondary" onclick="cookRecipe('${r.id}',${index-1})">← Anterior</button>`:'';
+ const detail=String(step).replace(/^\d+\.\s*/,'');
+ openModal('Cocinando: '+r.name,`<div class="cook-mode"><div class="cook-progress"><span>Paso ${index+1} de ${steps.length}</span><div><i style="width:${steps.length?Math.round((index+1)/steps.length*100):100}%"></i></div></div><p class="cook-step">${esc(detail)}</p><div class="cook-actions">${prev}${next}</div></div>`);
+}
+function viewRecipe(id){
+ const r=state.recipes.find(x=>x.id===id);if(!r)return;
+ const excluded=recipeIsExcluded(r);
+ const ingredients=r.ingredients||parseIngredients(r.ingredientsText||'');
+ openModal(r.name,`<div class="recipe-detail"><div class="recipe-detail-actions"><button class="primary" onclick="cookRecipe('${r.id}')">🍳 Cocinar</button><button class="secondary" onclick="toggleRecipeSuggestion('${r.id}');closeModal()">${excluded?'✓ Volver a sugerir':'🚫 No sugerir'}</button></div><div class="recipe-detail-marks">${r.funRecipe?'<span class="recipe-badge fun">🎉 Receta divertida</span>':''}${r.freezable?'<span class="recipe-badge freeze">❄️ Se puede congelar</span>':''}</div><p>${esc(r.description||'')}</p><h4>Ingredientes</h4><ul>${ingredients.map(x=>`<li>${esc(x.ingredient)} · ${esc(x.quantity)} ${esc(x.unit)}</li>`).join('')}</ul><h4>Preparación</h4><p class="recipe-steps">${esc(r.steps||'')}</p>${recipePreparations(r).length?`<h4>Preparaciones que utiliza</h4><div class="recipe-linked-preps">${recipePreparations(r).map(p=>`<button class="secondary small" onclick="viewPreparation('${p.id}')">${esc(p.name)}</button>`).join('')}</div>`:''}${r.pairs?`<h4>Combina con</h4><p>${esc(r.pairs)}</p>`:''}</div>`)
+}
+
+function normalizeIngredient(s=''){return String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()}
+function recipeScore(r,used=[]){const f=state.settings.food||{},inv=state.inventory.map(x=>normalizeIngredient(x.name));let score=0;(r.ingredients||parseIngredients(r.ingredientsText||'')).forEach(i=>{const n=normalizeIngredient(i.ingredient);if(f.useInventory!==false&&n&&inv.some(x=>x===n||x.includes(n)||n.includes(x)))score+=5});if(r.favorite)score+=3;if(f.quickMeals!==false&&r.time){const m=parseInt(String(r.time));if(!isNaN(m)&&m<=Number(f.weekdayMinutes||30))score+=2}if(used.includes(r.id))score-=8;if(f.vegetables!==false&&/(verdura|calabacin|berenjena|brocoli|espinaca|pimiento|tomate|ensalada|zanahoria|calabaza)/i.test((r.name||'')+' '+(r.description||'')))score+=2;return score}
+function recipeIsExcluded(r){return Array.isArray(state.settings?.food?.excludedRecipes)&&state.settings.food.excludedRecipes.includes(String(r.id))}
+function toggleRecipeSuggestion(id){
+ state.settings.food=state.settings.food||{};
+ const list=new Set(Array.isArray(state.settings.food.excludedRecipes)?state.settings.food.excludedRecipes:[]);
+ const key=String(id);
+ if(list.has(key))list.delete(key);else list.add(key);
+ state.settings.food.excludedRecipes=[...list];
+ save();render();
+}
+function menuRecipePool(types){return state.recipes.filter(r=>types.some(t=>hasRecipeType(r,t))&&recipeInCurrentSeason(r)&&!recipeIsExcluded(r))}
+
+
+function shuffledTop(pool,limit=6){
+ const ranked=[...pool].sort((a,b)=>recipeScore(b)-recipeScore(a));
+ const top=ranked.slice(0,Math.min(limit,ranked.length));
+ for(let i=top.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[top[i],top[j]]=[top[j],top[i]]}
+ return top;
+}
+function pickWeeklyRecipe(pool,usedIds){
+ if(!pool.length)return null;
+ const available=pool.filter(r=>!usedIds.has(r.id));
+ const source=available.length?available:pool;
+ const ranked=shuffledTop(source,Math.min(8,source.length));
+ return ranked[0]||source[0];
+}
+function generateMenu(){
+ const f=state.settings.food||{};
+ const meals=menuRecipePool(['Comida']);
+ const dinners=menuRecipePool(['Cena']);
+ const funMeals=meals.filter(r=>r.funRecipe===true);
+ const funDinners=dinners.filter(r=>r.funRecipe===true);
+ const breakfasts=menuRecipePool(['Desayuno']);
+ const sweets=menuRecipePool(['Dulce']);
+ if(!meals.length){alert('Añade alguna receta marcada como Comida y de la temporada actual antes de generar el menú.');return}
+ if(!dinners.length){alert('Añade alguna receta marcada como Cena y de la temporada actual antes de generar el menú.');return}
+ const currentWeek=weekKey();
+ // Cada nueva generación debe ser una propuesta nueva. Las elecciones manuales
+ // solo pertenecen al menú que se está revisando y no se arrastran a la siguiente generación.
+ const previousManual={};
+ const previousOutside={};
+ const daysObj={};
+ const usedLunch=new Set(),usedDinner=new Set();
+ for(let i=0;i<7;i++){
+   const isFunLunch=i===4 && f.fridayFun!==false;
+   const isFunDinner=i===2;
+   const lunchPool=isFunLunch&&funMeals.length?funMeals:meals;
+   const dinnerPool=isFunDinner&&funDinners.length?funDinners:dinners;
+   const manualLunchId=previousManual[`${i}:lunch`];
+   const manualDinnerId=previousManual[`${i}:dinner`];
+   const manualLunch=manualLunchId?lunchPool.find(r=>String(r.id)===String(manualLunchId))||meals.find(r=>String(r.id)===String(manualLunchId)):null;
+   const manualDinner=manualDinnerId?dinnerPool.find(r=>String(r.id)===String(manualDinnerId))||dinners.find(r=>String(r.id)===String(manualDinnerId)):null;
+   const lunchOutside=!!previousOutside[`${i}:lunch`];
+   const dinnerOutside=!!previousOutside[`${i}:dinner`];
+   const lunch=lunchOutside?null:(manualLunch||pickWeeklyRecipe(lunchPool,usedLunch));
+   const dinner=dinnerOutside?null:(manualDinner||pickWeeklyRecipe(dinnerPool,usedDinner));
+   if(lunch)usedLunch.add(lunch.id); if(dinner)usedDinner.add(dinner.id);
+   const breakfast=i<5?(f.breakfast||'Café con leche + tostada con aceite y tomate'):(pickWeeklyRecipe(breakfasts,new Set())?.name||'Desayuno especial sencillo');
+   daysObj[i]={lunch:lunch?.name||'',lunchId:lunch?.id||null,dinner:dinner?.name||'',dinnerId:dinner?.id||null,breakfast,breakfastId:(state.recipes.find(r=>r.name===breakfast)?.id||null),tupper:f.twoTuppers!==false&&[1,3].includes(i),funLunch:!!(lunch&&isFunLunch&&lunchPool===funMeals),funDinner:!!(dinner&&isFunDinner&&dinnerPool===funDinners)}
+ }
+ const sweetPool=f.sweet!==false?sweets:[];
+ const sweet= sweetPool.length ? pickWeeklyRecipe(sweetPool,new Set()) : null;
+ state.menu={week:currentWeek,status:'proposal',days:daysObj,sweet:sweet?sweet.name:'',sweetId:sweet?sweet.id:null,manualSlots:previousManual,outsideSlots:previousOutside,generatedAt:new Date().toISOString(),revision:Number(state.menu?.revision||0),updatedAt:new Date().toISOString()};
+ state.shoppingChecks={};
+ menuLocalDirty=true;
+ localCacheFromState();
+ render();
+ void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
+}
+function changeWeeklySweet(){
+ if(!state.menu)return; const pool=menuRecipePool(['Dulce']); if(!pool.length){alert('No hay recetas marcadas como Dulce.');return;}
+ const current=state.menu.sweetId; const candidates=pool.filter(r=>String(r.id)!==String(current)); const sweet=pickWeeklyRecipe(candidates.length?candidates:pool,new Set());
+ state.menu.sweet=sweet.name; state.menu.sweetId=sweet.id; state.menu.status='proposal'; menuLocalDirty=true; localCacheFromState(); render(); void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:false});
+}
+function acceptMenu(){
+ if(!state.menu)return;
+ normalizeRecipes();
+ const accepted=JSON.parse(JSON.stringify(state.menu));
+ accepted.status='accepted';
+ accepted.acceptedAt=new Date().toISOString();
+ accepted.id=accepted.id||crypto.randomUUID();
+ state.menuHistory=Array.isArray(state.menuHistory)?state.menuHistory:[];
+ state.menuHistory=[accepted,...state.menuHistory.filter(m=>String(m.week)!==String(accepted.week))].slice(0,12);
+ state.menu=accepted;
+ state.shoppingChecks={};
+ menuLocalDirty=true; localCacheFromState();render();
+ if(supabaseClient&&currentUser){ void syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
+ else { queueCloudSave(); }
+}
+function openMenuRecipePicker(day,slot){
+ const type=slot==='lunch'?'Comida':'Cena';
+ const all=menuRecipePool([type]);
+ const fun=all.filter(r=>r.funRecipe===true);
+ const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
+ const pool=special&&fun.length?fun:all;
+ const outside=!!state.menu?.outsideSlots?.[`${day}:${slot}`];
+ if(!pool.length&&!outside){alert('No hay recetas disponibles para este hueco.');return}
+ const current=state.menu?.days?.[day]?.[slot];
+ const currentId=state.recipes.find(r=>r.name===current)?.id;
+ const sorted=[...pool].sort((a,b)=>String(a.name).localeCompare(String(b.name),'es'));
+ openModal(`Elegir ${slot==='lunch'?'comida':'cena'}`,`<div class="menu-picker"><p class="muted">Elige una receta para este día o indica que comerás fuera.</p><div class="menu-picker-list">${sorted.map(r=>`<button class="menu-picker-item ${String(r.id)===String(currentId)&&!outside?'selected':''}" onclick="selectManualMenuRecipe(${day},'${slot}','${r.id}')"><span><b>${esc(r.name)}</b><small>${esc(r.time||'')}</small></span>${String(r.id)===String(currentId)&&!outside?'<span>✓</span>':''}</button>`).join('')}</div><div class="menu-picker-actions"><button class="secondary small ${outside?'selected':''}" onclick="markMenuMealOutside(${day},'${slot}')">🍴 Comer fuera</button><button class="secondary small" onclick="clearManualMenuRecipe(${day},'${slot}')">Dejar automático</button></div></div>`);
+}
+async function selectManualMenuRecipe(day,slot,id){
+ const r=state.recipes.find(x=>String(x.id)===String(id));
+ if(!r||!state.menu)return;
+ state.menu.manualSlots=state.menu.manualSlots||{};
+ state.menu.manualSlots[`${day}:${slot}`]=r.id;
+ state.menu.outsideSlots=state.menu.outsideSlots||{}; delete state.menu.outsideSlots[`${day}:${slot}`];
+ state.menu.days[day][slot]=r.name;
+ state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=r.id;
+ if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&r.funRecipe===true;
+ else state.menu.days[day].funDinner=Number(day)===2&&r.funRecipe===true;
+ state.menu.status='proposal';
+ state.shoppingChecks={};
+ // A manual menu choice is a deliberate edit: persist the menu itself immediately.
+ // Do not use the generic delayed save here.
+ menuLocalDirty=true; localCacheFromState();
+ closeModal();
+ render();
+ if(supabaseClient&&currentUser){ await syncMenuChoice(); }
+}
+async function markMenuMealOutside(day,slot){
+ if(!state.menu)return;
+ state.menu.manualSlots=state.menu.manualSlots||{};
+ state.menu.outsideSlots=state.menu.outsideSlots||{};
+ delete state.menu.manualSlots[`${day}:${slot}`];
+ state.menu.outsideSlots[`${day}:${slot}`]=true;
+ state.menu.days[day][slot]='';
+ state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=null;
+ if(slot==='lunch')state.menu.days[day].funLunch=false; else state.menu.days[day].funDinner=false;
+ state.menu.status='proposal';
+ state.shoppingChecks={};
+ menuLocalDirty=true; localCacheFromState(); closeModal(); render();
+ if(supabaseClient&&currentUser)await syncMenuBundle({menu:true,shoppingChecks:true}); else queueCloudSave();
+}
+async function clearManualMenuRecipe(day,slot){
+ if(!state.menu)return;
+ const type=slot==='lunch'?'Comida':'Cena';
+ const all=menuRecipePool([type]);
+ const fun=all.filter(r=>r.funRecipe===true);
+ const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
+ const pool=special&&fun.length?fun:all;
+ const current=state.menu.days?.[day]?.[slot];
+ const currentId=state.menu.days?.[day]?.[slot==='lunch'?'lunchId':'dinnerId'];
+ const used=new Set(Object.entries(state.menu.days||{}).filter(([d])=>String(d)!==String(day)).map(([,v])=>v?.[slot==='lunch'?'lunchId':'dinnerId']).filter(Boolean));
+ const candidates=pool.filter(r=>String(r.id)!==String(currentId)&&!used.has(r.id));
+ const pick=shuffledTop(candidates.length?candidates:pool.filter(r=>String(r.id)!==String(currentId)),Math.min(8,(candidates.length?candidates:pool).length))[0]||pool[0];
+ if(!pick)return;
+ state.menu.manualSlots=state.menu.manualSlots||{};
+ delete state.menu.manualSlots[`${day}:${slot}`];
+ state.menu.outsideSlots=state.menu.outsideSlots||{}; delete state.menu.outsideSlots[`${day}:${slot}`];
+ state.menu.days[day][slot]=pick.name;
+ state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=pick.id;
+ if(slot==='lunch')state.menu.days[day].funLunch=Number(day)===4&&pick.funRecipe===true;
+ else state.menu.days[day].funDinner=Number(day)===2&&pick.funRecipe===true;
+ state.menu.status='proposal';
+ state.shoppingChecks={};
+ localCacheFromState();
+ closeModal();render();
+ if(supabaseClient&&currentUser)await syncMenuBundle({menu:true,shoppingChecks:true});
+ else queueCloudSave();
+}
+function changeMeal(day,slot){
+ if(!state.menu)return;
+ const type=slot==='lunch'?'Comida':'Cena';
+ const all=menuRecipePool([type]);
+ const fun=all.filter(r=>r.funRecipe===true);
+ const special=(slot==='lunch'&&Number(day)===4&&state.settings.food?.fridayFun!==false)||(slot==='dinner'&&Number(day)===2);
+ const list=special&&fun.length?fun:all;
+ if(!list.length){alert('Añade alguna receta de '+type.toLowerCase()+' y de la temporada actual antes de cambiarla.');return}
+ const current=state.menu.days[day]?.[slot];
+ const weekUsed=new Set();
+ Object.entries(state.menu.days||{}).forEach(([d,vals])=>{
+   if(String(d)===String(day))return;
+   const name=vals?.[slot];
+   const r=state.recipes.find(x=>x.name===name);if(r)weekUsed.add(r.id);
+ });
+ const candidates=list.filter(r=>r.name!==current&&!weekUsed.has(r.id));
+ const source=candidates.length?candidates:list.filter(r=>r.name!==current);
+ if(!source.length)return;
+ const pick=shuffledTop(source,Math.min(8,source.length))[0]||source[0];
+ state.menu.days[day][slot]=pick.name;
+ state.menu.days[day][slot==='lunch'?'lunchId':'dinnerId']=pick.id;
+ state.menu.manualSlots=state.menu.manualSlots||{};
+ state.menu.manualSlots[`${day}:${slot}`]=pick.id;
+ state.menu.days[day][slot==='lunch'?'funLunch':'funDinner']=special&&pick.funRecipe===true;
+ state.menu.status='proposal';
+ state.shoppingChecks={};
+ menuLocalDirty=true; localCacheFromState(); render();
+ void syncMenuBundle({menu:true,menuHistory:false,shoppingChecks:true});
+}
+async function restoreMenuHistory(id){
+ const found=state.menuHistory?.find(m=>String(m.id)===String(id));
+ if(!found)return;
+ state.menu=JSON.parse(JSON.stringify(found));
+ state.menu.status='accepted';
+ state.menuHistory=state.menuHistory.filter(m=>String(m.id)!==String(id));
+ state.menuHistory.unshift(JSON.parse(JSON.stringify(state.menu)));
+ state.menuHistory=state.menuHistory.slice(0,12);
+ state.shoppingChecks={};
+ menuLocalDirty=true; localCacheFromState();render();
+ if(supabaseClient&&currentUser){ await syncMenuBundle({menu:true,menuHistory:true,shoppingChecks:true}); }
+ else queueCloudSave();
+}
+function menuHistoryForm(){
+ const items=(state.menuHistory||[]).map(m=>{
+  const d=m.acceptedAt?new Date(m.acceptedAt).toLocaleDateString('es-ES',{day:'numeric',month:'long',year:'numeric'}):m.week;
+  const names=[0,1,2,3,4,5,6].map(i=>m.days?.[i]?.lunch).filter(Boolean).slice(0,3).map(esc).join(' · ');
+  return `<div class="history-row"><div><b>${esc(d)}</b><small>${names}${names?'…':''}</small></div><button class="secondary small" onclick="restoreMenuHistory('${m.id}')">Recuperar</button></div>`;
+ }).join('');
+ return items||'<div class="muted">Todavía no hay menús guardados.</div>';
+}
+function parseInventoryQuantity(value){
+ const s=String(value||'').trim().toLowerCase().replace(',','.');
+ const m=s.match(/(-?\d+(?:\.\d+)?|\d+\s*\/\s*\d+)/);
+ if(!m)return null;
+ const raw=m[1].replace(/\s+/g,'');
+ const n=raw.includes('/')?(()=>{const [a,b]=raw.split('/').map(Number);return b?a/b:null})():Number(raw);
+ if(n==null||Number.isNaN(n))return null;
+ const unit=(s.match(/(kg|g|mg|l|ml|ud|unidad(?:es)?|u|bote(?:s)?|lata(?:s)?|paquete(?:s)?|rebanada(?:s)?)/)||[])[1]||'';
+ const normalizedUnit=/^u(d|nidad|nidades)?$/.test(unit)?'ud':unit;
+ return {value:n,unit:normalizedUnit};
+}
+function inventoryNameMatches(required,available){
+ const a=normalizeIngredient(required),b=normalizeIngredient(available);
+ return a===b||a.includes(b)||b.includes(a)
+}
+function findInventoryMatch(ingredient){
+ return state.inventory.find(x=>inventoryNameMatches(ingredient,x.name));
+}
+function inventoryCoverage(ingredient,qty,unit){
+ const item=findInventoryMatch(ingredient);
+ if(!item)return {item:null,covered:0,missing:qty};
+ if(qty===''||qty==null||unit===''||unit==='al gusto')return {item,covered:null,missing:0};
+ const iq=parseInventoryQuantity(item.quantity);
+ const rq=parseInventoryQuantity(`${qty} ${unit}`);
+ if(!iq||!rq)return {item,covered:null,missing:0};
+ if(iq.unit!==rq.unit)return {item,covered:null,missing:0};
+ const missing=Math.max(0,rq.value-iq.value);
+ return {item,covered:Math.min(iq.value,rq.value),missing};
+}
+function formatMissing(qty,unit){
+ if(qty==null||qty==='')return '';
+ const n=Math.abs(Number(qty));
+ const pretty=Number.isInteger(n)?String(n):String(Math.round(n*100)/100);
+ return `${pretty} ${unit}`.trim();
+}
+function recipePreparations(r){if(!r)return [];const ids=Array.isArray(r.preparationIds)?r.preparationIds.map(String):[];return state.preparations.filter(p=>ids.includes(String(p.id)))}
+function menuRecipeFromDay(day,slot){
+ if(!day)return null;
+ const id=day?.[slot+'Id'];
+ if(id){const byId=state.recipes.find(r=>String(r.id)===String(id));if(byId)return byId;}
+ const name=day?.[slot];
+ return name?state.recipes.find(r=>r.name===name)||null:null;
+}
+function menuPreparations(){
+ if(!state.menu)return [];
+ const ids=new Set();
+ Object.values(state.menu.days||{}).forEach(day=>['lunch','dinner','breakfast','snack'].forEach(slot=>{const r=menuRecipeFromDay(day,slot);recipePreparations(r).forEach(p=>ids.add(String(p.id)))}));
+ return [...ids].map(id=>state.preparations.find(p=>String(p.id)===id)).filter(Boolean);
+}
+
+function aggregateMenuIngredients(){
+ const map=new Map();
+ if(!state.menu||state.menu.status!=='accepted')return [];
+ Object.values(state.menu.days||{}).forEach(day=>{
+  ['lunch','dinner','breakfast','snack'].forEach(slot=>{
+   const r=state.recipes.find(x=>x.name===day?.[slot]);
+   if(!r)return;
+   (r.ingredients||parseIngredients(r.ingredientsText||'')).forEach(i=>{
+    const raw=String(i.ingredient||'').trim();if(!raw)return;
+    const key=normalizeIngredient(raw);
+    const q=parseInventoryQuantity(`${i.quantity||''} ${i.unit||''}`);
+    const existing=map.get(key);
+    if(!existing){map.set(key,{ingredient:raw,quantity:i.quantity||'',unit:i.unit||'',numeric:q?.value??null,count:1});}
+    else if(existing.numeric!=null&&q?.value!=null&&existing.unit===i.unit){existing.numeric+=q.value;existing.quantity=String(existing.numeric);existing.count++}
+    else {existing.count++}
+   });
+  });
+ });
+ return [...map.values()];
+}
+function shoppingItems(){
+ const items=aggregateMenuIngredients(),out=[];
+ items.forEach(i=>{
+  const coverage=inventoryCoverage(i.ingredient,i.quantity,i.unit);
+  if(!coverage.item){
+   out.push({key:normalizeIngredient(i.ingredient),name:`${i.ingredient}${i.quantity?' · '+i.quantity+' '+(i.unit||''):''}`,group:foodGroup(i.ingredient)});
+   return;
+  }
+  if(coverage.missing>0){
+   out.push({key:normalizeIngredient(i.ingredient),name:`${i.ingredient} · faltan ${formatMissing(coverage.missing,i.unit)}`,group:foodGroup(i.ingredient)});
+  }
+ });
+ return out.sort((a,b)=>a.group.localeCompare(b.group,'es')||a.name.localeCompare(b.name,'es'));
+}
+function menuInventoryCoverage(){
+ const items=aggregateMenuIngredients();
+ return items.map(i=>{
+  const c=inventoryCoverage(i.ingredient,i.quantity,i.unit);
+  return {ingredient:i.ingredient,required:i.quantity&&i.unit?`${i.quantity} ${i.unit}`:'',inventory:c.item?.quantity||'',inventoryName:c.item?.name||'',missing:c.missing||0,covered:c.covered,unit:i.unit};
+ });
+}
+function menuConsumptionForm(){
+ const rows=menuInventoryCoverage();
+ const usable=rows.filter(x=>x.inventoryName);
+ const missing=rows.filter(x=>x.missing>0||!x.inventoryName);
+ return `<div class="consumption-modal"><p class="muted">El menú no descuenta nada automáticamente. Revisa qué ingredientes se van a consumir y confirma al final.</p>${usable.map(x=>`<div class="consumption-row"><div><b>${esc(x.ingredient)}</b><small>${x.required?`Necesitas ${esc(x.required)} · `:''}Tienes ${esc(x.inventory)}${x.missing>0?` · <strong>Faltan ${esc(formatMissing(x.missing,x.unit))}</strong>`:''}</small></div></div>`).join('')||'<div class="muted">No hay ingredientes del menú que coincidan con el inventario.</div>'}${missing.length?`<div class="consumption-alert"><b>Ingredientes que tendrás que comprar</b><span>${missing.map(x=>esc(x.ingredient)).join(', ')}</span></div>`:''}<button class="primary" onclick="confirmMenuConsumption()">Registrar consumo y actualizar inventario</button></div>`;
+}
+function confirmMenuConsumption(){
+ if(!state.menu||state.menu.status!=='accepted')return;
+ if(state.menu.consumptionRegistered){alert('El consumo de este menú ya está registrado.');return}
+ const rows=menuInventoryCoverage();
+ let changed=0;
+ rows.forEach(x=>{
+  if(!x.inventoryName||x.missing>0)return;
+  const item=findInventoryMatch(x.ingredient);
+  const iq=parseInventoryQuantity(item?.quantity),rq=parseInventoryQuantity(`${x.required}`);
+  if(item&&iq&&rq&&iq.unit===rq.unit){
+   const remaining=Math.max(0,iq.value-rq.value);
+   item.quantity=String(Number.isInteger(remaining)?remaining:Math.round(remaining*100)/100)+' '+iq.unit;
+   changed++;
+  }
+ });
+ state.menu.consumptionRegistered=true;
+ save();render();
+ alert(`Consumo registrado. Se han actualizado ${changed} productos del inventario.`);
+}
+function foodGroup(name){const n=normalizeIngredient(name);if(/pollo|pavo|ternera|cerdo|carne|huevo|salmon|atun|merluza|pescado|tofu|lenteja|garbanzo|judia/.test(n))return 'Proteínas';if(/tomate|lechuga|espinaca|brocoli|calabacin|berenjena|pimiento|cebolla|zanahoria|patata|verdura|fruta|manzana|platano/.test(n))return 'Fruta y verdura';if(/arroz|pasta|harina|pan|avena|quinoa|cereal/.test(n))return 'Despensa';if(/leche|yogur|queso|burrata|mozzarella/.test(n))return 'Refrigerados';return 'Otros'}
+function toggleShopping(key){state.shoppingChecks[key]=!state.shoppingChecks[key];menuLocalDirty=true;localCacheFromState();render();if(supabaseClient&&currentUser)void syncMenuBundle({menu:false,menuHistory:false,shoppingChecks:true});else queueCloudSave()}
+function shoppingForm(){const items=shoppingItems(),groups=[...new Set(items.map(x=>x.group))];return `<div class="shopping-list-modal">${groups.map(g=>`<div class="shopping-group"><h4>${esc(g)}</h4>${items.filter(x=>x.group===g).map(x=>`<label class="checkline shopping-check ${state.shoppingChecks[x.key]?'done':''}"><input type="checkbox" ${state.shoppingChecks[x.key]?'checked':''} onchange="toggleShopping('${x.key}')"><span>${esc(x.name)}</span></label>`).join('')}</div>`).join('')||'<p class="muted">No hay compras pendientes.</p>'}</div>`}
+function viewPreparation(id){
+ const x=state.preparations.find(i=>String(i.id)===String(id));if(!x)return;
+ const ingredients=Array.isArray(x.ingredients)?x.ingredients:parseIngredients(x.ingredientsText||'');
+ const ingredientsHtml=ingredients.length?`<h4>Ingredientes</h4><ul>${ingredients.map(i=>`<li>${esc(i.ingredient)} · ${esc(i.quantity||'')} ${esc(i.unit||'')}</li>`).join('')}</ul>`:'';
+ const steps=x.steps||x.preparation||'';
+ openModal(x.name,`<div class="recipe-detail preparation-detail"><div class="recipe-detail-actions"><button class="secondary small" onclick="closeModal();openModal('Editar preparación',preparationForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button><button class="danger-button small" onclick="deletePreparation('${x.id}')">Eliminar</button></div><div class="recipe-detail-marks">${x.quantity?`<span class="recipe-badge">${esc(x.quantity)}</span>`:''}${x.freezable?'<span class="recipe-badge freeze">❄️ Se puede congelar</span>':''}</div>${x.description?`<p>${esc(x.description)}</p>`:''}${x.use?`<h4>Uso previsto</h4><p>${esc(x.use)}</p>`:''}${ingredientsHtml}${steps?`<h4>Preparación</h4><p class="recipe-steps">${esc(steps)}</p>`:'<p class="muted">Esta preparación todavía no tiene ingredientes ni pasos detallados.</p>'}</div>`);
+}
+function togglePrep(id){state.prepDone[id]=!state.prepDone[id];localCacheFromState();render();if(supabaseClient&&currentUser)void syncFoodModule('prepDone',state.prepDone);else save()}
+function preparationsListForm(list=state.preparations){return `<div class="prep-full-list">${list.map(x=>`<div class="prep-row ${state.prepDone[x.id]?'done':''}"><button class="check-mini" onclick="event.stopPropagation();togglePrep('${x.id}')">${state.prepDone[x.id]?'✓':''}</button><button class="prep-content" onclick="viewPreparation('${x.id}')"><b>${esc(x.name)}</b><small>${esc(x.quantity||'')} · ${esc(x.use||'')}${x.freezable?' · Congelable':''}</small></button><button class="secondary small prep-edit" onclick="event.stopPropagation();openModal('Editar preparación',preparationForm(${JSON.stringify(x).replace(/"/g,'&quot;')}))">Editar</button></div>`).join('')||'<div class="muted">No hay preparaciones.</div>'}</div>`}
+
+// ============================================================
+// LIMPIEZA — lista semanal y rutinas periódicas
+// ============================================================
+const cleaningWeekdays=[['1','Lunes'],['2','Martes'],['3','Miércoles'],['4','Jueves'],['5','Viernes'],['6','Sábado'],['0','Domingo']];
+const cleaningFrequencies=[['weekly','Semanal'],['biweekly','Cada 2 semanas'],['monthly','Mensual'],['quarterly','Trimestral'],['biennial','Cada 6 meses'],['yearly','Anual']];
+const cleaningWeeks=[['1','1.ª semana'],['2','2.ª semana'],['3','3.ª semana'],['4','4.ª semana'],['5','Última semana']];
+const cleaningMonths=[['1','Enero'],['2','Febrero'],['3','Marzo'],['4','Abril'],['5','Mayo'],['6','Junio'],['7','Julio'],['8','Agosto'],['9','Septiembre'],['10','Octubre'],['11','Noviembre'],['12','Diciembre']];
+function cleaningDateKey(d){const x=new Date(d);return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`}
+function cleaningParseDate(key){return new Date(`${key}T12:00:00`)}
+function cleaningMonday(d){const x=new Date(d);x.setHours(12,0,0,0);const day=x.getDay();x.setDate(x.getDate()-(day===0?6:day-1));return x}
+function cleaningWeekKey(d){return cleaningDateKey(cleaningMonday(d))}
+function cleaningWeekDates(){const start=cleaningMonday(today);return Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);return d})}
+function cleaningMonthDiff(a,b){return (b.getFullYear()-a.getFullYear())*12+b.getMonth()-a.getMonth()}
+function cleaningNthWeekday(year,monthIndex,weekday,weekOfMonth){
+ const first=new Date(year,monthIndex,1,12),last=new Date(year,monthIndex+1,0,12);
+ if(Number(weekOfMonth)===5){const diff=(last.getDay()-Number(weekday)+7)%7;return new Date(year,monthIndex,last.getDate()-diff,12)}
+ const diff=(Number(weekday)-first.getDay()+7)%7;const day=1+diff+(Number(weekOfMonth)-1)*7;
+ if(day>last.getDate())return null;return new Date(year,monthIndex,day,12)
+}
+function cleaningAnchorDate(item){const raw=item.anchorDate||item.createdAt||todayKey();const d=cleaningParseDate(String(raw).slice(0,10));return Number.isNaN(d.getTime())?new Date(today):d}
+function cleaningDue(item,date){
+ if(!item||typeof item!=='object')return false;
+ const d=date instanceof Date?new Date(date):cleaningParseDate(date);d.setHours(12,0,0,0);
+ let freq=item.frequency||'weekly';
+ // Las antiguas rutinas diarias pasan a formar parte de la lista semanal, una sola vez.
+ if(freq==='daily')freq='weekly';
+ const weekday=Number(item.weekday ?? 1);
+ if(freq==='weekly')return true;
+ const anchor=cleaningAnchorDate(item);
+ if(freq==='biweekly'){
+  const start=cleaningMonday(anchor),current=cleaningMonday(d);
+  const weeks=Math.round((current-start)/(1000*60*60*24*7));
+  return weeks>=0 && weeks%2===0;
+ }
+ if(freq==='yearly' && d.getMonth()!==Number(item.month||anchor.getMonth()+1)-1)return false;
+ if(freq==='monthly' || freq==='quarterly' || freq==='biennial'){
+  const interval=freq==='quarterly'?3:(freq==='biennial'?6:1);
+  const monthDiff=cleaningMonthDiff(anchor,d);
+  if(monthDiff<0 || monthDiff%interval!==0)return false;
+ }
+ if(freq==='yearly' || freq==='biennial' || freq==='monthly' || freq==='quarterly'){
+  const target=cleaningNthWeekday(d.getFullYear(),d.getMonth(),weekday,Number(item.weekOfMonth||1));
+  return !!target&&cleaningDateKey(target)===cleaningDateKey(d);
+ }
+ return false;
+}
+function cleaningDueThisWeek(item,weekStart=cleaningMonday(today)){
+ const freq=item?.frequency||'weekly';
+ if(freq==='weekly'||freq==='daily')return true;
+ if(freq==='biweekly'){
+  const anchor=cleaningMonday(cleaningAnchorDate(item));
+  const weeks=Math.round((weekStart-anchor)/(1000*60*60*24*7));
+  return weeks>=0&&weeks%2===0;
+ }
+ return cleaningWeekDatesFrom(weekStart).some(d=>cleaningDue(item,d));
+}
+function cleaningWeekDatesFrom(start){return Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);return d})}
+function cleaningFrequencyLabel(item){
+ let f=item?.frequency||'weekly';if(f==='daily')f='weekly';
+ return cleaningFrequencies.find(x=>x[0]===f)?.[1]||'Semanal';
+}
+function cleaningScheduleText(item){
+ let f=item?.frequency||'weekly';if(f==='daily')f='weekly';
+ if(f==='weekly')return 'Para hacer cualquier día de la semana';
+ if(f==='biweekly')return 'Una vez cada 2 semanas · cualquier día';
+ const day=cleaningWeekdays.find(x=>x[0]===String(item?.weekday??1))?.[1]||'';
+ const week=cleaningWeeks.find(x=>x[0]===String(item?.weekOfMonth||1))?.[1]||'';
+ if(f==='yearly'){const month=cleaningMonths.find(x=>x[0]===String(item?.month||cleaningAnchorDate(item).getMonth()+1))?.[1]||'';return `${week} de ${month} · ${day.toLowerCase()}`}
+ if(f==='biennial')return `Cada 6 meses · ${week} · ${day.toLowerCase()}`;
+ return `${week} · ${day.toLowerCase()}`;
+}
+function cleaningForm(item=null){
+ const f0=item?.frequency||'weekly';const f=f0==='daily'?'weekly':f0;
+ const weekday=String(item?.weekday??1),week=String(item?.weekOfMonth??1),month=String(item?.month??(cleaningAnchorDate(item||{}).getMonth()+1));
+ return `<div class="form"><label>Qué tengo que hacer<input id="fCleaningName" value="${esc(item?.name||'')}" placeholder="Ej. Limpiar baño"></label><label>Frecuencia<select id="fCleaningFreq" onchange="updateCleaningFormVisibility()">${cleaningFrequencies.map(([v,l])=>`<option value="${v}" ${f===v?'selected':''}>${l}</option>`).join('')}</select></label><div id="cleaningScheduleFields"><div class="form-two"><label class="cleaning-weekday-field">Día de la semana<select id="fCleaningWeekday">${cleaningWeekdays.map(([v,l])=>`<option value="${v}" ${weekday===v?'selected':''}>${l}</option>`).join('')}</select></label><label class="cleaning-week-field">Semana del mes<select id="fCleaningWeek">${cleaningWeeks.map(([v,l])=>`<option value="${v}" ${week===v?'selected':''}>${l}</option>`).join('')}</select></label></div><label class="cleaning-month-field">Mes del año<select id="fCleaningMonth">${cleaningMonths.map(([v,l])=>`<option value="${v}" ${month===v?'selected':''}>${l}</option>`).join('')}</select></label></div><label>Notas<textarea id="fCleaningNotes" placeholder="Opcional">${esc(item?.notes||'')}</textarea></label><button class="primary" onclick="saveCleaning('${item?.id||''}')">${item?'Guardar cambios':'Guardar rutina'}</button>${item?`<button class="danger-button" onclick="deleteCleaning('${item.id}')">Eliminar rutina</button>`:''}</div>`;
+}
+function updateCleaningFormVisibility(){const f=document.querySelector('#fCleaningFreq')?.value;document.querySelector('.cleaning-weekday-field')?.classList.toggle('hidden',f==='weekly'||f==='biweekly');document.querySelector('.cleaning-week-field')?.classList.toggle('hidden',f==='weekly'||f==='biweekly');document.querySelector('.cleaning-month-field')?.classList.toggle('hidden',f!=='yearly');}
+function saveCleaning(id=''){
+ const name=document.querySelector('#fCleaningName')?.value.trim();if(!name)return;
+ let x=id?state.cleaning.find(i=>String(i.id)===String(id)):null;if(!x){x={id:crypto.randomUUID(),createdAt:todayKey()};state.cleaning.push(x)}
+ const f=document.querySelector('#fCleaningFreq').value;x.name=name;x.frequency=f;x.weekday=Number(document.querySelector('#fCleaningWeekday')?.value||1);x.weekOfMonth=Number(document.querySelector('#fCleaningWeek')?.value||1);x.month=Number(document.querySelector('#fCleaningMonth')?.value||1);x.notes=document.querySelector('#fCleaningNotes').value.trim();if(!x.anchorDate)x.anchorDate=todayKey();
+ x.completed=x.completed&&typeof x.completed==='object'?x.completed:{};localCacheFromState();closeModal();render();save();
+}
+function cleaningCompletionKey(item,weekStart=cleaningMonday(today)){
+ const f=item?.frequency||'weekly';
+ if(f==='weekly'||f==='daily'||f==='biweekly')return `week:${cleaningWeekKey(weekStart)}`;
+ const dueDate=cleaningWeekDatesFrom(weekStart).find(d=>cleaningDue(item,d));
+ return dueDate?cleaningDateKey(dueDate):`week:${cleaningWeekKey(weekStart)}`;
+}
+function toggleCleaning(id){
+ const x=state.cleaning.find(i=>String(i.id)===String(id));if(!x)return;
+ x.completed=x.completed&&typeof x.completed==='object'?x.completed:{};
+ const key=cleaningCompletionKey(x);x.completed[key]=!x.completed[key];localCacheFromState();render();save();
+}
+function deleteCleaning(id){if(!confirm('¿Eliminar esta rutina de limpieza?'))return;state.cleaning=state.cleaning.filter(x=>String(x.id)!==String(id));save();closeModal();render()}
+function editCleaning(id){const x=state.cleaning.find(i=>String(i.id)===String(id));if(x)openModal('Editar tarea de limpieza',cleaningForm(x));}
+function cleaningWeekItem(item){
+ const weekStart=cleaningMonday(today),key=cleaningCompletionKey(item,weekStart),done=!!item.completed?.[key];
+ return `<div class="cleaning-week-item ${done?'done':''}"><button class="cleaning-check" onclick="toggleCleaning('${item.id}')" aria-label="Marcar ${esc(item.name)}">${done?'✓':''}</button><div class="cleaning-task-main"><b>${esc(item.name)}</b><small>${esc(cleaningFrequencyLabel(item))}${item.notes?' · '+esc(item.notes):''}</small></div><button class="cleaning-edit" onclick="editCleaning('${item.id}')" aria-label="Editar">⋯</button></div>`;
+}
+function manageCleaning(){document.querySelector('#cleaningManagement')?.scrollIntoView({behavior:'smooth',block:'start'});}
+function cleaning(c){
+ const weekStart=cleaningMonday(today),weekItems=state.cleaning.filter(x=>{let f=x.frequency||'weekly';return f==='weekly'||f==='daily'}),periodic=state.cleaning.filter(x=>{let f=x.frequency||'weekly';return f!=='weekly'&&f!=='daily'&&cleaningDueThisWeek(x,weekStart)});
+ const done=weekItems.filter(x=>x.completed?.[cleaningCompletionKey(x,weekStart)]).length;
+ const counts=cleaningFrequencies.map(([v,l])=>`<span class="cleaning-stat"><b>${state.cleaning.filter(x=>{let f=x.frequency||'weekly';if(f==='daily')f='weekly';return f===v}).length}</b>${l}</span>`).join('');
+ const weekLabel=`${weekStart.toLocaleDateString('es-ES',{day:'numeric',month:'long'})} – ${cleaningWeekDatesFrom(weekStart)[6].toLocaleDateString('es-ES',{day:'numeric',month:'long'})}`;
+ c.innerHTML=`<div class="cleaning-page"><section class="cleaning-hero"><div><span class="eyebrow">Rutinas del hogar</span><h2>Limpieza</h2><p>Una lista semanal: haz cada tarea cuando quieras y márcala al terminar.</p></div><div class="actions"><button class="secondary" onclick="manageCleaning()">Gestionar tareas</button><button class="primary" onclick="openModal('Nueva tarea de limpieza',cleaningForm())">+ Añadir tarea</button></div></section><section class="cleaning-summary"><div><span>Esta semana</span><strong>${done}/${weekItems.length}</strong><small>tareas completadas</small></div><div class="cleaning-week-label"><span>Semana</span><strong>${esc(weekLabel)}</strong><small>No importa qué día la hagas.</small></div></section><section class="cleaning-checklist panel"><div class="panel-heading"><div><h3>Lista de esta semana</h3><span>Marca cada tarea cuando la hayas hecho. Se reinicia al empezar una nueva semana.</span></div></div><div class="cleaning-checklist-list">${weekItems.map(cleaningWeekItem).join('')||'<div class="empty-state"><span>Aún no tienes tareas de limpieza.</span><button class="secondary" onclick="openModal(\'Nueva tarea de limpieza\',cleaningForm())">Añadir la primera</button></div>'}</div></section>${periodic.length?`<section class="cleaning-periodic panel"><div class="panel-heading"><div><h3>También esta semana</h3><span>Tareas que aparecen según su frecuencia.</span></div></div><div class="cleaning-periodic-list">${periodic.map(cleaningWeekItem).join('')}</div></section>`:''}<section id="cleaningManagement" class="cleaning-management"><div class="panel-heading"><div><h3>Todas mis tareas</h3><span>Configúralas una vez y aparecerán en la lista semanal cuando corresponda.</span></div><button class="secondary small" onclick="openModal('Nueva tarea de limpieza',cleaningForm())">+ Tarea</button></div><div class="cleaning-routine-list">${state.cleaning.map(x=>`<div class="cleaning-routine-row"><div><b>${esc(x.name)}</b><span>${esc(cleaningFrequencyLabel(x))} · ${esc(cleaningScheduleText(x))}${x.notes?' · '+esc(x.notes):''}</span></div><button class="secondary small" onclick="editCleaning('${x.id}')">Editar</button></div>`).join('')||'<div class="empty-state"><span>Aún no tienes tareas de limpieza.</span><button class="secondary" onclick="openModal(\'Nueva tarea de limpieza\',cleaningForm())">Añadir la primera</button></div>'}</div></section></div>`;
+}
+
+function calendarEventLane(e,monthEvents){const id=String(e.id);const active=monthEvents.filter(x=>{const s=eventStartDate(x),f=eventEndDate(x);return s&&f&&s<=eventEndDate(e)&&f>=eventStartDate(e)}).sort((a,b)=>String(eventStartDate(a)).localeCompare(String(eventStartDate(b)))||String(a.id).localeCompare(String(b.id)));return Math.max(0,active.findIndex(x=>String(x.id)===id))}
+function calendarBar(e,date,monthEvents){const start=eventStartDate(e),end=eventEndDate(e);const multi=start!==end;const isStart=date===start,isEnd=date===end;const lane=calendarEventLane(e,monthEvents);const col=cats[e.category]||cats.Otros;const label=isStart?esc(e.title):'';return `<span class="calendar-event-bar ${multi?'multi-day':''} ${isStart?'bar-start':''} ${isEnd?'bar-end':''} ${!isStart&&!isEnd?'bar-middle':''}" style="--event-color:${col};--event-lane:${lane}" title="${esc(e.title)}" onclick="event.stopPropagation();editEvent('${e.id}')"><span>${label}</span></span>`}
+
+function calendar(c){
+ const base=calendarMonthDate(); const y=base.getFullYear(),m=base.getMonth();
+ const monthLabel=base.toLocaleDateString('es-ES',{month:'long',year:'numeric'}); const first=(new Date(y,m,1).getDay()+6)%7; const days=new Date(y,m+1,0).getDate();
+ const monthEvents=monthEventsFor(y,m); let grid=['L','M','X','J','V','S','D'].map(x=>`<div class="cal-head">${x}</div>`).join('');
+ for(let i=0;i<first;i++)grid+='<div class="day empty-day"></div>';
+ for(let d=1;d<=days;d++){const date=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;const evs=eventsForDate(date);const bars=evs.slice(0,4).map(e=>calendarBar(e,date,monthEvents)).join('');grid+=`<button class="day calendar-day ${date===todayKey()?'today':''} ${evs.length?'has-events':''}" onclick="openNewEventForDate('${date}')"><b>${d}</b><div class="calendar-event-lanes">${bars}</div></button>`}
+ const monthEventsSorted=monthEvents.slice().sort((a,b)=>String(eventStartDate(a)).localeCompare(String(eventStartDate(b))));
+ const list=monthEventsSorted.length?monthEventsSorted.map(e=>eventRow(e)).join(''):'<div class="empty-state"><span>No hay eventos este mes.</span><button class="secondary" onclick="openModal(\'Nuevo evento\',eventForm())">+ Añadir evento</button></div>';
+ const evcats=Object.entries(cats).map(([n,col])=>`<span class="pill" style="background:${col}22;color:${col}">${n}</span>`).join('');
+ c.innerHTML=`<div class="calendar-page"><div class="calendar-toolbar"><div><h2>${cap(monthLabel)}</h2><span class="muted">Planifica eventos, cumpleaños y recordatorios.</span></div><div class="calendar-actions"><button class="secondary month-arrow" onclick="changeCalendarMonth(-1)" aria-label="Mes anterior">‹</button><button class="secondary" onclick="goCalendarToday()">Hoy</button><button class="secondary month-arrow" onclick="changeCalendarMonth(1)" aria-label="Mes siguiente">›</button><button class="primary" onclick="openModal('Nuevo evento',eventForm())">+ Evento</button></div></div><div class="calendar-main"><section class="calendar-card"><div class="calendar-grid">${grid}</div></section><aside class="calendar-side"><section class="calendar-panel"><div class="row"><div><h3>Eventos de ${base.toLocaleDateString('es-ES',{month:'long'})}</h3><span class="muted">${monthEventsSorted.length} evento${monthEventsSorted.length===1?'':'s'}</span></div></div><div class="list">${list}</div></section><section class="calendar-panel"><h3>Categorías</h3><div class="actions calendar-categories">${evcats}</div></section></aside></div></div>`;
+}
+function calendarMonthDate(){if(!state.calendarMonth)state.calendarMonth=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}`;return new Date(state.calendarMonth+'-01T12:00:00')}
+function changeCalendarMonth(n){const d=calendarMonthDate();d.setMonth(d.getMonth()+n);state.calendarMonth=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;save();render()}
+function goCalendarToday(){state.calendarMonth=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}`;save();render()}
+function eventStartDate(e){return e.startDate||e.date||''}
+function eventEndDate(e){return e.endDate||eventStartDate(e)}
+function eventMatchesDate(e,date){const start=eventStartDate(e);if(!start)return false;const end=eventEndDate(e)||start;const target=new Date(date+'T12:00:00'),base=new Date(start+'T12:00:00'),finish=new Date(end+'T12:00:00');if(!e.recurrence||e.recurrence==='none')return target>=base&&target<=finish;if(target<base)return false;const diff=Math.floor((target-base)/86400000);if(e.recurrence==='daily')return true;if(e.recurrence==='weekly')return diff%7===0;if(e.recurrence==='monthly')return base.getDate()===target.getDate();if(e.recurrence==='yearly')return base.getMonth()===target.getMonth()&&base.getDate()===target.getDate();return false}
+function eventsForDate(date){return state.events.filter(e=>eventMatchesDate(e,date))}
+function monthEventsFor(y,m){const monthStart=`${y}-${String(m+1).padStart(2,'0')}-01`,lastDay=new Date(y,m+1,0).getDate(),monthEnd=`${y}-${String(m+1).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;return state.events.filter(e=>{const s=eventStartDate(e),f=eventEndDate(e);return s&&f<=monthEnd&&f>=monthStart}).map(e=>({...e,displayDate:eventStartDate(e)}))}
+function eventRow(e){const col=cats[e.category]||cats.Otros;const start=eventStartDate(e),end=eventEndDate(e);const sd=new Date(start+'T12:00:00').toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short'});const ed=new Date(end+'T12:00:00').toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short'});const date=start===end?sd:`${sd} → ${ed}`;return `<div class="event-row"><span class="event-color" style="background:${col}"></span><div class="event-main"><b>${esc(e.title)}</b><span>${date}${e.startTime?' · '+esc(e.startTime):''}${e.endTime?'–'+esc(e.endTime):''} · ${esc(e.category||'Otros')}</span>${e.location?`<small>📍 ${esc(e.location)}</small>`:''}</div><button class="secondary small" onclick="editEvent('${e.id}')">Editar</button></div>`}
+function openNewEventForDate(date){openModal('Nuevo evento',eventForm({date,startDate:date,endDate:date}))}
+function eventForm(e=null){const linked=state.tasks.filter(t=>!t.done).map(t=>`<option value="${t.id}" ${e?.linkedTask===t.id?'selected':''}>${esc(t.title)}</option>`).join('');const startDate=e?.startDate||e?.date||todayKey(),endDate=e?.endDate||e?.date||startDate;return `<div class="form"><label>Título<input id="fTitle" value="${esc(e?.title||'')}" placeholder="Ej. Cita, cumpleaños, viaje…"></label><div class="form-two"><label>Fecha de inicio<input id="fDate" type="date" value="${startDate}"></label><label>Fecha de fin<input id="fEndDate" type="date" value="${endDate}"></label></div><div class="form-two"><label>Categoría<select id="fCat">${Object.keys(cats).map(x=>`<option ${x===(e?.category||'Otros')?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Hora inicio<input id="fStart" type="time" value="${e?.startTime||''}"></label></div><div class="form-two"><label>Hora fin<input id="fEnd" type="time" value="${e?.endTime||''}"></label><span></span></div><label>Ubicación<input id="fLocation" value="${esc(e?.location||'')}" placeholder="Opcional"></label><label>Repetir<select id="fEventRepeat"><option value="none" ${!e?.recurrence||e.recurrence==='none'?'selected':''}>No repetir</option><option value="daily" ${e?.recurrence==='daily'?'selected':''}>Cada día</option><option value="weekly" ${e?.recurrence==='weekly'?'selected':''}>Cada semana</option><option value="monthly" ${e?.recurrence==='monthly'?'selected':''}>Cada mes</option><option value="yearly" ${e?.recurrence==='yearly'?'selected':''}>Cada año</option></select></label><label class="checkline"><input id="fReminder" type="checkbox" ${e?.reminder?'checked':''}> Recordarme</label><label>Antelación del recordatorio<select id="fReminderLead"><option value="0" ${Number(e?.reminderLead||0)===0?'selected':''}>A la hora del evento</option><option value="15" ${Number(e?.reminderLead||0)===15?'selected':''}>15 minutos antes</option><option value="60" ${Number(e?.reminderLead||0)===60?'selected':''}>1 hora antes</option><option value="1440" ${Number(e?.reminderLead||0)===1440?'selected':''}>1 día antes</option></select></label><label>Vincular con tarea<select id="fLinked"><option value="">Sin tarea vinculada</option>${linked}</select></label><label>Notas<textarea id="fNotes" placeholder="Opcional">${esc(e?.notes||'')}</textarea></label><button class="primary" onclick="saveEvent('${e?.id||''}')">${e?'Guardar cambios':'Guardar evento'}</button>${e?`<button class="danger-button" onclick="deleteEvent('${e.id}')">Eliminar evento</button>`:''}</div>`}
+function saveEvent(id=''){const title=document.querySelector('#fTitle')?.value.trim();const date=document.querySelector('#fDate')?.value;const endDate=document.querySelector('#fEndDate')?.value||date;if(!title||!date||!endDate)return;if(endDate<date){alert('La fecha de fin no puede ser anterior a la fecha de inicio.');return}let e=id&&state.events.find(x=>x.id===id);if(!e){e={id:crypto.randomUUID()};state.events.push(e)}const recurrence=document.querySelector('#fEventRepeat').value;Object.assign(e,{title,date,startDate:date,endDate,category:document.querySelector('#fCat').value,startTime:document.querySelector('#fStart').value,endTime:document.querySelector('#fEnd').value,location:document.querySelector('#fLocation').value.trim(),recurrence,reminder:document.querySelector('#fReminder').checked,reminderLead:Number(document.querySelector('#fReminderLead').value)||0,linkedTask:document.querySelector('#fLinked').value,notes:document.querySelector('#fNotes').value.trim()});save();state.calendarMonth=date.slice(0,7);closeModal();render()}
+function editEvent(id){const e=state.events.find(x=>x.id===id);if(e)openModal('Editar evento',eventForm(e))}
+function deleteEvent(id){if(!confirm('¿Eliminar este evento?'))return;state.events=state.events.filter(e=>e.id!==id);save();closeModal();render()}
+
+function settings(c){
+ const s=state.settings||{};s.notifications=s.notifications||{};s.food=s.food||{};
+ c.innerHTML=`<div class="settings-page"><div class="settings-intro"><span class="eyebrow">Configuración</span><h2>Tu aplicación, a tu manera</h2><p>Los ajustes se guardan en este dispositivo y se aplican al resto de la aplicación.</p></div><div class="settings-grid">
+ <section class="card settings-card"><div class="setting-head"><div><h3>Perfil y formato</h3><span class="muted">Datos básicos de uso.</span></div><button class="secondary small" onclick="openModal('Perfil y formato',profileSettingsForm())">Editar</button></div><div class="settings-list"><div class="setting-row"><div><b>${esc(s.name||'Sin nombre')}</b><span>Nombre</span></div></div><div class="setting-row"><div><b>${s.currency==='EUR'?'Euro (€)':s.currency}</b><span>Moneda</span></div><span class="pill">${esc(s.dateFormat||'DD/MM/YYYY')}</span></div><div class="setting-row"><div><b>${s.weekStartsMonday!==false?'Lunes':'Domingo'}</b><span>Primer día de la semana</span></div></div></div></section>
+ <section class="card settings-card"><div class="setting-head"><div><h3>Apariencia</h3><span class="muted">Cómo quieres ver Brain Dump.</span></div><button class="secondary small" onclick="openModal('Apariencia',appearanceSettingsForm())">Editar</button></div><div class="settings-list"><div class="setting-row"><div><b>${s.theme==='dark'?'Oscuro':s.theme==='auto'?'Automático':'Claro'}</b><span>Modo de apariencia</span></div><span class="color-dot" style="background:var(--sage)"></span></div></div></section>
+ <section class="card settings-card"><div class="setting-head"><div><h3>Notificaciones</h3><span class="muted">Preferencias de avisos.</span></div><button class="secondary small" onclick="openModal('Notificaciones',notificationSettingsForm())">Editar</button></div><div class="settings-list">${[['tasks','Tareas'],['calendar','Calendario'],['expenses','Gastos y presupuesto'],['food','Comidas y preparación']].map(([k,l])=>`<div class="setting-row"><div><b>${l}</b><span>${s.notifications[k]!==false?'Activadas':'Desactivadas'}</span></div></div>`).join('')}</div><p class="muted">Los avisos de tareas/calendario podrán aprovechar notificaciones del navegador cuando estén disponibles.</p></section>
+ <section class="card settings-card"><div class="setting-head"><div><h3>Comidas</h3><span class="muted">Preferencias del menú semanal.</span></div><button class="secondary small" onclick="openModal('Preferencias de comidas',foodSettingsForm())">Editar</button></div><div class="settings-list"><div class="setting-row"><div><b>${s.food.useInventory!==false?'Sí':'No'}</b><span>Aprovechar inventario</span></div><span class="pill">${s.food.twoTuppers!==false?'2 tuppers':'Sin objetivo'}</span></div><div class="setting-row"><div><b>${s.food.quickMeals!==false?'Sí':'No'}</b><span>Priorizar comidas rápidas</span></div><span class="pill">${s.food.vegetables!==false?'Más verduras':''}</span></div></div></section>
+ <section class="card settings-card"><div class="setting-head"><div><h3>Gastos</h3><span class="muted">Cuentas, categorías, presupuestos y recurrentes.</span></div><button class="secondary small" onclick="go('expenses')">Gestionar</button></div><div class="settings-list"><div class="setting-row"><div><b>${state.accounts.length}</b><span>Cuentas</span></div><span>${state.budgets.length} presupuestos</span></div><div class="setting-row"><div><b>${state.transactions.filter(t=>t.recurring&&!t.recurringFrom).length}</b><span>Movimientos recurrentes</span></div></div></div></section>
+ <section class="card settings-card"><div class="setting-head"><div><h3>Aplicación</h3><span class="muted">Instala Brain Dump como una app en este dispositivo.</span></div></div><div class="data-actions"><button id="installAppBtn" class="secondary" onclick="installApp()">Instalar Brain Dump</button></div><p id="installHelp" class="muted">En Android/Chrome puedes instalarla desde aquí cuando el navegador lo permita. En iPhone: Compartir → Añadir a pantalla de inicio.</p></section><section class="card settings-card"><div class="setting-head"><div><h3>Datos</h3><span class="muted">Haz una copia antes de hacer cambios importantes.</span></div></div><div class="data-actions"><button class="secondary" onclick="exportData()">Exportar mis datos</button><button class="secondary" onclick="document.querySelector('#importDataInput').click()">Importar copia</button><input id="importDataInput" type="file" accept="application/json" hidden onchange="importData(this)"><button class="danger-button" onclick="clearAllInventory()">Borrar todo el inventario</button></div><p class="muted">La copia incluye también inventario, preparaciones, menú y configuración. El botón rojo borra solo Congelador, Despensa y Frescos.</p></section>
+ <section class="card settings-card"><div class="setting-head"><div><h3>Aplicación</h3><span class="muted">PWA y almacenamiento local.</span></div><span class="status-dot">● Local</span></div><p class="muted">Los datos se mantienen en este navegador. Puedes instalar la PWA desde el navegador cuando esté disponible.</p></section>
+ </div><section class="card settings-card"><div class="setting-head"><div><h3>Cuenta y sincronización</h3><span class="muted">Sesión actual</span></div><button class="secondary small" onclick="logout()">Cerrar sesión</button></div><div class="settings-list"><div class="setting-row"><div><b>${esc(currentUser?.email||'Sin sesión')}</b><span>Cuenta de Brain Dump</span></div><span class="pill">☁️ Conectada</span></div></div></section></div>`;
+}
+function profileSettingsForm(){const s=state.settings;return `<div class="form"><label>Nombre<input id="fSetName" value="${esc(s.name||'')}" placeholder="Tu nombre"></label><label>Moneda<select id="fSetCurrency"><option value="EUR" selected>Euro (€)</option><option value="GBP" ${s.currency==='GBP'?'selected':''}>Libra (£)</option><option value="USD" ${s.currency==='USD'?'selected':''}>Dólar ($)</option></select></label><label>Formato de fecha<select id="fSetDate"><option ${s.dateFormat==='DD/MM/YYYY'?'selected':''}>DD/MM/YYYY</option><option ${s.dateFormat==='MM/DD/YYYY'?'selected':''}>MM/DD/YYYY</option></select></label><label class="checkline"><input id="fSetMonday" type="checkbox" ${s.weekStartsMonday!==false?'checked':''}> La semana empieza en lunes</label><button class="primary" onclick="saveProfileSettings()">Guardar</button></div>`}
+function saveProfileSettings(){state.settings.name=document.querySelector('#fSetName').value.trim();state.settings.currency=document.querySelector('#fSetCurrency').value;state.settings.dateFormat=document.querySelector('#fSetDate').value;state.settings.weekStartsMonday=document.querySelector('#fSetMonday').checked;save();closeModal();applyAppearance();render()}
+function appearanceSettingsForm(){const s=state.settings;return `<div class="form"><label>Apariencia<select id="fSetTheme"><option value="light" ${s.theme==='light'?'selected':''}>Claro</option><option value="dark" ${s.theme==='dark'?'selected':''}>Oscuro</option><option value="auto" ${s.theme==='auto'?'selected':''}>Automático</option></select></label><label>Color principal<select id="fSetAccent"><option value="sage" ${s.accent==='sage'?'selected':''}>Verde salvia</option><option value="blue" ${s.accent==='blue'?'selected':''}>Azul lavanda</option><option value="water" ${s.accent==='water'?'selected':''}>Verde agua</option></select></label><button class="primary" onclick="saveAppearanceSettings()">Guardar</button></div>`}
+function saveAppearanceSettings(){state.settings.theme=document.querySelector('#fSetTheme').value;state.settings.accent=document.querySelector('#fSetAccent').value;save();closeModal();applyAppearance();render()}
+function applyAppearance(){const s=state.settings||{};let theme=s.theme||'light';if(theme==='auto')theme=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';document.documentElement.dataset.theme=theme;document.documentElement.dataset.accent=s.accent||'sage'}
+function notificationSettingsForm(){const n=state.settings.notifications||{};const perm='Notification' in window?Notification.permission:'unsupported';return `<div class="form"><p class="muted">Los avisos se comprueban automáticamente cuando la aplicación está abierta. Para recibirlos, primero activa los permisos del navegador.</p><div class="setting-row notification-permission"><div><b>Permiso del navegador</b><span>${perm==='granted'?'Activado':perm==='denied'?'Bloqueado':perm==='unsupported'?'No disponible':'Pendiente'}</span></div><button class="secondary small" onclick="requestNotificationPermission();closeModal()">Activar</button></div>${[['tasks','Tareas'],['calendar','Calendario'],['expenses','Gastos y presupuesto'],['food','Comidas y preparación']].map(([k,l])=>`<label class="checkline"><input id="notif-${k}" type="checkbox" ${n[k]!==false?'checked':''}> ${l}</label>`).join('')}<button class="primary" onclick="saveNotificationSettings()">Guardar</button></div>`}
+function saveNotificationSettings(){state.settings.notifications=state.settings.notifications||{};['tasks','calendar','expenses','food'].forEach(k=>state.settings.notifications[k]=document.querySelector('#notif-'+k).checked);save();closeModal();render()}
+function foodSettingsForm(){const f=state.settings.food||{};return `<div class="form"><label>¿Cuántos días cocinas?<select id="foodCookDays"><option value="3" ${Number(f.cookingDays||4)===3?'selected':''}>3 días</option><option value="4" ${Number(f.cookingDays||4)===4?'selected':''}>4 días</option></select></label><label>Tiempo máximo entre semana<select id="foodTime"><option value="30" ${Number(f.weekdayMinutes||30)===30?'selected':''}>30 minutos</option><option value="45" ${Number(f.weekdayMinutes||30)===45?'selected':''}>45 minutos</option><option value="60" ${Number(f.weekdayMinutes||30)===60?'selected':''}>60 minutos</option></select></label><label class="checkline"><input id="foodInv" type="checkbox" ${f.useInventory!==false?'checked':''}> Aprovechar lo que tengo</label><label class="checkline"><input id="foodQuick" type="checkbox" ${f.quickMeals!==false?'checked':''}> Comidas rápidas</label><label class="checkline"><input id="foodVeg" type="checkbox" ${f.vegetables!==false?'checked':''}> Más verduras</label><label class="checkline"><input id="foodTup" type="checkbox" ${f.twoTuppers!==false?'checked':''}> Planificar 2 tuppers</label><label class="checkline"><input id="foodFriday" type="checkbox" ${f.fridayFun!==false?'checked':''}> Viernes: comida divertida</label><label class="checkline"><input id="foodSnack" type="checkbox" ${f.snacks!==false?'checked':''}> Incluir meriendas</label><label class="checkline"><input id="foodSweet" type="checkbox" ${f.sweet?'checked':''}> Incluir dulce</label><label class="checkline"><input id="foodBread" type="checkbox" ${f.bread?'checked':''}> Hacer pan</label><label>Desayuno entre semana<input id="foodBreakfast" value="${esc(f.breakfast||'Café con leche + tostada con aceite y tomate') }"></label><button class="primary" onclick="saveFoodSettings()">Guardar</button></div>`}
+function saveFoodSettings(){state.settings.food={cookingDays:Number(document.querySelector('#foodCookDays').value),weekdayMinutes:Number(document.querySelector('#foodTime').value),useInventory:document.querySelector('#foodInv').checked,quickMeals:document.querySelector('#foodQuick').checked,vegetables:document.querySelector('#foodVeg').checked,twoTuppers:document.querySelector('#foodTup').checked,fridayFun:document.querySelector('#foodFriday').checked,snacks:document.querySelector('#foodSnack').checked,sweet:document.querySelector('#foodSweet').checked,bread:document.querySelector('#foodBread').checked,breakfast:document.querySelector('#foodBreakfast').value.trim()};save();closeModal();render()}
+function accountsSettingsForm(){return `<div class="form">${state.accounts.map(a=>`<div class="account-setting-block"><div class="form-two"><label>Nombre<input id="accName-${a.id}" value="${esc(a.name)}"></label><label>Saldo inicial<input id="accBalance-${a.id}" type="number" step="0.01" value="${a.startingBalance||0}"></label></div><label class="checkline"><input id="accActive-${a.id}" type="checkbox" ${a.active!==false?'checked':''}> Cuenta activa</label></div>`).join('')}<button class="primary" onclick="saveAccountsSettings()">Guardar cuentas</button></div>`}
+function saveAccountsSettings(){
+ state.accounts.forEach(a=>{const n=document.querySelector('#accName-'+a.id),b=document.querySelector('#accBalance-'+a.id),active=document.querySelector('#accActive-'+a.id);if(n&&n.value.trim())a.name=n.value.trim();if(b)a.startingBalance=Number(b.value)||0;if(active)a.active=active.checked});
+ save();closeModal();render();
+}
+function categoriesSettingsForm(){return `<div class="form"><p class="muted">Puedes añadir categorías nuevas. Las categorías que ya tienen movimientos se conservan para no romper tu histórico.</p><div class="category-settings-list">${Object.entries(expenseCategories).map(([g,a])=>`<div class="category-group-setting"><div class="setting-group-title"><b>${esc(g)}</b><span>${a.length}</span></div>${a.map((x,i)=>`<div class="category-edit-row"><input id="cat-${encodeURIComponent(g)}-${i}" value="${esc(x)}"><button type="button" class="icon-button" title="Eliminar" onclick="removeCategory('${esc(g)}','${esc(x)}')">×</button></div>`).join('')}</div>`).join('')}<div class="form-two"><label>Grupo<select id="newCatGroup">${Object.keys(expenseCategories).map(g=>`<option>${esc(g)}</option>`).join('')}</select></label><label>Nueva categoría<input id="newCatName" placeholder="Ej. Hogar"></label></div><button class="secondary" onclick="addCategory()">+ Añadir categoría</button><button class="primary" onclick="saveCategoriesSettings()">Guardar categorías</button></div>`}
+function addCategory(){const g=document.querySelector('#newCatGroup')?.value,n=document.querySelector('#newCatName')?.value.trim();if(!g||!n)return;if(!expenseCategories[g])expenseCategories[g]=[];if(!expenseCategories[g].includes(n))expenseCategories[g].push(n);saveCategories();openModal('Gestionar categorías',categoriesSettingsForm())}
+function removeCategory(group,name){const used=state.transactions.some(t=>t.category===name);if(used){alert('Esta categoría tiene movimientos y no se puede eliminar del histórico. Puedes dejar de usarla en adelante.');return}expenseCategories[group]=(expenseCategories[group]||[]).filter(x=>x!==name);saveCategories();openModal('Gestionar categorías',categoriesSettingsForm())}
+function saveCategoriesSettings(){
+ Object.entries(expenseCategories).forEach(([g,a])=>a.forEach((old,i)=>{const el=document.querySelector('#cat-'+encodeURIComponent(g)+'-'+i);if(el&&el.value.trim()&&el.value.trim()!==old){const nn=el.value.trim();if(!a.includes(nn)||nn===old){const idx=expenseCategories[g].indexOf(old);if(idx>=0)expenseCategories[g][idx]=nn}}}));
+ saveCategories();closeModal();render();
+}
+function saveCategories(){localStorage.setItem(KEY+'expenseCategories',JSON.stringify(expenseCategories));queueCloudSave()}
+function exportData(){
+ const data={version:19,exportedAt:new Date().toISOString(),tasks:state.tasks,expenses:state.expenses,transactions:state.transactions,accounts:state.accounts,budgets:state.budgets,events:state.events,habits:state.habits,cleaning:state.cleaning,sportClasses:state.sportClasses,sportSessions:state.sportSessions,sportExercises:state.sportExercises,sportRoutines:state.sportRoutines,sportSteps:state.sportSteps,sportStepGoal:state.sportStepGoal,sportMonth:state.sportMonth,recipes:state.recipes,inventory:state.inventory,preparations:state.preparations,shoppingChecks:state.shoppingChecks,prepDone:state.prepDone,menu:state.menu,menuHistory:state.menuHistory||[],calendarMonth:state.calendarMonth,settings:state.settings,expenseCategories};
+ const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`brain-dump-copia-${todayKey()}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ const stamp=new Date().toLocaleString('es-ES');localStorage.setItem(KEY+'lastBackup',stamp);
+ const el=document.querySelector('#backupStatus');if(el)el.textContent='Última copia manual: '+stamp;
+}
+
+async function importData(input){const file=input.files?.[0];if(!file)return;try{const data=JSON.parse(await file.text());if(!data||typeof data!=='object'||!Array.isArray(data.transactions)||!Array.isArray(data.accounts))throw new Error('Formato no válido');if(!confirm('Esto sustituirá los datos actuales por los de la copia. ¿Continuar?')){input.value='';return}['tasks','expenses','transactions','accounts','budgets','events','habits','cleaning','sportClasses','sportSessions','sportExercises','sportRoutines','sportSteps','recipes','inventory','preparations','shoppingChecks','prepDone','menuHistory'].forEach(k=>{if(Array.isArray(data[k]))state[k]=data[k]});if(data.menu)state.menu=data.menu;if(data.calendarMonth)state.calendarMonth=data.calendarMonth;if(data.sportMonth)state.sportMonth=data.sportMonth;if(data.settings&&typeof data.settings==='object')state.settings=data.settings;if(data.expenseCategories&&typeof data.expenseCategories==='object')expenseCategories=data.expenseCategories;state.cleaning=normalizeCleaningArray(state.cleaning);save();saveCategories();input.value='';render();alert('Copia restaurada correctamente.')}catch(e){input.value='';alert('No se ha podido importar la copia. Comprueba que sea un archivo de Brain Dump.')}}
+
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;updateInstallButton()});
+window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;updateInstallButton(true)});
+function updateInstallButton(installed=false){const b=document.querySelector('#installAppBtn'),h=document.querySelector('#installHelp');if(!b)return;if(installed||window.matchMedia('(display-mode: standalone)').matches){b.textContent='Aplicación instalada';b.disabled=true;if(h)h.textContent='Brain Dump ya está instalada en este dispositivo.';return}if(deferredInstallPrompt){b.disabled=false;b.textContent='Instalar Brain Dump';if(h)h.textContent='Instalación con un toque desde este navegador. ';}else{b.disabled=false;b.textContent='Cómo instalar';if(h)h.textContent='En Android/Chrome: menú ⋮ → Añadir a pantalla de inicio. En iPhone: Compartir → Añadir a pantalla de inicio.';}}
+async function installApp(){if(window.matchMedia('(display-mode: standalone)').matches){updateInstallButton(true);return}if(!deferredInstallPrompt){updateInstallButton();return}deferredInstallPrompt.prompt();const choice=await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;updateInstallButton(choice.outcome==='accepted')}
+initAuth();
+updateInstallButton();
+
+// Utilidades y controles globales (restaurados y centralizados)
+function changeExpenseMonth(n){let d=new Date((state.expenseMonth||monthKey())+'-01T12:00');d.setMonth(d.getMonth()+n);state.expenseMonth=monthKey(d);render()}
+function changeExpenseAccountFilter(id){state.expenseAccountFilter=id||'all';render()}
+function bindTaskFormEvents(){const repeat=document.querySelector('#fTaskRepeat');const label=document.querySelector('#customRepeatLabel');if(repeat&&label)repeat.addEventListener('change',()=>label.classList.toggle('hidden',repeat.value!=='custom'))}
+function openModal(t,b){document.querySelector('#modalTitle').textContent=t;document.querySelector('#modalBody').innerHTML=b;document.querySelector('#modal').classList.remove('hidden');bindTaskFormEvents();bindSportSessionDraftAutosave()}
+function closeModal(){const sportForm=document.querySelector('#ssForm');sportForm?._sportDraftObserver?.disconnect();document.querySelector('#modal').classList.add('hidden')}
+function sameMonth(s){if(!s)return false;const d=new Date(String(s).length<=10?s+'T12:00:00':s);return d.getMonth()===today.getMonth()&&d.getFullYear()===today.getFullYear()}
+function cap(s=''){return s?s[0].toUpperCase()+s.slice(1):s}
+function esc(s=''){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+
+function closeMobileMenu(){document.querySelector('.sidebar')?.classList.remove('open');document.querySelector('.menu-backdrop')?.classList.remove('show');document.body.classList.remove('menu-open')}
+function toggleMobileMenu(){const sidebar=document.querySelector('.sidebar');const backdrop=document.querySelector('.menu-backdrop');if(!sidebar)return;const open=!sidebar.classList.contains('open');sidebar.classList.toggle('open',open);backdrop?.classList.toggle('show',open);document.body.classList.toggle('menu-open',open)}
+const menuBtn=document.querySelector('#menuBtn');
+if(menuBtn)menuBtn.addEventListener('click',toggleMobileMenu);
+document.querySelector('.menu-backdrop')?.addEventListener('click',closeMobileMenu);
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();go(b.dataset.view);closeMobileMenu();}));
+// Fallback delegado para la navegación: garantiza que las vistas añadidas dinámicamente
+// (incluida Limpieza) siempre respondan al clic aunque un listener individual no se haya enlazado.
+document.addEventListener('click',e=>{const b=e.target.closest?.('[data-view]');if(!b)return;if(b.closest('#nav')||b.closest('.bottom-nav')){e.preventDefault();e.stopPropagation();go(b.dataset.view);closeMobileMenu();}},true);
+
+document.querySelector('#closeModal').addEventListener('click',closeModal);
+document.querySelector('#quickAdd').addEventListener('click',()=>{
+ if(state.view==='tasks')openModal('Nueva tarea',taskForm());
+ else if(state.view==='expenses')openModal('Nuevo gasto',expenseForm());
+ else if(state.view==='calendar')openModal('Nuevo evento',eventForm());
+ else if(state.view==='habits')openModal('Nuevo hábito',habitForm());
+ else if(state.view==='cleaning')openModal('Nueva rutina de limpieza',cleaningForm());
+ else if(state.view==='food')openModal('Añadir a Comidas',foodQuickForm());
+ else openModal('Añadir',`<div class="actions"><button class="primary" onclick="closeModal();openModal('Nueva tarea',taskForm())">Nueva tarea</button><button class="secondary" onclick="closeModal();openModal('Nuevo gasto',expenseForm())">Nuevo gasto</button><button class="secondary" onclick="closeModal();openModal('Nuevo evento',eventForm())">Nuevo evento</button><button class="secondary" onclick="closeModal();openModal('Nuevo hábito',habitForm())">Nuevo hábito</button><button class="secondary" onclick="closeModal();openModal('Nueva rutina de limpieza',cleaningForm())">Limpieza</button></div>`)
+});
